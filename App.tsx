@@ -102,9 +102,7 @@ const App: React.FC = () => {
   useEffect(() => {
     const w = window as any;
     const tgUserId =
-      w?.Telegram?.WebApp?.initDataUnsafe?.user?.id ??
-      w?.Telegram?.WebApp?.initDataUnsafe?.user?.id ??
-      null;
+      w?.Telegram?.WebApp?.initDataUnsafe?.user?.id ?? null;
 
     if (tgUserId) {
       setUserId(String(tgUserId));
