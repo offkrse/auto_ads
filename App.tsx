@@ -130,7 +130,9 @@ const App: React.FC = () => {
         // настройки
         try {
           const res = await fetch(
-            `api/auto_ads/settings/get?user_id=${encodeURIComponent(userId)}`
+            `/api/auto_ads/settings/get?user_id=${encodeURIComponent(
+              userId
+            )}`
           );
           if (res.ok) {
             const data = await res.json();
@@ -146,7 +148,9 @@ const App: React.FC = () => {
         // креативы
         try {
           const res = await fetch(
-            `api/auto_ads/creatives/get?user_id=${encodeURIComponent(userId)}`
+            `/api/auto_ads/creatives/get?user_id=${encodeURIComponent(
+              userId
+            )}`
           );
           if (res.ok) {
             const data = await res.json();
@@ -159,7 +163,9 @@ const App: React.FC = () => {
         // пресеты
         try {
           const res = await fetch(
-            `api/auto_ads/preset/list?user_id=${encodeURIComponent(userId)}`
+            `/api/auto_ads/preset/list?user_id=${encodeURIComponent(
+              userId
+            )}`
           );
           if (res.ok) {
             const data = await res.json();
@@ -184,7 +190,7 @@ const App: React.FC = () => {
   const saveSettings = async (newTheme: Theme) => {
     if (!userId) return;
     try {
-      await fetch("api/auto_ads/settings/save", {
+      await fetch("/api/auto_ads/settings/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -259,7 +265,7 @@ const App: React.FC = () => {
     if (!userId || !currentPreset) return;
 
     try {
-      const res = await fetch("api/auto_ads/preset/save", {
+      const res = await fetch("/api/auto_ads/preset/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -315,7 +321,7 @@ const App: React.FC = () => {
     if (!confirm("Удалить этот пресет?")) return;
 
     try {
-      const url = `api/auto_ads/preset/delete?user_id=${encodeURIComponent(
+      const url = `/api/auto_ads/preset/delete?user_id=${encodeURIComponent(
         userId
       )}&preset_id=${encodeURIComponent(preset.backendId)}`;
       const res = await fetch(url, { method: "DELETE" });
@@ -345,7 +351,7 @@ const App: React.FC = () => {
   const saveCreativeSetsToServer = async () => {
     if (!userId) return;
     try {
-      const res = await fetch("api/auto_ads/creatives/save", {
+      const res = await fetch("/api/auto_ads/creatives/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -419,27 +425,32 @@ const App: React.FC = () => {
 
   return (
     <div
-      className={`min-h-screen flex flex-col bg-slate-50 text-slate-900 transition-colors duration-300 ${
-        theme === "dark" ? "dark bg-slate-900 text-slate-100" : ""
+      className={`min-h-screen flex flex-col relative transition-colors duration-300 ${
+        theme === "dark"
+          ? "dark bg-slate-950 text-slate-100"
+          : "bg-slate-100 text-slate-900"
       }`}
     >
+      {/* Градиентный фон под стекло */}
+      <div className="pointer-events-none fixed inset-0 -z-10 bg-gradient-to-br from-slate-100 via-slate-200 to-slate-300 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950" />
+
       {/* HEADER */}
-      <header className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md">
+      <header className="flex items-center justify-between px-6 py-4 border-b border-white/20 dark:border-slate-800/60 bg-white/10 dark:bg-slate-900/40 backdrop-blur-xl shadow-lg">
         <div className="flex items-center gap-4">
           {/* Переключатель темы */}
           <button
             onClick={toggleTheme}
-            className="w-10 h-10 rounded-full border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-500 dark:text-slate-300 hover:shadow-md transition-shadow"
+            className="w-10 h-10 rounded-full border border-white/40 dark:border-slate-600 flex items-center justify-center text-slate-600 dark:text-slate-200 bg-white/20 dark:bg-slate-900/40 hover:bg-white/40 hover:shadow-xl transition-all"
           >
             {theme === "light" ? "🌞" : "🌙"}
           </button>
 
-          <span className="text-xl font-semibold tracking-tight">
+          <span className="text-xl font-semibold tracking-tight drop-shadow-sm">
             Auto ADS
           </span>
         </div>
 
-        <div className="text-xs text-slate-400">
+        <div className="text-xs text-slate-600 dark:text-slate-300 bg-white/10 dark:bg-slate-900/50 border border-white/30 dark:border-slate-700 rounded-full px-3 py-1 backdrop-blur-md">
           userId: <span className="font-mono">{userId}</span>
         </div>
       </header>
@@ -447,7 +458,7 @@ const App: React.FC = () => {
       {/* BODY */}
       <div className="flex flex-1 overflow-hidden">
         {/* SIDEBAR */}
-        <aside className="w-64 border-r border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-950/80 px-4 py-6 space-y-3">
+        <aside className="w-64 px-4 py-6 space-y-3 border-r border-white/20 dark:border-slate-800/70 bg-white/10 dark:bg-slate-900/40 backdrop-blur-xl shadow-xl">
           <SidebarTab
             active={mainTab === "campaigns"}
             label="Создание компаний"
@@ -537,13 +548,18 @@ const SidebarTab: React.FC<{
 }> = ({ label, active, onClick }) => (
   <button
     onClick={onClick}
-    className={`w-full text-left px-3 py-2 rounded-xl text-sm font-medium transition-all ${
-      active
-        ? "bg-sky-500 text-white shadow-md"
-        : "text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
-    }`}
+    className={`w-full text-left px-3 py-2 rounded-xl text-sm font-medium transition-all
+      flex items-center justify-between
+      ${
+        active
+          ? "bg-sky-500/90 text-white shadow-xl border border-sky-400"
+          : "text-slate-800 dark:text-slate-100 bg-white/5 dark:bg-slate-900/30 border border-white/10 dark:border-slate-800 hover:bg-white/20 dark:hover:bg-slate-800 hover:shadow-md"
+      }`}
   >
-    {label}
+    <span>{label}</span>
+    {active && (
+      <span className="w-2 h-2 rounded-full bg-white/90 shadow-sm" />
+    )}
   </button>
 );
 
@@ -553,9 +569,9 @@ const BackRow: React.FC<{ label?: string; onClick: () => void }> = ({
 }) => (
   <button
     onClick={onClick}
-    className="inline-flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 dark:hover:text-slate-100 mb-4"
+    className="inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-50 mb-4 transition-colors"
   >
-    <span className="w-7 h-7 rounded-full border border-slate-300 dark:border-slate-600 flex items-center justify-center text-xs">
+    <span className="w-7 h-7 rounded-full border border-white/40 dark:border-slate-700 bg-white/40 dark:bg-slate-900/40 flex items-center justify-center text-xs backdrop-blur">
       ←
     </span>
     <span>{label}</span>
@@ -571,16 +587,21 @@ const CampaignsListView: React.FC<{
   onDeletePreset: (p: Preset) => void;
 }> = ({ onCreatePreset, presets, onOpenPreset, onDeletePreset }) => {
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className="max-w-4xl mx-auto space-y-6">
       <BackRow label="Назад" onClick={() => window.history.back()} />
 
       <div className="flex items-center justify-between mb-2">
-        <h1 className="text-2xl font-semibold">
-          Создание пресетов компаний
-        </h1>
+        <div>
+          <h1 className="text-2xl font-semibold drop-shadow-sm">
+            Создание пресетов компаний
+          </h1>
+          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+            Компания → Группы → Объявления
+          </p>
+        </div>
         <button
           onClick={onCreatePreset}
-          className="px-4 py-2 rounded-xl bg-sky-500 text-white text-sm font-medium shadow hover:bg-sky-600 transition-colors"
+          className="px-4 py-2 rounded-xl bg-sky-500/90 text-white text-sm font-medium shadow-lg hover:bg-sky-600 transition-colors backdrop-blur"
         >
           + Новый пресет
         </button>
@@ -590,12 +611,14 @@ const CampaignsListView: React.FC<{
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <button
           onClick={onCreatePreset}
-          className="flex flex-col items-center justify-center border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-2xl py-10 hover:border-sky-400 hover:bg-sky-50/40 dark:hover:bg-slate-800/60 transition-all"
+          className="flex flex-col items-center justify-center border border-dashed border-white/40 dark:border-slate-700/60 rounded-2xl py-10 bg-white/10 dark:bg-slate-900/30 hover:border-sky-400/80 hover:bg-white/20 dark:hover:bg-slate-900/50 transition-all backdrop-blur-xl shadow-lg"
         >
-          <div className="w-12 h-12 rounded-full border border-sky-400 flex items-center justify-center text-sky-500 text-2xl mb-3 bg-white dark:bg-slate-900 shadow-sm">
+          <div className="w-12 h-12 rounded-full border border-sky-400 bg-sky-500/10 flex items-center justify-center text-sky-500 text-2xl mb-3 shadow-sm">
             +
           </div>
-          <span className="font-medium">Создать пресет</span>
+          <span className="font-medium text-slate-800 dark:text-slate-100">
+            Создать пресет
+          </span>
           <span className="text-xs text-slate-500 mt-1">
             Компания → Группы → Объявления
           </span>
@@ -604,42 +627,44 @@ const CampaignsListView: React.FC<{
 
       {/* Список сохранённых пресетов */}
       <div className="mt-4">
-        <h2 className="text-sm font-semibold mb-2">
+        <h2 className="text-sm font-semibold mb-2 text-slate-700 dark:text-slate-200">
           Сохранённые пресеты
         </h2>
         {presets.length === 0 && (
-          <div className="text-sm text-slate-400">
+          <div className="text-sm text-slate-500 dark:text-slate-400 bg-white/40 dark:bg-slate-900/40 border border-white/40 dark:border-slate-800 rounded-2xl px-4 py-3 backdrop-blur">
             Пока нет сохранённых пресетов.
           </div>
         )}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {presets.map((p) => (
             <div
               key={p.backendId}
-              className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-950/80 p-3 flex flex-col justify-between"
+              className="rounded-2xl border border-white/40 dark:border-slate-800 bg-white/50 dark:bg-slate-900/50 backdrop-blur-xl p-4 flex flex-col justify-between shadow-md"
             >
               <div>
-                <div className="text-xs text-slate-400 mb-1">
+                <div className="text-xs text-slate-500 dark:text-slate-400 mb-1">
                   {p.backendId}
                 </div>
-                <div className="font-semibold text-sm">
+                <div className="font-semibold text-sm text-slate-900 dark:text-slate-100">
                   {p.company.presetName || "Без названия"}
                 </div>
-                <div className="text-xs text-slate-500 mt-1">
+                <div className="text-xs text-slate-600 dark:text-slate-400 mt-2">
                   Компания:{" "}
-                  {p.company.companyName || "не указано"}
+                  <span className="font-medium">
+                    {p.company.companyName || "не указано"}
+                  </span>
                 </div>
               </div>
-              <div className="mt-3 flex justify-between gap-2">
+              <div className="mt-4 flex justify-between gap-2">
                 <button
                   onClick={() => onOpenPreset(p)}
-                  className="flex-1 px-3 py-1.5 rounded-xl text-xs bg-sky-500 text-white hover:bg-sky-600"
+                  className="flex-1 px-3 py-1.5 rounded-xl text-xs bg-sky-500/90 text-white hover:bg-sky-600 shadow-md"
                 >
                   Открыть
                 </button>
                 <button
                   onClick={() => onDeletePreset(p)}
-                  className="px-3 py-1.5 rounded-xl text-xs bg-red-500/10 text-red-500 hover:bg-red-500/20"
+                  className="px-3 py-1.5 rounded-xl text-xs bg-red-500/10 text-red-500 hover:bg-red-500/20 border border-red-500/30"
                 >
                   Удалить
                 </button>
@@ -835,16 +860,16 @@ const PresetEditor: React.FC<{
 
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h2 className="text-xl font-semibold mb-1">
+          <h2 className="text-xl font-semibold mb-1 drop-shadow-sm">
             Создание пресета
           </h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
+          <p className="text-xs text-slate-600 dark:text-slate-400">
             Компания → Группы → Объявления
           </p>
         </div>
         <button
           onClick={onSave}
-          className="px-4 py-2 rounded-xl bg-sky-500 text-white text-sm font-medium shadow hover:bg-sky-600 transition-colors"
+          className="px-4 py-2 rounded-xl bg-sky-500/90 text-white text-sm font-medium shadow-lg hover:bg-sky-600 transition-colors backdrop-blur"
         >
           Сохранить пресет
         </button>
@@ -852,18 +877,18 @@ const PresetEditor: React.FC<{
 
       <div className="flex flex-1 gap-4 min-h-0">
         {/* Структура слева */}
-        <div className="w-64 shrink-0 rounded-2xl bg-white/80 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 p-4 overflow-auto">
-          <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-2">
+        <div className="w-64 shrink-0 rounded-2xl p-4 overflow-auto bg-white/40 dark:bg-slate-900/50 border border-white/50 dark:border-slate-800 backdrop-blur-2xl shadow-xl">
+          <div className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-3 tracking-wide">
             Структура
           </div>
 
           {/* Компания */}
           <button
             onClick={() => setSelectedNode({ type: "company" })}
-            className={`flex items-center gap-2 w-full text-left text-sm px-2 py-2 rounded-xl mb-2 ${
+            className={`flex items-center gap-2 w-full text-left text-sm px-2 py-2 rounded-xl mb-2 transition-all ${
               selectedNode.type === "company"
-                ? "bg-sky-50 text-sky-600 dark:bg-sky-900/40 dark:text-sky-200"
-                : "hover:bg-slate-100 dark:hover:bg-slate-800"
+                ? "bg-sky-500/10 text-sky-700 dark:text-sky-200 border border-sky-400/50 shadow-sm"
+                : "hover:bg-white/40 dark:hover:bg-slate-800"
             }`}
           >
             <span>Компания</span>
@@ -881,11 +906,11 @@ const PresetEditor: React.FC<{
                         groupId: group.id,
                       })
                     }
-                    className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded-xl flex-1 ${
+                    className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded-xl flex-1 transition-all ${
                       selectedNode.type === "group" &&
                       selectedNode.groupId === group.id
-                        ? "bg-sky-50 text-sky-600 dark:bg-sky-900/40 dark:text-sky-200"
-                        : "hover:bg-slate-100 dark:hover:bg-slate-800"
+                        ? "bg-sky-500/10 text-sky-700 dark:text-sky-200 border border-sky-400/50 shadow-sm"
+                        : "hover:bg-white/40 dark:hover:bg-slate-800"
                     }`}
                   >
                     <span className="text-xs text-slate-400">⤷</span>
@@ -919,12 +944,12 @@ const PresetEditor: React.FC<{
                             adId: ad.id,
                           })
                         }
-                        className={`flex items-center gap-2 text-xs px-2 py-1 rounded-xl flex-1 ${
+                        className={`flex items-center gap-2 text-xs px-2 py-1 rounded-xl flex-1 transition-all ${
                           selectedNode.type === "ad" &&
                           selectedNode.groupId === group.id &&
                           selectedNode.adId === ad.id
-                            ? "bg-sky-50 text-sky-600 dark:bg-sky-900/40 dark:text-sky-200"
-                            : "hover:bg-slate-100 dark:hover:bg-slate-800"
+                            ? "bg-sky-500/10 text-sky-700 dark:text-sky-200 border border-sky-400/50 shadow-sm"
+                            : "hover:bg-white/40 dark:hover:bg-slate-800"
                         }`}
                       >
                         <span className="text-xs text-slate-400">
@@ -941,7 +966,7 @@ const PresetEditor: React.FC<{
                   ))}
                   <button
                     onClick={() => addAd(group.id)}
-                    className="text-[11px] text-sky-500 hover:text-sky-600 mt-1"
+                    className="text-[11px] text-sky-600 dark:text-sky-400 hover:text-sky-700 dark:hover:text-sky-300 mt-1"
                   >
                     + Добавить объявление
                   </button>
@@ -952,14 +977,14 @@ const PresetEditor: React.FC<{
 
           <button
             onClick={addGroup}
-            className="mt-3 text-xs text-sky-500 hover:text-sky-600"
+            className="mt-3 text-xs text-sky-600 dark:text-sky-400 hover:text-sky-700 dark:hover:text-sky-300"
           >
             + Добавить группу
           </button>
         </div>
 
         {/* Настройки справа */}
-        <div className="flex-1 rounded-2xl bg-white/80 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 p-4 overflow-auto">
+        <div className="flex-1 rounded-2xl bg-white/60 dark:bg-slate-900/60 border border-white/50 dark:border-slate-800 p-5 overflow-auto backdrop-blur-2xl shadow-xl">
           {selectedNode.type === "company" && (
             <CompanySettingsForm
               company={preset.company}
@@ -1004,7 +1029,7 @@ const IconButton: React.FC<{
     type="button"
     title={title}
     onClick={onClick}
-    className="w-6 h-6 rounded-lg flex items-center justify-center text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+    className="w-6 h-6 rounded-lg flex items-center justify-center text-xs text-slate-500 dark:text-slate-300 hover:bg-white/50 dark:hover:bg-slate-800 transition-colors"
   >
     {label}
   </button>
@@ -1019,12 +1044,14 @@ const Field: React.FC<{
   placeholder?: string;
 }> = ({ label, value, onChange, placeholder }) => (
   <div>
-    <label className="block text-xs font-medium mb-1">{label}</label>
+    <label className="block text-xs font-medium mb-1 text-slate-700 dark:text-slate-300">
+      {label}
+    </label>
     <input
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400"
+      className="w-full px-3 py-2 rounded-xl border border-slate-200/70 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 transition-colors"
     />
   </div>
 );
@@ -1036,11 +1063,13 @@ const SelectField: React.FC<{
   options: { value: string; label: string }[];
 }> = ({ label, value, onChange, options }) => (
   <div>
-    <label className="block text-xs font-medium mb-1">{label}</label>
+    <label className="block text-xs font-medium mb-1 text-slate-700 dark:text-slate-300">
+      {label}
+    </label>
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400"
+      className="w-full px-3 py-2 rounded-xl border border-slate-200/70 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 transition-colors"
     >
       {options.map((opt) => (
         <option key={opt.value} value={opt.value}>
@@ -1056,7 +1085,9 @@ const CompanySettingsForm: React.FC<{
   onChange: (field: keyof CompanySettings, value: string) => void;
 }> = ({ company, onChange }) => (
   <div className="space-y-4">
-    <h3 className="text-lg font-semibold mb-2">Компания</h3>
+    <h3 className="text-lg font-semibold mb-2 text-slate-800 dark:text-slate-100">
+      Компания
+    </h3>
 
     <Field
       label="Название пресета"
@@ -1087,12 +1118,14 @@ const CompanySettingsForm: React.FC<{
       />
       {company.trigger === "time" && (
         <div>
-          <label className="block text-xs font-medium mb-1">Время</label>
+          <label className="block text-xs font-medium mb-1 text-slate-700 dark:text-slate-300">
+            Время
+          </label>
           <input
             type="time"
             value={company.time}
             onChange={(e) => onChange("time", e.target.value)}
-            className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400"
+            className="w-full px-3 py-2 rounded-xl border border-slate-200/70 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 transition-colors"
           />
         </div>
       )}
@@ -1119,7 +1152,9 @@ const GroupSettingsForm: React.FC<{
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold mb-2">Группа</h3>
+      <h3 className="text-lg font-semibold mb-2 text-slate-800 dark:text-slate-100">
+        Группа
+      </h3>
 
       <Field
         label="Регионы"
@@ -1155,12 +1190,14 @@ const GroupSettingsForm: React.FC<{
 
       <div>
         <div className="flex items-center justify-between mb-1">
-          <label className="block text-xs font-medium">Аудитории</label>
-          <span className="text-[10px] text-slate-400">
+          <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+            Аудитории
+          </label>
+          <span className="text-[11px] text-slate-400">
             (в JSON сохраняются id)
           </span>
         </div>
-        <div className="border rounded-xl border-slate-200 dark:border-slate-700 max-h-40 overflow-auto p-2 bg-slate-50 dark:bg-slate-900 text-xs space-y-1">
+        <div className="border rounded-xl border-slate-200/70 dark:border-slate-700 max-h-40 overflow-auto p-2 bg-white/60 dark:bg-slate-900/60 text-xs space-y-1 backdrop-blur">
           {audiences.length === 0 && (
             <div className="text-slate-400">
               Аудитории не загружены или пусто
@@ -1173,14 +1210,14 @@ const GroupSettingsForm: React.FC<{
                 key={a.id}
                 type="button"
                 onClick={() => toggleAudience(a.id)}
-                className={`w-full flex items-center justify-between px-2 py-1 rounded-lg ${
+                className={`w-full flex items-center justify-between px-2 py-1 rounded-lg transition-colors ${
                   selected
-                    ? "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-200"
-                    : "hover:bg-slate-100 dark:hover:bg-slate-800"
+                    ? "bg-sky-500/10 text-sky-700 dark:text-sky-200 border border-sky-400/60"
+                    : "hover:bg-white/50 dark:hover:bg-slate-800"
                 }`}
               >
                 <span>{a.name}</span>
-                <span className="text-[10px] text-slate-400">
+                <span className="text-[11px] text-slate-400">
                   id: {a.id}
                 </span>
               </button>
@@ -1223,7 +1260,9 @@ const AdSettingsForm: React.FC<{
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold mb-2">Объявление</h3>
+      <h3 className="text-lg font-semibold mb-2 text-slate-800 dark:text-slate-100">
+        Объявление
+      </h3>
 
       <SelectField
         label="Текстовый набор"
@@ -1251,16 +1290,18 @@ const AdSettingsForm: React.FC<{
       />
 
       <div className="space-y-2">
-        <label className="block text-xs font-medium mb-1">
+        <label className="block text-xs font-medium mb-1 text-slate-700 dark:text-slate-300">
           Выбрать видео
         </label>
         <button
           type="button"
           onClick={onOpenVideoPicker}
-          className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-sm hover:border-sky-400 hover:ring-1 hover:ring-sky-300 transition-all"
+          className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-slate-200/70 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 text-sm hover:border-sky-400 hover:ring-1 hover:ring-sky-300 transition-all"
         >
-          <span className="text-slate-500">Открыть список креативов</span>
-          <span className="text-xs text-sky-500">
+          <span className="text-slate-600 dark:text-slate-300">
+            Открыть список креативов
+          </span>
+          <span className="text-xs text-sky-600 dark:text-sky-400">
             {ad.selectedCreativeItemIds.length > 0
               ? `Выбрано: ${ad.selectedCreativeItemIds.length}`
               : "Не выбрано"}
@@ -1272,7 +1313,7 @@ const AdSettingsForm: React.FC<{
             {selectedCreativeItems.map((item) => (
               <div
                 key={item.id}
-                className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden text-[10px]"
+                className="border border-slate-200/70 dark:border-slate-700 rounded-xl overflow-hidden text-[11px] bg-white/70 dark:bg-slate-900/60 backdrop-blur"
               >
                 <div className="aspect-video bg-slate-200 dark:bg-slate-800">
                   <video
@@ -1321,7 +1362,7 @@ const CreativesView: React.FC<{
       form.append("file", file);
 
       try {
-        const res = await fetch("api/auto_ads/upload", {
+        const res = await fetch("/api/auto_ads/upload", {
           method: "POST",
           body: form,
         });
@@ -1376,29 +1417,32 @@ const CreativesView: React.FC<{
       <BackRow label="Назад" onClick={() => window.history.back()} />
 
       <div className="flex items-center justify-between mb-2">
-        <h1 className="text-2xl font-semibold">Креативы</h1>
+        <div>
+          <h1 className="text-2xl font-semibold drop-shadow-sm">
+            Креативы
+          </h1>
+          <p className="text-sm text-slate-600 dark:text-slate-400 mb-1">
+            Создавайте наборы креативов, загружайте видео и картинки.
+          </p>
+        </div>
         <button
           onClick={onSave}
-          className="px-4 py-2 rounded-xl bg-sky-500 text-white text-sm font-medium shadow hover:bg-sky-600 transition-colors"
+          className="px-4 py-2 rounded-xl bg-sky-500/90 text-white text-sm font-medium shadow-lg hover:bg-sky-600 transition-colors backdrop-blur"
         >
           Сохранить изменения
         </button>
       </div>
-
-      <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
-        Создавайте наборы креативов, загружайте видео и картинки.
-      </p>
 
       <div className="flex gap-2 mb-6">
         <input
           value={newSetName}
           onChange={(e) => setNewSetName(e.target.value)}
           placeholder="Название набора креативов"
-          className="flex-1 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400"
+          className="flex-1 px-3 py-2 rounded-xl border border-slate-200/70 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400"
         />
         <button
           onClick={createSet}
-          className="px-4 py-2 rounded-xl bg-sky-500 text-white text-sm font-medium shadow hover:bg-sky-600 transition-colors"
+          className="px-4 py-2 rounded-xl bg-sky-500/90 text-white text-sm font-medium shadow-lg hover:bg-sky-600 transition-colors backdrop-blur"
         >
           Создать набор
         </button>
@@ -1408,18 +1452,20 @@ const CreativesView: React.FC<{
         {creativeSets.map((set) => (
           <div
             key={set.id}
-            className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-950/80 p-4"
+            className="rounded-2xl border border-white/40 dark:border-slate-800 bg-white/60 dark:bg-slate-900/60 p-4 backdrop-blur-xl shadow-xl"
           >
             <div className="flex items-center justify-between mb-3">
               <div>
-                <h2 className="text-sm font-semibold">{set.name}</h2>
-                <p className="text-xs text-slate-400">
+                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                  {set.name}
+                </h2>
+                <p className="text-xs text-slate-500">
                   Элементов: {set.items.length}
                 </p>
               </div>
             </div>
 
-            <label className="block border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl py-6 px-4 text-xs text-center text-slate-500 dark:text-slate-400 cursor-pointer hover:border-sky-400 hover:bg-sky-50/40 dark:hover:bg-slate-800/60 transition-colors">
+            <label className="block border-2 border-dashed border-slate-300/80 dark:border-slate-700 rounded-xl py-6 px-4 text-xs text-center text-slate-500 dark:text-slate-400 cursor-pointer hover:border-sky-400 hover:bg-white/40 dark:hover:bg-slate-800/60 transition-colors bg-white/40 dark:bg-slate-900/40 backdrop-blur">
               <input
                 type="file"
                 multiple
@@ -1428,7 +1474,7 @@ const CreativesView: React.FC<{
               />
               Перетащите файлы сюда или нажмите, чтобы выбрать
               <br />
-              <span className="text-[10px] text-slate-400">
+              <span className="text-[11px] text-slate-400">
                 Видео и изображения будут сохранены на сервере
               </span>
             </label>
@@ -1438,7 +1484,7 @@ const CreativesView: React.FC<{
                 {set.items.map((item) => (
                   <div
                     key={item.id}
-                    className="relative border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden group"
+                    className="relative border border-slate-200/70 dark:border-slate-700 rounded-xl overflow-hidden group bg-white/60 dark:bg-slate-900/60 backdrop-blur"
                   >
                     <button
                       type="button"
@@ -1462,7 +1508,7 @@ const CreativesView: React.FC<{
                         />
                       )}
                     </div>
-                    <div className="px-2 py-1 text-[10px] truncate">
+                    <div className="px-2 py-1 text-[11px] truncate">
                       {item.name}
                     </div>
                   </div>
@@ -1473,7 +1519,7 @@ const CreativesView: React.FC<{
         ))}
 
         {creativeSets.length === 0 && (
-          <div className="text-sm text-slate-400">
+          <div className="text-sm text-slate-500 bg-white/60 dark:bg-slate-900/60 border border-white/40 dark:border-slate-800 rounded-2xl px-4 py-3 backdrop-blur">
             Наборы креативов ещё не созданы.
           </div>
         )}
@@ -1490,8 +1536,10 @@ const AudiencesView: React.FC<{ audiences: Audience[] }> = ({
   <div className="max-w-3xl mx-auto">
     <BackRow label="Назад" onClick={() => window.history.back()} />
 
-    <h1 className="text-2xl font-semibold mb-2">Аудитории</h1>
-    <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
+    <h1 className="text-2xl font-semibold mb-2 drop-shadow-sm">
+      Аудитории
+    </h1>
+    <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">
       Список сегментов, полученных с бэка
       <br />
       <span className="text-xs text-slate-400">
@@ -1499,8 +1547,8 @@ const AudiencesView: React.FC<{ audiences: Audience[] }> = ({
       </span>
     </p>
 
-    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-950/80 overflow-hidden">
-      <div className="grid grid-cols-[1fr_auto] gap-2 text-xs font-semibold px-4 py-2 border-b border-slate-200 dark:border-slate-800">
+    <div className="rounded-2xl border border-white/40 dark:border-slate-800 bg-white/60 dark:bg-slate-900/60 overflow-hidden backdrop-blur-xl shadow-xl">
+      <div className="grid grid-cols-[1fr_auto] gap-2 text-xs font-semibold px-4 py-2 border-b border-slate-200/60 dark:border-slate-800 text-slate-700 dark:text-slate-200">
         <div>Название</div>
         <div className="text-right">ID</div>
       </div>
@@ -1508,7 +1556,7 @@ const AudiencesView: React.FC<{ audiences: Audience[] }> = ({
         {audiences.map((a) => (
           <div
             key={a.id}
-            className="grid grid-cols-[1fr_auto] gap-2 px-4 py-2 border-t border-slate-100 dark:border-slate-800"
+            className="grid grid-cols-[1fr_auto] gap-2 px-4 py-2 border-t border-slate-100/60 dark:border-slate-800"
           >
             <div className="truncate">{a.name}</div>
             <div className="text-right text-slate-400">#{a.id}</div>
@@ -1565,9 +1613,11 @@ const VideoPickerPanel: React.FC<{
   const apply = () => onApply(selectedItemIds);
 
   return (
-    <div className="w-96 border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 h-full flex flex-col shadow-xl">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800">
-        <span className="text-sm font-semibold">Выбор видео</span>
+    <div className="w-96 h-full flex flex-col border-l border-white/30 dark:border-slate-800 bg-white/40 dark:bg-slate-900/60 backdrop-blur-2xl shadow-2xl">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200/60 dark:border-slate-800">
+        <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+          Выбор видео
+        </span>
         <button
           onClick={onClose}
           className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-100"
@@ -1580,12 +1630,12 @@ const VideoPickerPanel: React.FC<{
         {creativeSets.map((set) => (
           <div
             key={set.id}
-            className="border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden"
+            className="border border-slate-200/70 dark:border-slate-800 rounded-xl overflow-hidden bg-white/60 dark:bg-slate-900/60 backdrop-blur"
           >
-            <div className="flex items-center justify-between px-3 py-2 bg-slate-50 dark:bg-slate-900">
+            <div className="flex items-center justify-between px-3 py-2 bg-white/60 dark:bg-slate-900/70">
               <button
                 onClick={() => toggleSetExpanded(set.id)}
-                className="flex-1 text-left flex items-center gap-2"
+                className="flex-1 text-left flex items-center gap-2 text-slate-800 dark:text-slate-100"
               >
                 <span>
                   {expandedSetIds.includes(set.id) ? "▾" : "▸"}
@@ -1594,7 +1644,7 @@ const VideoPickerPanel: React.FC<{
               </button>
               <button
                 onClick={() => toggleWholeSet(set)}
-                className="text-[10px] text-sky-500"
+                className="text-[11px] text-sky-600 dark:text-sky-400"
               >
                 {set.items.length > 0 &&
                 set.items.every((i) => selectedItemIds.includes(i.id))
@@ -1610,13 +1660,13 @@ const VideoPickerPanel: React.FC<{
                     <button
                       key={item.id}
                       onClick={() => toggleItem(item.id)}
-                      className={`w-full flex items-center gap-2 rounded-lg border px-2 py-2 text-left ${
+                      className={`w-full flex items-center gap-2 rounded-lg border px-2 py-2 text-left transition-colors ${
                         selected
-                          ? "border-sky-400 bg-sky-50/70 dark:bg-sky-900/40"
-                          : "border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-900"
+                          ? "border-sky-400 bg-sky-50/80 dark:bg-sky-900/40"
+                          : "border-slate-200 dark:border-slate-700 hover:bg-white/60 dark:hover:bg-slate-900/60"
                       }`}
                     >
-                      <div className="w-10 h-10 rounded bg-slate-200 dark:bg-slate-800 overflow-hidden flex items-center justify-center text-[10px]">
+                      <div className="w-10 h-10 rounded bg-slate-200 dark:bg-slate-800 overflow-hidden flex items-center justify-center text-[11px]">
                         {item.type === "video" ? (
                           <video
                             src={item.url}
@@ -1635,7 +1685,7 @@ const VideoPickerPanel: React.FC<{
                         <div className="text-[11px] truncate">
                           {item.name}
                         </div>
-                        <div className="text-[10px] text-slate-400">
+                        <div className="text-[11px] text-slate-400">
                           {item.type === "video" ? "Видео" : "Картинка"}
                         </div>
                       </div>
@@ -1663,13 +1713,13 @@ const VideoPickerPanel: React.FC<{
         )}
       </div>
 
-      <div className="px-4 py-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
-        <span className="text-[11px] text-slate-500">
+      <div className="px-4 py-3 border-t border-slate-200/60 dark:border-slate-800 flex items-center justify-between bg-white/50 dark:bg-slate-900/70 backdrop-blur">
+        <span className="text-[11px] text-slate-600 dark:text-slate-300">
           Выбрано: {selectedItemIds.length}
         </span>
         <button
           onClick={apply}
-          className="px-3 py-1.5 rounded-xl bg-sky-500 text-white text-xs font-medium hover:bg-sky-600 transition-colors disabled:opacity-50"
+          className="px-3 py-1.5 rounded-xl bg-sky-500/90 text-white text-xs font-medium hover:bg-sky-600 transition-colors disabled:opacity-50 shadow-md"
           disabled={selectedItemIds.length === 0}
         >
           Добавить в объявление
