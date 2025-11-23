@@ -1,28 +1,17 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-// ===== Типы =====
+declare global {
+  interface Window {
+    Telegram?: any;
+  }
+}
 
 type Theme = "light" | "dark";
 
-type Audience = {
-  id: number;
-  name: string;
-  created?: string;
-  updated?: string;
-  pass_condition?: number;
-};
-
-type CreativeItem = {
-  id: string;
-  name: string;
-  type: "video" | "image";
-  url: string;
-};
-
-type CreativeSet = {
-  id: string;
-  name: string;
-  items: CreativeItem[];
+type Cabinet = {
+  id_cabinet: string;
+  name_cabinet: string;
+  token_cabinet: string;
 };
 
 type TextSet = {
@@ -32,1699 +21,1307 @@ type TextSet = {
   longDescription: string;
 };
 
-type Ad = {
+type CreativeItem = {
   id: string;
-  textSetId: string | "new";
-  customTextSet: TextSet;
-  selectedCreativeItemIds: string[];
+  url: string;
+  name: string;
+  type: "video" | "image";
 };
 
-type Group = {
+type CreativeSet = {
+  id: string;
+  name: string;
+  items: CreativeItem[];
+};
+
+type Audience = {
+  id: string;
+  name: string;
+};
+
+type PresetCompany = {
+  presetName: string;
+  companyName: string;
+  targetAction: string;
+  trigger: string;
+  time?: string;
+};
+
+type PresetGroup = {
   id: string;
   regions: string;
   gender: "any" | "male" | "female";
   age: string;
   interests: string;
-  audienceIds: number[];
-  ads: Ad[];
+  audienceIds: string[];
 };
 
-type TriggerType = "none" | "time";
-
-type CompanySettings = {
-  presetName: string;
-  companyName: string;
-  targetAction: string;
-  trigger: TriggerType;
-  time: string;
+type PresetAd = {
+  id: string;
+  textSetId: string | null;
+  newTextSetName: string;
+  shortDescription: string;
+  longDescription: string;
+  videoIds: string[];
+  creativeSetIds: string[];
 };
 
 type Preset = {
-  backendId?: string; // id пресета на бэке (preset_1 и т.д.)
-  company: CompanySettings;
-  groups: Group[];
+  company: PresetCompany;
+  groups: PresetGroup[];
+  ads: PresetAd[]; // один к одному по группам, но храним отдельно
 };
 
-type SelectedNode =
-  | { type: "company" }
-  | { type: "group"; groupId: string }
-  | { type: "ad"; groupId: string; adId: string };
+const API_BASE = "/auto_ads/api";
 
-type MainTab = "campaigns" | "creatives" | "audiences";
-type CampaignView = "list" | "presetEditor";
+type TabId = "campaigns" | "creatives" | "audiences";
 
-const randomId = () => Math.random().toString(36).slice(2, 10);
+type View =
+  | { type: "home" }
+  | { type: "presetEditor"; presetId?: string }
+  | { type: "creativeSetEditor"; setId?: string };
 
-// ======= Основной компонент =======
+const generateId = () => `id_${Math.random().toString(36).slice(2, 10)}`;
 
 const App: React.FC = () => {
   const [userId, setUserId] = useState<string | null>(null);
-  const [theme, setTheme] = useState<Theme>("light");
+  const [theme, setTheme] = useState<Theme>("dark");
+  const [isMobile, setIsMobile] = useState(false);
 
-  const [mainTab, setMainTab] = useState<MainTab>("campaigns");
-  const [campaignView, setCampaignView] = useState<CampaignView>("list");
+  const [activeTab, setActiveTab] = useState<TabId>("campaigns");
+  const [view, setView] = useState<View>({ type: "home" });
 
-  const [currentPreset, setCurrentPreset] = useState<Preset | null>(null);
-  const [savedPresets, setSavedPresets] = useState<Preset[]>([]);
+  const [cabinets, setCabinets] = useState<Cabinet[]>([]);
+  const [selectedCabinetId, setSelectedCabinetId] = useState<string | null>(
+    null
+  );
+
+  const [presets, setPresets] = useState<
+    { preset_id: string; data: Preset }[]
+  >([]);
+  const [presetDraft, setPresetDraft] = useState<Preset | null>(null);
+  const [selectedStructure, setSelectedStructure] = useState<{
+    type: "company" | "group" | "ad";
+    index?: number;
+  }>({ type: "company" });
+
+  const [creativeSets, setCreativeSets] = useState<CreativeSet[]>([]);
+  const [selectedCreativeSetId, setSelectedCreativeSetId] =
+    useState<string | null>(null);
+  const [videoPicker, setVideoPicker] = useState<{
+    open: boolean;
+    adId: string | null;
+  }>({ open: false, adId: null });
 
   const [audiences, setAudiences] = useState<Audience[]>([]);
-  const [creativeSets, setCreativeSets] = useState<CreativeSet[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const [showVideoPicker, setShowVideoPicker] = useState(false);
-  const [videoPickerTarget, setVideoPickerTarget] = useState<{
-    groupId: string;
-    adId: string;
-  } | null>(null);
-
-  const [initLoading, setInitLoading] = useState(true);
-
-  // === Получаем userId из Telegram WebApp ===
+  // ----------------- Theme -----------------
   useEffect(() => {
-    const w = window as any;
-    const tgUserId =
-      w?.Telegram?.WebApp?.initDataUnsafe?.user?.id ?? null;
-
-    if (tgUserId) {
-      setUserId(String(tgUserId));
-    } else {
-      // режим разработки
-      setUserId("dev_user");
+    const stored = localStorage.getItem("auto_ads_theme") as Theme | null;
+    if (stored === "light" || stored === "dark") {
+      setTheme(stored);
+      document.documentElement.setAttribute("data-theme", stored);
     }
   }, []);
 
-  // === Применяем тему к html ===
-  useEffect(() => {
-    if (theme === "dark") {
-      document.documentElement.classList.add("dark");
-    } else {
-      document.documentElement.classList.remove("dark");
-    }
-  }, [theme]);
-
-  // === Инициализация из бэка: настройки, креативы, пресеты ===
-  useEffect(() => {
-    if (!userId) return;
-
-    (async () => {
-      try {
-        // настройки
-        try {
-          const res = await fetch(
-            `/api/auto_ads/settings/get?user_id=${encodeURIComponent(
-              userId
-            )}`
-          );
-          if (res.ok) {
-            const data = await res.json();
-            const t = data?.settings?.theme as Theme | undefined;
-            if (t === "dark" || t === "light") {
-              setTheme(t);
-            }
-          }
-        } catch (e) {
-          console.error("settings/get error", e);
-        }
-
-        // креативы
-        try {
-          const res = await fetch(
-            `/api/auto_ads/creatives/get?user_id=${encodeURIComponent(
-              userId
-            )}`
-          );
-          if (res.ok) {
-            const data = await res.json();
-            setCreativeSets((data?.creatives || []) as CreativeSet[]);
-          }
-        } catch (e) {
-          console.error("creatives/get error", e);
-        }
-
-        // пресеты
-        try {
-          const res = await fetch(
-            `/api/auto_ads/preset/list?user_id=${encodeURIComponent(
-              userId
-            )}`
-          );
-          if (res.ok) {
-            const data = await res.json();
-            const presets: Preset[] = (data?.presets || []).map(
-              (p: any) => ({
-                backendId: p.preset_id,
-                ...(p.data as Preset),
-              })
-            );
-            setSavedPresets(presets);
-          }
-        } catch (e) {
-          console.error("preset/list error", e);
-        }
-      } finally {
-        setInitLoading(false);
-      }
-    })();
-  }, [userId]);
-
-  // === Сохранение настроек (только тема) ===
-  const saveSettings = async (newTheme: Theme) => {
-    if (!userId) return;
-    try {
-      await fetch("/api/auto_ads/settings/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId,
-          settings: { theme: newTheme },
-        }),
-      });
-    } catch (e) {
-      console.error("settings/save error", e);
-    }
-  };
-
   const toggleTheme = () => {
     setTheme((prev) => {
-      const next = prev === "light" ? "dark" : "light";
-      saveSettings(next);
+      const next: Theme = prev === "light" ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem("auto_ads_theme", next);
       return next;
     });
   };
 
-  // === Создание нового пресета ===
-  const createNewPreset = () => {
-    const defaultGroupId = randomId();
-    const defaultAdId = randomId();
+  // ----------------- Mobile guard -----------------
+  useEffect(() => {
+    const update = () => {
+      setIsMobile(window.innerWidth < 1024);
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
 
+  // ----------------- Telegram init -----------------
+  useEffect(() => {
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      try {
+        tg.ready();
+      } catch {}
+      const id =
+        tg.initDataUnsafe?.user?.id?.toString() ||
+        tg.initDataUnsafe?.user?.username ||
+        "demo_user";
+      setUserId(id);
+    } else {
+      setUserId("demo_user");
+    }
+  }, []);
+
+  // ----------------- Load settings & data -----------------
+  useEffect(() => {
+    if (!userId) return;
+
+    const loadAll = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        // settings (тут можем хранить кабинеты)
+        const sResp = await fetch(
+          `${API_BASE}/settings/get?user_id=${encodeURIComponent(userId)}`
+        );
+        const sJson = await sResp.json();
+        const settings = sJson.settings || {};
+
+        const cabinetsFromSettings: Cabinet[] =
+          settings.cabinets ??
+          settings.cabinet_list ??
+          [
+            // демо, если ничего нет
+            {
+              id_cabinet: "demo",
+              name_cabinet: "Демо кабинет",
+              token_cabinet: "demo_token",
+            },
+          ];
+        setCabinets(cabinetsFromSettings);
+        if (cabinetsFromSettings.length > 0) {
+          setSelectedCabinetId(cabinetsFromSettings[0].id_cabinet);
+        }
+
+        // presets
+        const pResp = await fetch(
+          `${API_BASE}/preset/list?user_id=${encodeURIComponent(userId)}`
+        );
+        const pJson = await pResp.json();
+        setPresets(pJson.presets || []);
+
+        // creatives
+        const cResp = await fetch(
+          `${API_BASE}/creatives/get?user_id=${encodeURIComponent(userId)}`
+        );
+        const cJson = await cResp.json();
+        setCreativeSets(cJson.creatives || []);
+
+        // audiences
+        const aResp = await fetch(
+          `${API_BASE}/audiences/get?user_id=${encodeURIComponent(userId)}`
+        );
+        const aJson = await aResp.json();
+        setAudiences(aJson.audiences || []);
+      } catch (e: any) {
+        console.error(e);
+        setError("Ошибка загрузки данных");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadAll();
+  }, [userId]);
+
+  // ----------------- Preset helpers -----------------
+
+  const startNewPreset = () => {
     const preset: Preset = {
-      backendId: undefined,
       company: {
         presetName: "",
         companyName: "",
         targetAction: "",
-        trigger: "none",
+        trigger: "time",
         time: "",
       },
       groups: [
         {
-          id: defaultGroupId,
+          id: generateId(),
           regions: "",
           gender: "any",
           age: "21-55",
           interests: "",
           audienceIds: [],
-          ads: [
-            {
-              id: defaultAdId,
-              textSetId: "new",
-              customTextSet: {
-                id: randomId(),
-                name: "",
-                shortDescription: "",
-                longDescription: "",
-              },
-              selectedCreativeItemIds: [],
-            },
-          ],
+        },
+      ],
+      ads: [
+        {
+          id: generateId(),
+          textSetId: null,
+          newTextSetName: "",
+          shortDescription: "",
+          longDescription: "",
+          videoIds: [],
+          creativeSetIds: [],
         },
       ],
     };
-
-    setCurrentPreset(preset);
-    setCampaignView("presetEditor");
+    setPresetDraft(preset);
+    setSelectedStructure({ type: "company" });
+    setView({ type: "presetEditor" });
   };
 
-  // === Открыть существующий пресет ===
-  const openPreset = (preset: Preset) => {
-    setCurrentPreset(preset);
-    setCampaignView("presetEditor");
+  const openPreset = (presetId: string, data: Preset) => {
+    setPresetDraft(data);
+    setSelectedStructure({ type: "company" });
+    setView({ type: "presetEditor", presetId });
   };
 
-  // === Сохранить текущий пресет ===
-  const saveCurrentPreset = async () => {
-    if (!userId || !currentPreset) return;
+  const cloneGroup = (index: number) => {
+    if (!presetDraft) return;
+    const group = presetDraft.groups[index];
+    const ad = presetDraft.ads[index];
 
+    const newGroup: PresetGroup = {
+      ...group,
+      id: generateId(),
+    };
+
+    const newAd: PresetAd = {
+      ...ad,
+      id: generateId(),
+    };
+
+    const groups = [...presetDraft.groups];
+    const ads = [...presetDraft.ads];
+
+    groups.splice(index + 1, 0, newGroup);
+    ads.splice(index + 1, 0, newAd);
+
+    setPresetDraft({ ...presetDraft, groups, ads });
+  };
+
+  const deleteGroup = (index: number) => {
+    if (!presetDraft) return;
+    if (presetDraft.groups.length === 1) return;
+
+    const groups = [...presetDraft.groups];
+    const ads = [...presetDraft.ads];
+
+    groups.splice(index, 1);
+    ads.splice(index, 1);
+
+    setPresetDraft({ ...presetDraft, groups, ads });
+
+    if (
+      selectedStructure.type === "group" &&
+      (selectedStructure.index ?? 0) === index
+    ) {
+      setSelectedStructure({ type: "company" });
+    }
+  };
+
+  const savePreset = async () => {
+    if (!userId || !presetDraft) return;
+    setSaving(true);
+    setError(null);
     try {
-      const res = await fetch("/api/auto_ads/preset/save", {
+      const presetId =
+        view.type === "presetEditor" ? view.presetId : undefined;
+
+      const resp = await fetch(`${API_BASE}/preset/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId,
-          presetId: currentPreset.backendId || null,
-          preset: {
-            company: currentPreset.company,
-            groups: currentPreset.groups,
-          },
+          presetId,
+          preset: presetDraft,
         }),
       });
 
-      if (!res.ok) {
-        alert("Ошибка сохранения пресета");
-        return;
-      }
-      const data = await res.json();
-      const presetId = data?.preset_id as string | undefined;
-
-      if (presetId) {
-        // обновляем текущий
-        setCurrentPreset((prev) =>
-          prev ? { ...prev, backendId: presetId } : prev
-        );
-
-        // обновляем список
-        setSavedPresets((prev) => {
-          const idx = prev.findIndex((p) => p.backendId === presetId);
-          const updatedPreset: Preset = {
-            ...currentPreset,
-            backendId: presetId,
-          };
-          if (idx === -1) {
-            return [...prev, updatedPreset];
-          } else {
-            const copy = [...prev];
-            copy[idx] = updatedPreset;
-            return copy;
-          }
-        });
+      const json = await resp.json();
+      if (!resp.ok) {
+        throw new Error(json.detail || "Ошибка сохранения");
       }
 
-      alert("Пресет сохранён");
-    } catch (e) {
-      console.error("preset/save error", e);
-      alert("Ошибка при сохранении пресета");
+      // обновляем список
+      const pResp = await fetch(
+        `${API_BASE}/preset/list?user_id=${encodeURIComponent(userId)}`
+      );
+      const pJson = await pResp.json();
+      setPresets(pJson.presets || []);
+
+      setView({ type: "home" });
+      setPresetDraft(null);
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message || "Ошибка сохранения пресета");
+    } finally {
+      setSaving(false);
     }
   };
 
-  // === Удалить пресет ===
-  const deletePreset = async (preset: Preset) => {
-    if (!userId || !preset.backendId) return;
+  const deletePreset = async (presetId: string) => {
+    if (!userId) return;
     if (!confirm("Удалить этот пресет?")) return;
 
+    setSaving(true);
+    setError(null);
     try {
-      const url = `/api/auto_ads/preset/delete?user_id=${encodeURIComponent(
-        userId
-      )}&preset_id=${encodeURIComponent(preset.backendId)}`;
-      const res = await fetch(url, { method: "DELETE" });
-      if (!res.ok) {
-        alert("Ошибка удаления");
-        return;
-      }
-      setSavedPresets((prev) =>
-        prev.filter((p) => p.backendId !== preset.backendId)
+      const resp = await fetch(
+        `${API_BASE}/preset/delete?user_id=${encodeURIComponent(
+          userId
+        )}&preset_id=${encodeURIComponent(presetId)}`,
+        { method: "DELETE" }
       );
-      if (currentPreset?.backendId === preset.backendId) {
-        setCurrentPreset(null);
-        setCampaignView("list");
+      if (!resp.ok) {
+        throw new Error("Ошибка удаления пресета");
       }
-    } catch (e) {
-      console.error("preset/delete error", e);
-      alert("Ошибка удаления пресета");
+
+      const pResp = await fetch(
+        `${API_BASE}/preset/list?user_id=${encodeURIComponent(userId)}`
+      );
+      const pJson = await pResp.json();
+      setPresets(pJson.presets || []);
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message || "Ошибка удаления пресета");
+    } finally {
+      setSaving(false);
     }
   };
 
-  // === Обновление пресета в редакторе ===
-  const updateCurrentPreset = (updater: (prev: Preset) => Preset) => {
-    setCurrentPreset((prev) => (prev ? updater(prev) : prev));
+  // ----------------- Creatives helpers -----------------
+
+  const currentCreativeSet = useMemo(
+    () => creativeSets.find((s) => s.id === selectedCreativeSetId) || null,
+    [creativeSets, selectedCreativeSetId]
+  );
+
+  const createCreativeSet = () => {
+    const id = generateId();
+    const newSet: CreativeSet = {
+      id,
+      name: `Набор ${creativeSets.length + 1}`,
+      items: [],
+    };
+    const list = [...creativeSets, newSet];
+    setCreativeSets(list);
+    setSelectedCreativeSetId(id);
+    saveCreatives(list);
   };
 
-  // === Сохранение креативов на бэке ===
-  const saveCreativeSetsToServer = async () => {
+  const renameCreativeSet = (id: string, name: string) => {
+    const list = creativeSets.map((s) =>
+      s.id === id ? { ...s, name } : s
+    );
+    setCreativeSets(list);
+    saveCreatives(list);
+  };
+
+  const deleteCreativeSet = (id: string) => {
+    if (!confirm("Удалить набор креативов?")) return;
+    const list = creativeSets.filter((s) => s.id !== id);
+    setCreativeSets(list);
+    if (selectedCreativeSetId === id) {
+      setSelectedCreativeSetId(list[0]?.id ?? null);
+    }
+    saveCreatives(list);
+  };
+
+  const saveCreatives = async (list: CreativeSet[]) => {
     if (!userId) return;
     try {
-      const res = await fetch("/api/auto_ads/creatives/save", {
+      await fetch(`${API_BASE}/creatives/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId,
-          creatives: creativeSets,
-        }),
+        body: JSON.stringify({ userId, creatives: list }),
       });
-      if (!res.ok) {
-        alert("Ошибка сохранения креативов");
-        return;
-      }
-      alert("Креативы сохранены");
     } catch (e) {
-      console.error("creatives/save error", e);
-      alert("Ошибка сохранения креативов");
+      console.error(e);
     }
   };
 
-  // === Выбор видео (панель справа) ===
-  const applySelectedVideos = (selectedIds: string[]) => {
-    if (!currentPreset || !videoPickerTarget) return;
+  const uploadCreativeFiles = async (files: FileList | null) => {
+    if (!files || !currentCreativeSet) return;
+    const newItems: CreativeItem[] = [];
+    for (const file of Array.from(files)) {
+      const formData = new FormData();
+      formData.append("file", file);
+      const resp = await fetch(`${API_BASE}/upload`, {
+        method: "POST",
+        body: formData,
+      });
+      const json = await resp.json();
+      const url: string = json.url;
+      newItems.push({
+        id: generateId(),
+        url,
+        name: file.name,
+        type: file.type.startsWith("image") ? "image" : "video",
+      });
+    }
 
-    const { groupId, adId } = videoPickerTarget;
-
-    updateCurrentPreset((prev) => ({
-      ...prev,
-      groups: prev.groups.map((g) =>
-        g.id === groupId
-          ? {
-              ...g,
-              ads: g.ads.map((a) =>
-                a.id === adId
-                  ? { ...a, selectedCreativeItemIds: selectedIds }
-                  : a
-              ),
-            }
-          : g
-      ),
-    }));
-
-    setShowVideoPicker(false);
-    setVideoPickerTarget(null);
+    const list = creativeSets.map((s) =>
+      s.id === currentCreativeSet.id
+        ? { ...s, items: [...s.items, ...newItems] }
+        : s
+    );
+    setCreativeSets(list);
+    saveCreatives(list);
   };
 
-  // === Загрузка аудиторий с /api/v2/... ===
-  useEffect(() => {
-    if (mainTab !== "audiences") return;
-    if (audiences.length > 0) return;
+  const deleteCreativeItem = (setId: string, itemId: string) => {
+    const list = creativeSets.map((s) =>
+      s.id === setId
+        ? {
+            ...s,
+            items: s.items.filter((it) => it.id !== itemId),
+          }
+        : s
+    );
+    setCreativeSets(list);
+    saveCreatives(list);
+  };
 
-    (async () => {
-      try {
-        const res = await fetch(
-          "/api/v2/remarketing/segments.json?limit=100"
-        );
-        if (!res.ok) return;
-        const data = await res.json();
-        setAudiences(data?.items || []);
-      } catch (e) {
-        console.error("audiences load error", e);
-      }
-    })();
-  }, [mainTab, audiences.length]);
+  // ----------------- Video picker (for ad) -----------------
 
-  if (!userId || initLoading) {
+  const openVideoPickerForAd = (adId: string) => {
+    setVideoPicker({ open: true, adId });
+  };
+
+  const closeVideoPicker = () => {
+    setVideoPicker({ open: false, adId: null });
+  };
+
+  const toggleVideoForAd = (adId: string, item: CreativeItem) => {
+    if (!presetDraft) return;
+    const ads = presetDraft.ads.map((ad) => {
+      if (ad.id !== adId) return ad;
+      const already = ad.videoIds.includes(item.id);
+      return {
+        ...ad,
+        videoIds: already
+          ? ad.videoIds.filter((id) => id !== item.id)
+          : [...ad.videoIds, item.id],
+      };
+    });
+    setPresetDraft({ ...presetDraft, ads });
+  };
+
+  const toggleCreativeSetForAd = (adId: string, set: CreativeSet) => {
+    if (!presetDraft) return;
+    const ads = presetDraft.ads.map((ad) => {
+      if (ad.id !== adId) return ad;
+      const already = ad.creativeSetIds.includes(set.id);
+      return {
+        ...ad,
+        creativeSetIds: already
+          ? ad.creativeSetIds.filter((id) => id !== set.id)
+          : [...ad.creativeSetIds, set.id],
+      };
+    });
+    setPresetDraft({ ...presetDraft, ads });
+  };
+
+  const getAdById = (adId: string) =>
+    presetDraft?.ads.find((a) => a.id === adId) || null;
+
+  const getVideoById = (id: string) => {
+    for (const set of creativeSets) {
+      const item = set.items.find((it) => it.id === id);
+      if (item) return item;
+    }
+    return null;
+  };
+
+  // ----------------- Render helpers -----------------
+
+  const renderHeader = () => (
+    <header className="app-header glass">
+      <div className="header-left">
+        <button
+          className="icon-button"
+          onClick={toggleTheme}
+          title="Переключить тему"
+        >
+          {theme === "light" ? "🌙" : "☀️"}
+        </button>
+      </div>
+      <div className="header-center">
+        <h1 className="app-title">Auto ADS</h1>
+      </div>
+      <div className="header-right">
+        <div className="cabinet-select">
+          <label>Кабинет</label>
+          <select
+            value={selectedCabinetId ?? ""}
+            onChange={(e) => setSelectedCabinetId(e.target.value)}
+          >
+            {cabinets.map((cab) => (
+              <option key={cab.id_cabinet} value={cab.id_cabinet}>
+                {cab.name_cabinet}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </header>
+  );
+
+  const renderSidebar = () => (
+    <aside className="sidebar glass">
+      <div className="sidebar-tabs">
+        <button
+          className={`sidebar-tab ${
+            activeTab === "campaigns" ? "active" : ""
+          }`}
+          onClick={() => {
+            setActiveTab("campaigns");
+            setView({ type: "home" });
+          }}
+        >
+          Создание кампаний
+        </button>
+        <button
+          className={`sidebar-tab ${
+            activeTab === "creatives" ? "active" : ""
+          }`}
+          onClick={() => {
+            setActiveTab("creatives");
+            setView({ type: "home" });
+          }}
+        >
+          Креативы
+        </button>
+        <button
+          className={`sidebar-tab ${
+            activeTab === "audiences" ? "active" : ""
+          }`}
+          onClick={() => {
+            setActiveTab("audiences");
+            setView({ type: "home" });
+          }}
+        >
+          Аудитории
+        </button>
+      </div>
+    </aside>
+  );
+
+  const renderBackBar = () => {
+    if (view.type === "home") return null;
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900 text-slate-100">
-        Загрузка Auto ADS...
+      <div className="back-bar">
+        <button
+          className="icon-button"
+          onClick={() => {
+            setView({ type: "home" });
+            setPresetDraft(null);
+          }}
+        >
+          ←
+        </button>
+        <span className="back-bar-title">
+          {view.type === "presetEditor" && "Создание пресета"}
+          {view.type === "creativeSetEditor" && "Набор креативов"}
+        </span>
+      </div>
+    );
+  };
+
+  const renderCampaignsHome = () => (
+    <div className="content-section glass">
+      <div className="section-header">
+        <h2>Создание пресетов</h2>
+      </div>
+      <div className="preset-grid">
+        <button className="preset-card add-card" onClick={startNewPreset}>
+          <span className="plus-icon">+</span>
+          <span>Новый пресет</span>
+        </button>
+
+        {presets.map((p) => (
+          <div
+            key={p.preset_id}
+            className="preset-card"
+            onClick={() => openPreset(p.preset_id, p.data)}
+          >
+            <div className="preset-name">
+              {p.data.company.presetName || p.preset_id}
+            </div>
+            <div className="preset-meta">
+              <span>Групп: {p.data.groups.length}</span>
+              <span>Объявлений: {p.data.ads.length}</span>
+            </div>
+            <button
+              className="icon-button delete-button"
+              onClick={(e) => {
+                e.stopPropagation();
+                deletePreset(p.preset_id);
+              }}
+            >
+              🗑
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  const renderPresetStructure = () => {
+    if (!presetDraft) return null;
+    return (
+      <div className="preset-structure">
+        <button
+          className={`structure-item ${
+            selectedStructure.type === "company" ? "active" : ""
+          }`}
+          onClick={() => setSelectedStructure({ type: "company" })}
+        >
+          Компания
+        </button>
+
+        {presetDraft.groups.map((group, index) => (
+          <div key={group.id} className="structure-group">
+            <div className="structure-group-header">
+              <button
+                className={`structure-item child ${
+                  selectedStructure.type === "group" &&
+                  selectedStructure.index === index
+                    ? "active"
+                    : ""
+                }`}
+                onClick={() =>
+                  setSelectedStructure({ type: "group", index })
+                }
+              >
+                ⤷ Группа {index + 1}
+              </button>
+              <div className="structure-actions">
+                <button
+                  className="icon-button"
+                  title="Дублировать группу"
+                  onClick={() => cloneGroup(index)}
+                >
+                  📄
+                </button>
+                <button
+                  className="icon-button"
+                  title="Удалить группу"
+                  onClick={() => deleteGroup(index)}
+                >
+                  🗑
+                </button>
+              </div>
+            </div>
+
+            <button
+              className={`structure-item child deeper ${
+                selectedStructure.type === "ad" &&
+                selectedStructure.index === index
+                  ? "active"
+                  : ""
+              }`}
+              onClick={() =>
+                setSelectedStructure({ type: "ad", index })
+              }
+            >
+              &nbsp;&nbsp;⤷ Объявление
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const renderCompanySettings = () => {
+    if (!presetDraft) return null;
+    const company = presetDraft.company;
+
+    const updateCompany = (patch: Partial<PresetCompany>) =>
+      setPresetDraft({ ...presetDraft, company: { ...company, ...patch } });
+
+    return (
+      <div className="form-grid">
+        <div className="form-field">
+          <label>Название пресета</label>
+          <input
+            type="text"
+            value={company.presetName}
+            onChange={(e) =>
+              updateCompany({ presetName: e.target.value })
+            }
+          />
+        </div>
+        <div className="form-field">
+          <label>Название кампании</label>
+          <input
+            type="text"
+            value={company.companyName}
+            onChange={(e) =>
+              updateCompany({ companyName: e.target.value })
+            }
+          />
+        </div>
+        <div className="form-field">
+          <label>Целевое действие</label>
+          <select
+            value={company.targetAction}
+            onChange={(e) =>
+              updateCompany({ targetAction: e.target.value })
+            }
+          >
+            <option value="">Не выбрано</option>
+            <option value="lead">Лид</option>
+            <option value="purchase">Покупка</option>
+            <option value="traffic">Трафик</option>
+          </select>
+        </div>
+        <div className="form-field">
+          <label>Триггер</label>
+          <select
+            value={company.trigger}
+            onChange={(e) =>
+              updateCompany({ trigger: e.target.value })
+            }
+          >
+            <option value="time">Время</option>
+          </select>
+        </div>
+        {company.trigger === "time" && (
+          <div className="form-field">
+            <label>Время</label>
+            <input
+              type="time"
+              value={company.time || ""}
+              onChange={(e) => updateCompany({ time: e.target.value })}
+            />
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderGroupSettings = () => {
+    if (!presetDraft) return null;
+    const index = selectedStructure.index ?? 0;
+    const group = presetDraft.groups[index];
+
+    const updateGroup = (patch: Partial<PresetGroup>) => {
+      const groups = [...presetDraft.groups];
+      groups[index] = { ...group, ...patch };
+      setPresetDraft({ ...presetDraft, groups });
+    };
+
+    return (
+      <div className="form-grid">
+        <div className="form-field">
+          <label>Регионы</label>
+          <input
+            type="text"
+            placeholder="Москва, МО..."
+            value={group.regions}
+            onChange={(e) => updateGroup({ regions: e.target.value })}
+          />
+        </div>
+        <div className="form-field">
+          <label>Пол</label>
+          <select
+            value={group.gender}
+            onChange={(e) =>
+              updateGroup({
+                gender: e.target.value as PresetGroup["gender"],
+              })
+            }
+          >
+            <option value="any">Любой</option>
+            <option value="male">Мужской</option>
+            <option value="female">Женский</option>
+          </select>
+        </div>
+        <div className="form-field">
+          <label>Возраст</label>
+          <input
+            type="text"
+            placeholder="21-55"
+            value={group.age}
+            onChange={(e) => updateGroup({ age: e.target.value })}
+          />
+        </div>
+        <div className="form-field">
+          <label>Интересы</label>
+          <input
+            type="text"
+            value={group.interests}
+            onChange={(e) =>
+              updateGroup({ interests: e.target.value })
+            }
+          />
+        </div>
+        <div className="form-field">
+          <label>Аудитории</label>
+          <div className="pill-select">
+            {audiences.length === 0 && (
+              <span className="hint">
+                Аудитории пока не созданы (вкладка «Аудитории»)
+              </span>
+            )}
+            {audiences.map((a) => {
+              const active = group.audienceIds.includes(a.id);
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  className={`pill ${active ? "active" : ""}`}
+                  onClick={() => {
+                    const ids = active
+                      ? group.audienceIds.filter((id) => id !== a.id)
+                      : [...group.audienceIds, a.id];
+                    updateGroup({ audienceIds: ids });
+                  }}
+                >
+                  {a.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderAdSettings = () => {
+    if (!presetDraft) return null;
+    const index = selectedStructure.index ?? 0;
+    const ad = presetDraft.ads[index];
+
+    const updateAd = (patch: Partial<PresetAd>) => {
+      const ads = [...presetDraft.ads];
+      ads[index] = { ...ad, ...patch };
+      setPresetDraft({ ...presetDraft, ads });
+    };
+
+    const currentTextSet: TextSet | null = ad.textSetId
+      ? {
+          id: ad.textSetId,
+          name: ad.newTextSetName,
+          shortDescription: ad.shortDescription,
+          longDescription: ad.longDescription,
+        }
+      : null;
+
+    const selectedVideos = ad.videoIds.map(getVideoById).filter(Boolean);
+
+    const selectedCreativeSets = ad.creativeSetIds
+      .map((id) => creativeSets.find((s) => s.id === id) || null)
+      .filter(Boolean) as CreativeSet[];
+
+    return (
+      <div className="form-grid">
+        <div className="form-field">
+          <label>Текстовый набор</label>
+          <select
+            value={ad.textSetId ?? ""}
+            onChange={(e) => {
+              const val = e.target.value;
+              if (val === "new") {
+                updateAd({
+                  textSetId: generateId(),
+                  newTextSetName: "",
+                  shortDescription: "",
+                  longDescription: "",
+                });
+              } else if (!val) {
+                updateAd({ textSetId: null });
+              } else {
+                // здесь можно в будущем подгружать сохранённые наборы
+                updateAd({ textSetId: val });
+              }
+            }}
+          >
+            <option value="">Не выбран</option>
+            <option value="new">Создать новый набор</option>
+            {currentTextSet && ad.textSetId !== "new" && (
+              <option value={currentTextSet.id}>
+                {currentTextSet.name || "Набор"}
+              </option>
+            )}
+          </select>
+        </div>
+
+        <div className="form-field">
+          <label>Название текстового набора</label>
+          <input
+            type="text"
+            value={ad.newTextSetName}
+            onChange={(e) =>
+              updateAd({ newTextSetName: e.target.value })
+            }
+          />
+        </div>
+        <div className="form-field">
+          <label>Короткое описание</label>
+          <textarea
+            rows={2}
+            value={ad.shortDescription}
+            onChange={(e) =>
+              updateAd({ shortDescription: e.target.value })
+            }
+          />
+        </div>
+        <div className="form-field">
+          <label>Длинное описание</label>
+          <textarea
+            rows={4}
+            value={ad.longDescription}
+            onChange={(e) =>
+              updateAd({ longDescription: e.target.value })
+            }
+          />
+        </div>
+
+        <div className="form-field">
+          <label>Выбрать видео</label>
+          <div className="video-picker-field">
+            <button
+              type="button"
+              className="outline-button"
+              onClick={() => openVideoPickerForAd(ad.id)}
+            >
+              Открыть список креативов
+            </button>
+
+            <div className="selected-videos">
+              {selectedVideos.length === 0 &&
+                selectedCreativeSets.length === 0 && (
+                  <span className="hint">
+                    Видео пока не выбраны. Перейдите во вкладку
+                    «Креативы», создайте набор и загрузите ролики.
+                  </span>
+                )}
+
+              {selectedCreativeSets.length > 0 && (
+                <div className="selected-group">
+                  <div className="selected-title">Выбранные наборы:</div>
+                  <div className="pill-list">
+                    {selectedCreativeSets.map((set) => (
+                      <span key={set.id} className="pill active">
+                        {set.name}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {selectedVideos.length > 0 && (
+                <div className="selected-group">
+                  <div className="selected-title">Отдельные видео:</div>
+                  <div className="video-chip-list">
+                    {selectedVideos.map((v) => (
+                      <div key={v!.id} className="video-chip">
+                        <div className="thumb" />
+                        <span>{v!.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPresetEditor = () => (
+    <div className="preset-editor glass">
+      <div className="preset-editor-left">{renderPresetStructure()}</div>
+      <div className="preset-editor-right">
+        {selectedStructure.type === "company" && renderCompanySettings()}
+        {selectedStructure.type === "group" && renderGroupSettings()}
+        {selectedStructure.type === "ad" && renderAdSettings()}
+
+        <div className="preset-actions">
+          <button
+            className="primary-button"
+            onClick={savePreset}
+            disabled={saving}
+          >
+            {saving ? "Сохранение..." : "Сохранить пресет"}
+          </button>
+          <button
+            className="outline-button"
+            onClick={() => {
+              setPresetDraft(null);
+              setView({ type: "home" });
+            }}
+          >
+            Отмена
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderCreativesPage = () => (
+    <div className="content-section glass">
+      <div className="section-header">
+        <h2>Креативы</h2>
+        <button className="primary-button" onClick={createCreativeSet}>
+          + Новый набор
+        </button>
+      </div>
+
+      <div className="creative-layout">
+        <div className="creative-sets-list">
+          {creativeSets.map((set) => (
+            <button
+              key={set.id}
+              className={`creative-set-item ${
+                selectedCreativeSetId === set.id ? "active" : ""
+              }`}
+              onClick={() => setSelectedCreativeSetId(set.id)}
+            >
+              <div className="title">{set.name}</div>
+              <div className="meta">{set.items.length} файлов</div>
+              <button
+                className="icon-button delete-button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  deleteCreativeSet(set.id);
+                }}
+              >
+                🗑
+              </button>
+            </button>
+          ))}
+          {creativeSets.length === 0 && (
+            <div className="hint">
+              Пока нет наборов. Создайте первый набор креативов.
+            </div>
+          )}
+        </div>
+
+        <div className="creative-set-content">
+          {currentCreativeSet ? (
+            <div className="creative-set-inner">
+              <div className="creative-set-header">
+                <input
+                  className="creative-set-name-input"
+                  value={currentCreativeSet.name}
+                  onChange={(e) =>
+                    renameCreativeSet(
+                      currentCreativeSet.id,
+                      e.target.value
+                    )
+                  }
+                />
+                <label className="upload-button">
+                  <input
+                    type="file"
+                    multiple
+                    accept="video/*,image/*"
+                    onChange={(e) =>
+                      uploadCreativeFiles(e.target.files)
+                    }
+                  />
+                  Перетащите или выберите файлы
+                </label>
+              </div>
+
+              <div className="creative-grid">
+                {currentCreativeSet.items.map((item) => (
+                  <div key={item.id} className="creative-card">
+                    {item.type === "image" ? (
+                      <img
+                        src={item.url}
+                        alt={item.name}
+                        className="creative-thumb"
+                      />
+                    ) : (
+                      <video
+                        src={item.url}
+                        className="creative-thumb"
+                        muted
+                        loop
+                      />
+                    )}
+                    <div className="creative-name">{item.name}</div>
+                    <button
+                      className="icon-button delete-button"
+                      onClick={() =>
+                        deleteCreativeItem(
+                          currentCreativeSet.id,
+                          item.id
+                        )
+                      }
+                    >
+                      🗑
+                    </button>
+                  </div>
+                ))}
+
+                {currentCreativeSet.items.length === 0 && (
+                  <div className="hint">
+                    Загрузите видео или картинки. Они будут сохранены
+                    в <code>/mnt/data/auto_ads_storage/video</code>.
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="hint">
+              Выберите набор слева или создайте новый.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderAudiencesPage = () => (
+    <div className="content-section glass">
+      <div className="section-header">
+        <h2>Аудитории</h2>
+      </div>
+      <div className="hint">
+        Пока здесь ничего нет. В будущем можно добавить конструктор
+        аудиторий, которые будут использоваться во вкладке «Создание
+        кампаний».
+      </div>
+    </div>
+  );
+
+  const renderVideoPickerDrawer = () => {
+    if (!videoPicker.open || !videoPicker.adId || !presetDraft) return null;
+    const ad = getAdById(videoPicker.adId);
+    if (!ad) return null;
+
+    const isVideoSelected = (id: string) => ad.videoIds.includes(id);
+    const isSetSelected = (id: string) =>
+      ad.creativeSetIds.includes(id);
+
+    return (
+      <div className="drawer-backdrop" onClick={closeVideoPicker}>
+        <div
+          className="drawer"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="drawer-header">
+            <div className="drawer-title">Выбор креативов</div>
+            <button className="icon-button" onClick={closeVideoPicker}>
+              ✕
+            </button>
+          </div>
+          <div className="drawer-content">
+            {creativeSets.length === 0 && (
+              <div className="hint">
+                Наборов креативов пока нет. Создайте их во вкладке
+                «Креативы».
+              </div>
+            )}
+
+            {creativeSets.map((set) => (
+              <div key={set.id} className="drawer-set">
+                <div className="drawer-set-header">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={isSetSelected(set.id)}
+                      onChange={() =>
+                        toggleCreativeSetForAd(ad.id, set)
+                      }
+                    />
+                    <span className="set-title">{set.name}</span>
+                  </label>
+                  <span className="set-meta">
+                    {set.items.length} файлов
+                  </span>
+                </div>
+                <div className="drawer-grid">
+                  {set.items.map((item) => (
+                    <label
+                      key={item.id}
+                      className={`drawer-item ${
+                        isVideoSelected(item.id) ? "selected" : ""
+                      }`}
+                    >
+                      {item.type === "image" ? (
+                        <img
+                          src={item.url}
+                          alt={item.name}
+                          className="drawer-thumb"
+                        />
+                      ) : (
+                        <video
+                          src={item.url}
+                          className="drawer-thumb"
+                          muted
+                          loop
+                        />
+                      )}
+                      <input
+                        type="checkbox"
+                        checked={isVideoSelected(item.id)}
+                        onChange={() =>
+                          toggleVideoForAd(ad.id, item)
+                        }
+                      />
+                      <span className="drawer-item-name">
+                        {item.name}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="drawer-footer">
+            <button
+              className="primary-button"
+              onClick={closeVideoPicker}
+            >
+              Готово
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderMain = () => {
+    if (view.type === "presetEditor") {
+      return renderPresetEditor();
+    }
+
+    if (activeTab === "campaigns") return renderCampaignsHome();
+    if (activeTab === "creatives") return renderCreativesPage();
+    if (activeTab === "audiences") return renderAudiencesPage();
+    return null;
+  };
+
+  // ----------------- Mobile overlay -----------------
+  if (isMobile) {
+    return (
+      <div className="mobile-overlay">
+        <div className="mobile-card glass">
+          <h1>Auto ADS</h1>
+          <p>Откройте на ПК и растяните экран.</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div
-      className={`min-h-screen flex flex-col relative transition-colors duration-300 ${
-        theme === "dark"
-          ? "dark bg-slate-950 text-slate-100"
-          : "bg-slate-100 text-slate-900"
-      }`}
-    >
-      {/* Градиентный фон под стекло */}
-      <div className="pointer-events-none fixed inset-0 -z-10 bg-gradient-to-br from-slate-100 via-slate-200 to-slate-300 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950" />
-
-      {/* HEADER */}
-      <header className="flex items-center justify-between px-6 py-4 border-b border-white/20 dark:border-slate-800/60 bg-white/10 dark:bg-slate-900/40 backdrop-blur-xl shadow-lg">
-        <div className="flex items-center gap-4">
-          {/* Переключатель темы */}
-          <button
-            onClick={toggleTheme}
-            className="w-10 h-10 rounded-full border border-white/40 dark:border-slate-600 flex items-center justify-center text-slate-600 dark:text-slate-200 bg-white/20 dark:bg-slate-900/40 hover:bg-white/40 hover:shadow-xl transition-all"
-          >
-            {theme === "light" ? "🌞" : "🌙"}
-          </button>
-
-          <span className="text-xl font-semibold tracking-tight drop-shadow-sm">
-            Auto ADS
-          </span>
-        </div>
-
-        <div className="text-xs text-slate-600 dark:text-slate-300 bg-white/10 dark:bg-slate-900/50 border border-white/30 dark:border-slate-700 rounded-full px-3 py-1 backdrop-blur-md">
-          userId: <span className="font-mono">{userId}</span>
-        </div>
-      </header>
-
-      {/* BODY */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* SIDEBAR */}
-        <aside className="w-64 px-4 py-6 space-y-3 border-r border-white/20 dark:border-slate-800/70 bg-white/10 dark:bg-slate-900/40 backdrop-blur-xl shadow-xl">
-          <SidebarTab
-            active={mainTab === "campaigns"}
-            label="Создание компаний"
-            onClick={() => {
-              setMainTab("campaigns");
-              setCampaignView("list");
-            }}
-          />
-          <SidebarTab
-            active={mainTab === "creatives"}
-            label="Креативы"
-            onClick={() => setMainTab("creatives")}
-          />
-          <SidebarTab
-            active={mainTab === "audiences"}
-            label="Аудитории"
-            onClick={() => setMainTab("audiences")}
-          />
-        </aside>
-
-        {/* MAIN */}
-        <main className="flex-1 p-6 overflow-auto">
-          {mainTab === "campaigns" && campaignView === "list" && (
-            <CampaignsListView
-              onCreatePreset={createNewPreset}
-              presets={savedPresets}
-              onOpenPreset={openPreset}
-              onDeletePreset={deletePreset}
-            />
+    <div className="app-root">
+      {renderHeader()}
+      <div className="app-body">
+        {renderSidebar()}
+        <main className="app-main">
+          {renderBackBar()}
+          {loading && (
+            <div className="loading-overlay">
+              <div className="loader" />
+            </div>
           )}
-
-          {mainTab === "campaigns" &&
-            campaignView === "presetEditor" &&
-            currentPreset && (
-              <PresetEditor
-                preset={currentPreset}
-                audiences={audiences}
-                onBack={() => {
-                  setCampaignView("list");
-                  setCurrentPreset(null);
-                }}
-                onChange={updateCurrentPreset}
-                onSave={saveCurrentPreset}
-                creativeSets={creativeSets}
-                onOpenVideoPicker={(groupId, adId) => {
-                  setVideoPickerTarget({ groupId, adId });
-                  setShowVideoPicker(true);
-                }}
-              />
-            )}
-
-          {mainTab === "creatives" && (
-            <CreativesView
-              creativeSets={creativeSets}
-              setCreativeSets={setCreativeSets}
-              onSave={saveCreativeSetsToServer}
-            />
-          )}
-
-          {mainTab === "audiences" && (
-            <AudiencesView audiences={audiences} />
-          )}
+          {error && <div className="error-banner">{error}</div>}
+          {renderMain()}
         </main>
-
-        {/* ПРАВАЯ ПАНЕЛЬ */}
-        {showVideoPicker && (
-          <VideoPickerPanel
-            creativeSets={creativeSets}
-            onClose={() => {
-              setShowVideoPicker(false);
-              setVideoPickerTarget(null);
-            }}
-            onApply={applySelectedVideos}
-          />
-        )}
       </div>
-    </div>
-  );
-};
-
-// ===== Компоненты =====
-
-const SidebarTab: React.FC<{
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}> = ({ label, active, onClick }) => (
-  <button
-    onClick={onClick}
-    className={`w-full text-left px-3 py-2 rounded-xl text-sm font-medium transition-all
-      flex items-center justify-between
-      ${
-        active
-          ? "bg-sky-500/90 text-white shadow-xl border border-sky-400"
-          : "text-slate-800 dark:text-slate-100 bg-white/5 dark:bg-slate-900/30 border border-white/10 dark:border-slate-800 hover:bg-white/20 dark:hover:bg-slate-800 hover:shadow-md"
-      }`}
-  >
-    <span>{label}</span>
-    {active && (
-      <span className="w-2 h-2 rounded-full bg-white/90 shadow-sm" />
-    )}
-  </button>
-);
-
-const BackRow: React.FC<{ label?: string; onClick: () => void }> = ({
-  label = "Назад",
-  onClick,
-}) => (
-  <button
-    onClick={onClick}
-    className="inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-50 mb-4 transition-colors"
-  >
-    <span className="w-7 h-7 rounded-full border border-white/40 dark:border-slate-700 bg-white/40 dark:bg-slate-900/40 flex items-center justify-center text-xs backdrop-blur">
-      ←
-    </span>
-    <span>{label}</span>
-  </button>
-);
-
-// --- Список пресетов ---
-
-const CampaignsListView: React.FC<{
-  onCreatePreset: () => void;
-  presets: Preset[];
-  onOpenPreset: (p: Preset) => void;
-  onDeletePreset: (p: Preset) => void;
-}> = ({ onCreatePreset, presets, onOpenPreset, onDeletePreset }) => {
-  return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <BackRow label="Назад" onClick={() => window.history.back()} />
-
-      <div className="flex items-center justify-between mb-2">
-        <div>
-          <h1 className="text-2xl font-semibold drop-shadow-sm">
-            Создание пресетов компаний
-          </h1>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Компания → Группы → Объявления
-          </p>
-        </div>
-        <button
-          onClick={onCreatePreset}
-          className="px-4 py-2 rounded-xl bg-sky-500/90 text-white text-sm font-medium shadow-lg hover:bg-sky-600 transition-colors backdrop-blur"
-        >
-          + Новый пресет
-        </button>
-      </div>
-
-      {/* Карточка создать */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <button
-          onClick={onCreatePreset}
-          className="flex flex-col items-center justify-center border border-dashed border-white/40 dark:border-slate-700/60 rounded-2xl py-10 bg-white/10 dark:bg-slate-900/30 hover:border-sky-400/80 hover:bg-white/20 dark:hover:bg-slate-900/50 transition-all backdrop-blur-xl shadow-lg"
-        >
-          <div className="w-12 h-12 rounded-full border border-sky-400 bg-sky-500/10 flex items-center justify-center text-sky-500 text-2xl mb-3 shadow-sm">
-            +
-          </div>
-          <span className="font-medium text-slate-800 dark:text-slate-100">
-            Создать пресет
-          </span>
-          <span className="text-xs text-slate-500 mt-1">
-            Компания → Группы → Объявления
-          </span>
-        </button>
-      </div>
-
-      {/* Список сохранённых пресетов */}
-      <div className="mt-4">
-        <h2 className="text-sm font-semibold mb-2 text-slate-700 dark:text-slate-200">
-          Сохранённые пресеты
-        </h2>
-        {presets.length === 0 && (
-          <div className="text-sm text-slate-500 dark:text-slate-400 bg-white/40 dark:bg-slate-900/40 border border-white/40 dark:border-slate-800 rounded-2xl px-4 py-3 backdrop-blur">
-            Пока нет сохранённых пресетов.
-          </div>
-        )}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {presets.map((p) => (
-            <div
-              key={p.backendId}
-              className="rounded-2xl border border-white/40 dark:border-slate-800 bg-white/50 dark:bg-slate-900/50 backdrop-blur-xl p-4 flex flex-col justify-between shadow-md"
-            >
-              <div>
-                <div className="text-xs text-slate-500 dark:text-slate-400 mb-1">
-                  {p.backendId}
-                </div>
-                <div className="font-semibold text-sm text-slate-900 dark:text-slate-100">
-                  {p.company.presetName || "Без названия"}
-                </div>
-                <div className="text-xs text-slate-600 dark:text-slate-400 mt-2">
-                  Компания:{" "}
-                  <span className="font-medium">
-                    {p.company.companyName || "не указано"}
-                  </span>
-                </div>
-              </div>
-              <div className="mt-4 flex justify-between gap-2">
-                <button
-                  onClick={() => onOpenPreset(p)}
-                  className="flex-1 px-3 py-1.5 rounded-xl text-xs bg-sky-500/90 text-white hover:bg-sky-600 shadow-md"
-                >
-                  Открыть
-                </button>
-                <button
-                  onClick={() => onDeletePreset(p)}
-                  className="px-3 py-1.5 rounded-xl text-xs bg-red-500/10 text-red-500 hover:bg-red-500/20 border border-red-500/30"
-                >
-                  Удалить
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// --- Редактор пресета ---
-
-const PresetEditor: React.FC<{
-  preset: Preset;
-  audiences: Audience[];
-  creativeSets: CreativeSet[];
-  onBack: () => void;
-  onChange: (updater: (prev: Preset) => Preset) => void;
-  onSave: () => void;
-  onOpenVideoPicker: (groupId: string, adId: string) => void;
-}> = ({
-  preset,
-  audiences,
-  onBack,
-  onChange,
-  onSave,
-  creativeSets,
-  onOpenVideoPicker,
-}) => {
-  const [selectedNode, setSelectedNode] = useState<SelectedNode>({
-    type: "company",
-  });
-
-  const updateCompanyField = (
-    field: keyof CompanySettings,
-    value: string
-  ) => {
-    onChange((prev) => ({
-      ...prev,
-      company: { ...prev.company, [field]: value },
-    }));
-  };
-
-  // --- Группы и объявления ---
-  const addGroup = () => {
-    const newGroupId = randomId();
-    const newAdId = randomId();
-    onChange((prev) => ({
-      ...prev,
-      groups: [
-        ...prev.groups,
-        {
-          id: newGroupId,
-          regions: "",
-          gender: "any",
-          age: "21-55",
-          interests: "",
-          audienceIds: [],
-          ads: [
-            {
-              id: newAdId,
-              textSetId: "new",
-              customTextSet: {
-                id: randomId(),
-                name: "",
-                shortDescription: "",
-                longDescription: "",
-              },
-              selectedCreativeItemIds: [],
-            },
-          ],
-        },
-      ],
-    }));
-    setSelectedNode({ type: "group", groupId: newGroupId });
-  };
-
-  const copyGroup = (groupId: string) => {
-    onChange((prev) => {
-      const g = prev.groups.find((g) => g.id === groupId);
-      if (!g) return prev;
-      const newGroupId = randomId();
-      const cloned: Group = {
-        ...g,
-        id: newGroupId,
-        ads: g.ads.map((a) => ({
-          ...a,
-          id: randomId(),
-          customTextSet: { ...a.customTextSet, id: randomId() },
-        })),
-      };
-      return { ...prev, groups: [...prev.groups, cloned] };
-    });
-  };
-
-  const deleteGroup = (groupId: string) => {
-    onChange((prev) => ({
-      ...prev,
-      groups: prev.groups.filter((g) => g.id !== groupId),
-    }));
-    setSelectedNode({ type: "company" });
-  };
-
-  const updateGroupField = (
-    groupId: string,
-    field: keyof Group,
-    value: any
-  ) => {
-    onChange((prev) => ({
-      ...prev,
-      groups: prev.groups.map((g) =>
-        g.id === groupId ? { ...g, [field]: value } : g
-      ),
-    }));
-  };
-
-  const updateAd = (
-    groupId: string,
-    adId: string,
-    updater: (prev: Ad) => Ad
-  ) => {
-    onChange((prev) => ({
-      ...prev,
-      groups: prev.groups.map((g) =>
-        g.id === groupId
-          ? {
-              ...g,
-              ads: g.ads.map((a) =>
-                a.id === adId ? updater(a) : a
-              ),
-            }
-          : g
-      ),
-    }));
-  };
-
-  const addAd = (groupId: string) => {
-    const newAdId = randomId();
-    onChange((prev) => ({
-      ...prev,
-      groups: prev.groups.map((g) =>
-        g.id === groupId
-          ? {
-              ...g,
-              ads: [
-                ...g.ads,
-                {
-                  id: newAdId,
-                  textSetId: "new",
-                  customTextSet: {
-                    id: randomId(),
-                    name: "",
-                    shortDescription: "",
-                    longDescription: "",
-                  },
-                  selectedCreativeItemIds: [],
-                },
-              ],
-            }
-          : g
-      ),
-    }));
-    setSelectedNode({ type: "ad", groupId, adId: newAdId });
-  };
-
-  const deleteAd = (groupId: string, adId: string) => {
-    onChange((prev) => ({
-      ...prev,
-      groups: prev.groups.map((g) =>
-        g.id === groupId
-          ? { ...g, ads: g.ads.filter((a) => a.id !== adId) }
-          : g
-      ),
-    }));
-    setSelectedNode({ type: "group", groupId });
-  };
-
-  const selectedGroup =
-    selectedNode.type === "group" || selectedNode.type === "ad"
-      ? preset.groups.find((g) => g.id === selectedNode.groupId)
-      : null;
-
-  const selectedAd =
-    selectedNode.type === "ad" && selectedGroup
-      ? selectedGroup.ads.find((a) => a.id === selectedNode.adId)
-      : null;
-
-  return (
-    <div className="h-full flex flex-col">
-      <BackRow label="Назад к пресетам" onClick={onBack} />
-
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h2 className="text-xl font-semibold mb-1 drop-shadow-sm">
-            Создание пресета
-          </h2>
-          <p className="text-xs text-slate-600 dark:text-slate-400">
-            Компания → Группы → Объявления
-          </p>
-        </div>
-        <button
-          onClick={onSave}
-          className="px-4 py-2 rounded-xl bg-sky-500/90 text-white text-sm font-medium shadow-lg hover:bg-sky-600 transition-colors backdrop-blur"
-        >
-          Сохранить пресет
-        </button>
-      </div>
-
-      <div className="flex flex-1 gap-4 min-h-0">
-        {/* Структура слева */}
-        <div className="w-64 shrink-0 rounded-2xl p-4 overflow-auto bg-white/40 dark:bg-slate-900/50 border border-white/50 dark:border-slate-800 backdrop-blur-2xl shadow-xl">
-          <div className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-3 tracking-wide">
-            Структура
-          </div>
-
-          {/* Компания */}
-          <button
-            onClick={() => setSelectedNode({ type: "company" })}
-            className={`flex items-center gap-2 w-full text-left text-sm px-2 py-2 rounded-xl mb-2 transition-all ${
-              selectedNode.type === "company"
-                ? "bg-sky-500/10 text-sky-700 dark:text-sky-200 border border-sky-400/50 shadow-sm"
-                : "hover:bg-white/40 dark:hover:bg-slate-800"
-            }`}
-          >
-            <span>Компания</span>
-          </button>
-
-          {/* Группы / объявления */}
-          <div className="space-y-2">
-            {preset.groups.map((group, groupIndex) => (
-              <div key={group.id} className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <button
-                    onClick={() =>
-                      setSelectedNode({
-                        type: "group",
-                        groupId: group.id,
-                      })
-                    }
-                    className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded-xl flex-1 transition-all ${
-                      selectedNode.type === "group" &&
-                      selectedNode.groupId === group.id
-                        ? "bg-sky-500/10 text-sky-700 dark:text-sky-200 border border-sky-400/50 shadow-sm"
-                        : "hover:bg-white/40 dark:hover:bg-slate-800"
-                    }`}
-                  >
-                    <span className="text-xs text-slate-400">⤷</span>
-                    <span>Группа {groupIndex + 1}</span>
-                  </button>
-                  <div className="flex items-center gap-1 ml-1">
-                    <IconButton
-                      title="Скопировать группу"
-                      label="⧉"
-                      onClick={() => copyGroup(group.id)}
-                    />
-                    <IconButton
-                      title="Удалить группу"
-                      label="🗑"
-                      onClick={() => deleteGroup(group.id)}
-                    />
-                  </div>
-                </div>
-
-                <div className="pl-5 space-y-1">
-                  {group.ads.map((ad, adIndex) => (
-                    <div
-                      key={ad.id}
-                      className="flex items-center justify-between"
-                    >
-                      <button
-                        onClick={() =>
-                          setSelectedNode({
-                            type: "ad",
-                            groupId: group.id,
-                            adId: ad.id,
-                          })
-                        }
-                        className={`flex items-center gap-2 text-xs px-2 py-1 rounded-xl flex-1 transition-all ${
-                          selectedNode.type === "ad" &&
-                          selectedNode.groupId === group.id &&
-                          selectedNode.adId === ad.id
-                            ? "bg-sky-500/10 text-sky-700 dark:text-sky-200 border border-sky-400/50 shadow-sm"
-                            : "hover:bg-white/40 dark:hover:bg-slate-800"
-                        }`}
-                      >
-                        <span className="text-xs text-slate-400">
-                          ⤷
-                        </span>
-                        <span>Объявление {adIndex + 1}</span>
-                      </button>
-                      <IconButton
-                        title="Удалить объявление"
-                        label="🗑"
-                        onClick={() => deleteAd(group.id, ad.id)}
-                      />
-                    </div>
-                  ))}
-                  <button
-                    onClick={() => addAd(group.id)}
-                    className="text-[11px] text-sky-600 dark:text-sky-400 hover:text-sky-700 dark:hover:text-sky-300 mt-1"
-                  >
-                    + Добавить объявление
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <button
-            onClick={addGroup}
-            className="mt-3 text-xs text-sky-600 dark:text-sky-400 hover:text-sky-700 dark:hover:text-sky-300"
-          >
-            + Добавить группу
-          </button>
-        </div>
-
-        {/* Настройки справа */}
-        <div className="flex-1 rounded-2xl bg-white/60 dark:bg-slate-900/60 border border-white/50 dark:border-slate-800 p-5 overflow-auto backdrop-blur-2xl shadow-xl">
-          {selectedNode.type === "company" && (
-            <CompanySettingsForm
-              company={preset.company}
-              onChange={updateCompanyField}
-            />
-          )}
-
-          {selectedNode.type === "group" && selectedGroup && (
-            <GroupSettingsForm
-              group={selectedGroup}
-              audiences={audiences}
-              onChange={(field, value) =>
-                updateGroupField(selectedGroup.id, field, value)
-              }
-            />
-          )}
-
-          {selectedNode.type === "ad" && selectedGroup && selectedAd && (
-            <AdSettingsForm
-              ad={selectedAd}
-              creativeSets={creativeSets}
-              onChange={(updater) =>
-                updateAd(selectedGroup.id, selectedAd.id, updater)
-              }
-              onOpenVideoPicker={() =>
-                onOpenVideoPicker(selectedGroup.id, selectedAd.id)
-              }
-            />
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const IconButton: React.FC<{
-  label: string;
-  title?: string;
-  onClick: () => void;
-}> = ({ label, title, onClick }) => (
-  <button
-    type="button"
-    title={title}
-    onClick={onClick}
-    className="w-6 h-6 rounded-lg flex items-center justify-center text-xs text-slate-500 dark:text-slate-300 hover:bg-white/50 dark:hover:bg-slate-800 transition-colors"
-  >
-    {label}
-  </button>
-);
-
-// --- Формы настроек ---
-
-const Field: React.FC<{
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}> = ({ label, value, onChange, placeholder }) => (
-  <div>
-    <label className="block text-xs font-medium mb-1 text-slate-700 dark:text-slate-300">
-      {label}
-    </label>
-    <input
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      className="w-full px-3 py-2 rounded-xl border border-slate-200/70 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 transition-colors"
-    />
-  </div>
-);
-
-const SelectField: React.FC<{
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string }[];
-}> = ({ label, value, onChange, options }) => (
-  <div>
-    <label className="block text-xs font-medium mb-1 text-slate-700 dark:text-slate-300">
-      {label}
-    </label>
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="w-full px-3 py-2 rounded-xl border border-slate-200/70 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 transition-colors"
-    >
-      {options.map((opt) => (
-        <option key={opt.value} value={opt.value}>
-          {opt.label}
-        </option>
-      ))}
-    </select>
-  </div>
-);
-
-const CompanySettingsForm: React.FC<{
-  company: CompanySettings;
-  onChange: (field: keyof CompanySettings, value: string) => void;
-}> = ({ company, onChange }) => (
-  <div className="space-y-4">
-    <h3 className="text-lg font-semibold mb-2 text-slate-800 dark:text-slate-100">
-      Компания
-    </h3>
-
-    <Field
-      label="Название пресета"
-      value={company.presetName}
-      onChange={(v) => onChange("presetName", v)}
-    />
-    <Field
-      label="Название компаний"
-      value={company.companyName}
-      onChange={(v) => onChange("companyName", v)}
-    />
-    <Field
-      label="Целевое действие"
-      value={company.targetAction}
-      onChange={(v) => onChange("targetAction", v)}
-      placeholder="Например: Лиды, Трафик, Конверсии"
-    />
-
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <SelectField
-        label="Триггер"
-        value={company.trigger}
-        onChange={(v) => onChange("trigger", v as TriggerType)}
-        options={[
-          { value: "none", label: "Нет" },
-          { value: "time", label: "Время" },
-        ]}
-      />
-      {company.trigger === "time" && (
-        <div>
-          <label className="block text-xs font-medium mb-1 text-slate-700 dark:text-slate-300">
-            Время
-          </label>
-          <input
-            type="time"
-            value={company.time}
-            onChange={(e) => onChange("time", e.target.value)}
-            className="w-full px-3 py-2 rounded-xl border border-slate-200/70 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 transition-colors"
-          />
-        </div>
-      )}
-    </div>
-  </div>
-);
-
-const GroupSettingsForm: React.FC<{
-  group: Group;
-  audiences: Audience[];
-  onChange: (field: keyof Group, value: any) => void;
-}> = ({ group, audiences, onChange }) => {
-  const toggleAudience = (id: number) => {
-    const exists = group.audienceIds.includes(id);
-    if (exists) {
-      onChange(
-        "audienceIds",
-        group.audienceIds.filter((x) => x !== id)
-      );
-    } else {
-      onChange("audienceIds", [...group.audienceIds, id]);
-    }
-  };
-
-  return (
-    <div className="space-y-4">
-      <h3 className="text-lg font-semibold mb-2 text-slate-800 dark:text-slate-100">
-        Группа
-      </h3>
-
-      <Field
-        label="Регионы"
-        value={group.regions}
-        onChange={(v) => onChange("regions", v)}
-        placeholder="Например: Москва, СПб"
-      />
-
-      <SelectField
-        label="Пол"
-        value={group.gender}
-        onChange={(v) => onChange("gender", v as Group["gender"])}
-        options={[
-          { value: "any", label: "Любой" },
-          { value: "male", label: "Мужской" },
-          { value: "female", label: "Женский" },
-        ]}
-      />
-
-      <Field
-        label="Возраст"
-        value={group.age}
-        onChange={(v) => onChange("age", v)}
-        placeholder="21-55"
-      />
-
-      <Field
-        label="Интересы"
-        value={group.interests}
-        onChange={(v) => onChange("interests", v)}
-        placeholder="Например: Авто, Недвижимость"
-      />
-
-      <div>
-        <div className="flex items-center justify-between mb-1">
-          <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-            Аудитории
-          </label>
-          <span className="text-[11px] text-slate-400">
-            (в JSON сохраняются id)
-          </span>
-        </div>
-        <div className="border rounded-xl border-slate-200/70 dark:border-slate-700 max-h-40 overflow-auto p-2 bg-white/60 dark:bg-slate-900/60 text-xs space-y-1 backdrop-blur">
-          {audiences.length === 0 && (
-            <div className="text-slate-400">
-              Аудитории не загружены или пусто
-            </div>
-          )}
-          {audiences.map((a) => {
-            const selected = group.audienceIds.includes(a.id);
-            return (
-              <button
-                key={a.id}
-                type="button"
-                onClick={() => toggleAudience(a.id)}
-                className={`w-full flex items-center justify-between px-2 py-1 rounded-lg transition-colors ${
-                  selected
-                    ? "bg-sky-500/10 text-sky-700 dark:text-sky-200 border border-sky-400/60"
-                    : "hover:bg-white/50 dark:hover:bg-slate-800"
-                }`}
-              >
-                <span>{a.name}</span>
-                <span className="text-[11px] text-slate-400">
-                  id: {a.id}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const AdSettingsForm: React.FC<{
-  ad: Ad;
-  creativeSets: CreativeSet[];
-  onChange: (updater: (prev: Ad) => Ad) => void;
-  onOpenVideoPicker: () => void;
-}> = ({ ad, creativeSets, onChange, onOpenVideoPicker }) => {
-  const handleTextSetChange = (field: keyof TextSet, value: string) => {
-    onChange((prev) => ({
-      ...prev,
-      customTextSet: { ...prev.customTextSet, [field]: value },
-    }));
-  };
-
-  const availableTextSetOptions = [
-    { value: "new", label: "Создать новый набор" },
-  ];
-
-  const selectedCreativeItems: CreativeItem[] = useMemo(() => {
-    const items: CreativeItem[] = [];
-    creativeSets.forEach((set) =>
-      set.items.forEach((item) => {
-        if (ad.selectedCreativeItemIds.includes(item.id)) {
-          items.push(item);
-        }
-      })
-    );
-    return items;
-  }, [creativeSets, ad.selectedCreativeItemIds]);
-
-  return (
-    <div className="space-y-4">
-      <h3 className="text-lg font-semibold mb-2 text-slate-800 dark:text-slate-100">
-        Объявление
-      </h3>
-
-      <SelectField
-        label="Текстовый набор"
-        value={ad.textSetId}
-        onChange={(v) =>
-          onChange((prev) => ({ ...prev, textSetId: v as any }))
-        }
-        options={availableTextSetOptions}
-      />
-
-      <Field
-        label="Название текстового набора"
-        value={ad.customTextSet.name}
-        onChange={(v) => handleTextSetChange("name", v)}
-      />
-      <Field
-        label="Короткое описание"
-        value={ad.customTextSet.shortDescription}
-        onChange={(v) => handleTextSetChange("shortDescription", v)}
-      />
-      <Field
-        label="Длинное описание"
-        value={ad.customTextSet.longDescription}
-        onChange={(v) => handleTextSetChange("longDescription", v)}
-      />
-
-      <div className="space-y-2">
-        <label className="block text-xs font-medium mb-1 text-slate-700 dark:text-slate-300">
-          Выбрать видео
-        </label>
-        <button
-          type="button"
-          onClick={onOpenVideoPicker}
-          className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-slate-200/70 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 text-sm hover:border-sky-400 hover:ring-1 hover:ring-sky-300 transition-all"
-        >
-          <span className="text-slate-600 dark:text-slate-300">
-            Открыть список креативов
-          </span>
-          <span className="text-xs text-sky-600 dark:text-sky-400">
-            {ad.selectedCreativeItemIds.length > 0
-              ? `Выбрано: ${ad.selectedCreativeItemIds.length}`
-              : "Не выбрано"}
-          </span>
-        </button>
-
-        {selectedCreativeItems.length > 0 && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2">
-            {selectedCreativeItems.map((item) => (
-              <div
-                key={item.id}
-                className="border border-slate-200/70 dark:border-slate-700 rounded-xl overflow-hidden text-[11px] bg-white/70 dark:bg-slate-900/60 backdrop-blur"
-              >
-                <div className="aspect-video bg-slate-200 dark:bg-slate-800">
-                  <video
-                    src={item.url}
-                    className="w-full h-full object-cover"
-                    muted
-                  />
-                </div>
-                <div className="px-2 py-1 truncate">{item.name}</div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-// --- Креативы ---
-
-const CreativesView: React.FC<{
-  creativeSets: CreativeSet[];
-  setCreativeSets: React.Dispatch<React.SetStateAction<CreativeSet[]>>;
-  onSave: () => void;
-}> = ({ creativeSets, setCreativeSets, onSave }) => {
-  const [newSetName, setNewSetName] = useState("");
-
-  const createSet = () => {
-    if (!newSetName.trim()) return;
-    const newSet: CreativeSet = {
-      id: randomId(),
-      name: newSetName.trim(),
-      items: [],
-    };
-    setCreativeSets((prev) => [...prev, newSet]);
-    setNewSetName("");
-  };
-
-  const uploadFiles = async (setId: string, files: FileList | null) => {
-    if (!files || files.length === 0) return;
-
-    const newItems: CreativeItem[] = [];
-
-    for (const file of Array.from(files)) {
-      const form = new FormData();
-      form.append("file", file);
-
-      try {
-        const res = await fetch("/api/auto_ads/upload", {
-          method: "POST",
-          body: form,
-        });
-        if (!res.ok) continue;
-        const data = await res.json();
-        const url = data.url as string;
-        const ext = file.name.toLowerCase();
-        const type: "video" | "image" =
-          ext.endsWith(".mp4") ||
-          ext.endsWith(".mov") ||
-          ext.endsWith(".webm")
-            ? "video"
-            : "image";
-
-        newItems.push({
-          id: randomId(),
-          name: file.name,
-          type,
-          url, // backend url (например /auto_ads/video/file.mp4)
-        });
-      } catch (e) {
-        console.error("upload error", e);
-      }
-    }
-
-    if (newItems.length > 0) {
-      setCreativeSets((prev) =>
-        prev.map((set) =>
-          set.id === setId
-            ? { ...set, items: [...set.items, ...newItems] }
-            : set
-        )
-      );
-    }
-  };
-
-  const deleteItem = (setId: string, itemId: string) => {
-    setCreativeSets((prev) =>
-      prev.map((set) =>
-        set.id === setId
-          ? {
-              ...set,
-              items: set.items.filter((i) => i.id !== itemId),
-            }
-          : set
-      )
-    );
-  };
-
-  return (
-    <div className="max-w-5xl mx-auto">
-      <BackRow label="Назад" onClick={() => window.history.back()} />
-
-      <div className="flex items-center justify-between mb-2">
-        <div>
-          <h1 className="text-2xl font-semibold drop-shadow-sm">
-            Креативы
-          </h1>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mb-1">
-            Создавайте наборы креативов, загружайте видео и картинки.
-          </p>
-        </div>
-        <button
-          onClick={onSave}
-          className="px-4 py-2 rounded-xl bg-sky-500/90 text-white text-sm font-medium shadow-lg hover:bg-sky-600 transition-colors backdrop-blur"
-        >
-          Сохранить изменения
-        </button>
-      </div>
-
-      <div className="flex gap-2 mb-6">
-        <input
-          value={newSetName}
-          onChange={(e) => setNewSetName(e.target.value)}
-          placeholder="Название набора креативов"
-          className="flex-1 px-3 py-2 rounded-xl border border-slate-200/70 dark:border-slate-700 bg-white/70 dark:bg-slate-900/60 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400"
-        />
-        <button
-          onClick={createSet}
-          className="px-4 py-2 rounded-xl bg-sky-500/90 text-white text-sm font-medium shadow-lg hover:bg-sky-600 transition-colors backdrop-blur"
-        >
-          Создать набор
-        </button>
-      </div>
-
-      <div className="space-y-4">
-        {creativeSets.map((set) => (
-          <div
-            key={set.id}
-            className="rounded-2xl border border-white/40 dark:border-slate-800 bg-white/60 dark:bg-slate-900/60 p-4 backdrop-blur-xl shadow-xl"
-          >
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-                  {set.name}
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Элементов: {set.items.length}
-                </p>
-              </div>
-            </div>
-
-            <label className="block border-2 border-dashed border-slate-300/80 dark:border-slate-700 rounded-xl py-6 px-4 text-xs text-center text-slate-500 dark:text-slate-400 cursor-pointer hover:border-sky-400 hover:bg-white/40 dark:hover:bg-slate-800/60 transition-colors bg-white/40 dark:bg-slate-900/40 backdrop-blur">
-              <input
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(e) => uploadFiles(set.id, e.target.files)}
-              />
-              Перетащите файлы сюда или нажмите, чтобы выбрать
-              <br />
-              <span className="text-[11px] text-slate-400">
-                Видео и изображения будут сохранены на сервере
-              </span>
-            </label>
-
-            {set.items.length > 0 && (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
-                {set.items.map((item) => (
-                  <div
-                    key={item.id}
-                    className="relative border border-slate-200/70 dark:border-slate-700 rounded-xl overflow-hidden group bg-white/60 dark:bg-slate-900/60 backdrop-blur"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => deleteItem(set.id, item.id)}
-                      className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-black/60 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                    >
-                      ✕
-                    </button>
-                    <div className="aspect-video bg-slate-200 dark:bg-slate-800">
-                      {item.type === "video" ? (
-                        <video
-                          src={item.url}
-                          className="w-full h-full object-cover"
-                          muted
-                        />
-                      ) : (
-                        <img
-                          src={item.url}
-                          alt={item.name}
-                          className="w-full h-full object-cover"
-                        />
-                      )}
-                    </div>
-                    <div className="px-2 py-1 text-[11px] truncate">
-                      {item.name}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        ))}
-
-        {creativeSets.length === 0 && (
-          <div className="text-sm text-slate-500 bg-white/60 dark:bg-slate-900/60 border border-white/40 dark:border-slate-800 rounded-2xl px-4 py-3 backdrop-blur">
-            Наборы креативов ещё не созданы.
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-// --- Аудитории ---
-
-const AudiencesView: React.FC<{ audiences: Audience[] }> = ({
-  audiences,
-}) => (
-  <div className="max-w-3xl mx-auto">
-    <BackRow label="Назад" onClick={() => window.history.back()} />
-
-    <h1 className="text-2xl font-semibold mb-2 drop-shadow-sm">
-      Аудитории
-    </h1>
-    <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">
-      Список сегментов, полученных с бэка
-      <br />
-      <span className="text-xs text-slate-400">
-        /api/v2/remarketing/segments.json?limit=100
-      </span>
-    </p>
-
-    <div className="rounded-2xl border border-white/40 dark:border-slate-800 bg-white/60 dark:bg-slate-900/60 overflow-hidden backdrop-blur-xl shadow-xl">
-      <div className="grid grid-cols-[1fr_auto] gap-2 text-xs font-semibold px-4 py-2 border-b border-slate-200/60 dark:border-slate-800 text-slate-700 dark:text-slate-200">
-        <div>Название</div>
-        <div className="text-right">ID</div>
-      </div>
-      <div className="max-h-[480px] overflow-auto text-xs">
-        {audiences.map((a) => (
-          <div
-            key={a.id}
-            className="grid grid-cols-[1fr_auto] gap-2 px-4 py-2 border-t border-slate-100/60 dark:border-slate-800"
-          >
-            <div className="truncate">{a.name}</div>
-            <div className="text-right text-slate-400">#{a.id}</div>
-          </div>
-        ))}
-        {audiences.length === 0 && (
-          <div className="px-4 py-3 text-slate-400">
-            Аудитории не загружены.
-          </div>
-        )}
-      </div>
-    </div>
-  </div>
-);
-
-// --- Панель выбора видео ---
-
-const VideoPickerPanel: React.FC<{
-  creativeSets: CreativeSet[];
-  onClose: () => void;
-  onApply: (ids: string[]) => void;
-}> = ({ creativeSets, onClose, onApply }) => {
-  const [expandedSetIds, setExpandedSetIds] = useState<string[]>([]);
-  const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
-
-  const toggleSetExpanded = (id: string) => {
-    setExpandedSetIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
-    );
-  };
-
-  const toggleItem = (id: string) => {
-    setSelectedItemIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
-    );
-  };
-
-  const toggleWholeSet = (set: CreativeSet) => {
-    const allIds = set.items.map((i) => i.id);
-    const allSelected = allIds.every((id) =>
-      selectedItemIds.includes(id)
-    );
-    if (allSelected) {
-      setSelectedItemIds((prev) =>
-        prev.filter((id) => !allIds.includes(id))
-      );
-    } else {
-      setSelectedItemIds((prev) =>
-        Array.from(new Set([...prev, ...allIds]))
-      );
-    }
-  };
-
-  const apply = () => onApply(selectedItemIds);
-
-  return (
-    <div className="w-96 h-full flex flex-col border-l border-white/30 dark:border-slate-800 bg-white/40 dark:bg-slate-900/60 backdrop-blur-2xl shadow-2xl">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200/60 dark:border-slate-800">
-        <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-          Выбор видео
-        </span>
-        <button
-          onClick={onClose}
-          className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-100"
-        >
-          ✕
-        </button>
-      </div>
-
-      <div className="flex-1 overflow-auto px-3 py-2 text-xs space-y-3">
-        {creativeSets.map((set) => (
-          <div
-            key={set.id}
-            className="border border-slate-200/70 dark:border-slate-800 rounded-xl overflow-hidden bg-white/60 dark:bg-slate-900/60 backdrop-blur"
-          >
-            <div className="flex items-center justify-between px-3 py-2 bg-white/60 dark:bg-slate-900/70">
-              <button
-                onClick={() => toggleSetExpanded(set.id)}
-                className="flex-1 text-left flex items-center gap-2 text-slate-800 dark:text-slate-100"
-              >
-                <span>
-                  {expandedSetIds.includes(set.id) ? "▾" : "▸"}
-                </span>
-                <span>{set.name}</span>
-              </button>
-              <button
-                onClick={() => toggleWholeSet(set)}
-                className="text-[11px] text-sky-600 dark:text-sky-400"
-              >
-                {set.items.length > 0 &&
-                set.items.every((i) => selectedItemIds.includes(i.id))
-                  ? "Снять выбор"
-                  : "Выбрать набор"}
-              </button>
-            </div>
-            {expandedSetIds.includes(set.id) && (
-              <div className="px-3 py-2 space-y-2">
-                {set.items.map((item) => {
-                  const selected = selectedItemIds.includes(item.id);
-                  return (
-                    <button
-                      key={item.id}
-                      onClick={() => toggleItem(item.id)}
-                      className={`w-full flex items-center gap-2 rounded-lg border px-2 py-2 text-left transition-colors ${
-                        selected
-                          ? "border-sky-400 bg-sky-50/80 dark:bg-sky-900/40"
-                          : "border-slate-200 dark:border-slate-700 hover:bg-white/60 dark:hover:bg-slate-900/60"
-                      }`}
-                    >
-                      <div className="w-10 h-10 rounded bg-slate-200 dark:bg-slate-800 overflow-hidden flex items-center justify-center text-[11px]">
-                        {item.type === "video" ? (
-                          <video
-                            src={item.url}
-                            className="w-full h-full object-cover"
-                            muted
-                          />
-                        ) : (
-                          <img
-                            src={item.url}
-                            alt={item.name}
-                            className="w-full h-full object-cover"
-                          />
-                        )}
-                      </div>
-                      <div className="flex-1">
-                        <div className="text-[11px] truncate">
-                          {item.name}
-                        </div>
-                        <div className="text-[11px] text-slate-400">
-                          {item.type === "video" ? "Видео" : "Картинка"}
-                        </div>
-                      </div>
-                      <div className="text-xs">
-                        {selected ? "✔" : "○"}
-                      </div>
-                    </button>
-                  );
-                })}
-                {set.items.length === 0 && (
-                  <div className="text-[11px] text-slate-400">
-                    В наборе пока нет креативов
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        ))}
-
-        {creativeSets.length === 0 && (
-          <div className="text-xs text-slate-400 px-1">
-            Наборы креативов не созданы. Создайте их во вкладке
-            &laquo;Креативы&raquo;.
-          </div>
-        )}
-      </div>
-
-      <div className="px-4 py-3 border-t border-slate-200/60 dark:border-slate-800 flex items-center justify-between bg-white/50 dark:bg-slate-900/70 backdrop-blur">
-        <span className="text-[11px] text-slate-600 dark:text-slate-300">
-          Выбрано: {selectedItemIds.length}
-        </span>
-        <button
-          onClick={apply}
-          className="px-3 py-1.5 rounded-xl bg-sky-500/90 text-white text-xs font-medium hover:bg-sky-600 transition-colors disabled:opacity-50 shadow-md"
-          disabled={selectedItemIds.length === 0}
-        >
-          Добавить в объявление
-        </button>
-      </div>
+      {renderVideoPickerDrawer()}
     </div>
   );
 };
