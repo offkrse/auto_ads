@@ -79,7 +79,7 @@ def settings_file(user_id: str) -> Path:
 # -------------------------------------
 #   PRESETS (each in separate file)
 # -------------------------------------
-@app.post("/api/auto_ads/preset/save")
+@app.post("/auto_ads/api/preset/save")
 async def save_preset(payload: dict):
     user_id = payload.get("userId")
     preset = payload.get("preset")
@@ -109,7 +109,7 @@ async def save_preset(payload: dict):
     return {"status": "ok", "preset_id": preset_id}
 
 
-@app.get("/api/auto_ads/preset/list")
+@app.get("/auto_ads/api/preset/list")
 def list_presets(user_id: str):
     info = load_user_info(user_id)
     result = []
@@ -126,7 +126,7 @@ def list_presets(user_id: str):
     return {"presets": result}
 
 
-@app.delete("/api/auto_ads/preset/delete")
+@app.delete("/auto_ads/api/preset/delete")
 def delete_preset(user_id: str, preset_id: str):
     info = load_user_info(user_id)
 
@@ -145,7 +145,7 @@ def delete_preset(user_id: str, preset_id: str):
 # -------------------------------------
 #   CREATIVE SETS
 # -------------------------------------
-@app.post("/api/auto_ads/creatives/save")
+@app.post("/auto_ads/api/creatives/save")
 async def save_creatives(payload: dict):
     user_id = payload.get("userId")
     creatives = payload.get("creatives")
@@ -165,7 +165,7 @@ async def save_creatives(payload: dict):
     return {"status": "ok"}
 
 
-@app.get("/api/auto_ads/creatives/get")
+@app.get("/auto_ads/api/creatives/get")
 def get_creatives(user_id: str):
     f = creatives_file(user_id)
     if not f.exists():
@@ -178,7 +178,7 @@ def get_creatives(user_id: str):
 # -------------------------------------
 #   AUDIENCES
 # -------------------------------------
-@app.post("/api/auto_ads/audiences/save")
+@app.post("/auto_ads/api/audiences/save")
 async def save_audiences(payload: dict):
     user_id = payload.get("userId")
     audiences = payload.get("audiences")
@@ -194,7 +194,7 @@ async def save_audiences(payload: dict):
     return {"status": "ok"}
 
 
-@app.get("/api/auto_ads/audiences/get")
+@app.get("/auto_ads/api/audiences/get")
 def get_saved_audiences(user_id: str):
     f = audiences_file(user_id)
     if not f.exists():
@@ -207,7 +207,7 @@ def get_saved_audiences(user_id: str):
 # -------------------------------------
 #   SETTINGS (theme, language, any future)
 # -------------------------------------
-@app.post("/api/auto_ads/settings/save")
+@app.post("/auto_ads/api/settings/save")
 async def save_settings(payload: dict):
     user_id = payload.get("userId")
     settings = payload.get("settings")
@@ -224,7 +224,7 @@ async def save_settings(payload: dict):
     return {"status": "ok"}
 
 
-@app.get("/api/auto_ads/settings/get")
+@app.get("/auto_ads/api/settings/get")
 def get_settings(user_id: str):
     f = settings_file(user_id)
     if not f.exists():
@@ -237,7 +237,7 @@ def get_settings(user_id: str):
 # -------------------------------------
 #   FILE STORAGE (videos/images)
 # -------------------------------------
-@app.post("/api/auto_ads/upload")
+@app.post("/auto_ads/api/upload")
 async def upload_creative(file: UploadFile = File(...)):
     filename = file.filename
     save_path = STORAGE_DIR / filename
@@ -264,7 +264,7 @@ if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
 
-@app.get("/api/auto_ads/status")
+@app.get("/auto_ads/api/status")
 def status():
     return {"status": "running"}
 
