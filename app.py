@@ -249,7 +249,7 @@ async def upload_creative(file: UploadFile = File(...)):
     return {"status": "ok", "url": url}
 
 
-@app.get("/video/{filename}")
+@app.get("/auto_ads/video/{filename}")
 def serve_file(filename: str):
     path = STORAGE_DIR / filename
     if not path.exists():
