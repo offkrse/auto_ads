@@ -504,7 +504,6 @@ const App: React.FC = () => {
               creativeSets={creativeSets}
               setCreativeSets={setCreativeSets}
               onSave={saveCreativeSetsToServer}
-              userId={userId}
             />
           )}
 
@@ -1298,8 +1297,7 @@ const CreativesView: React.FC<{
   creativeSets: CreativeSet[];
   setCreativeSets: React.Dispatch<React.SetStateAction<CreativeSet[]>>;
   onSave: () => void;
-  userId: string;
-}> = ({ creativeSets, setCreativeSets, onSave, userId }) => {
+}> = ({ creativeSets, setCreativeSets, onSave }) => {
   const [newSetName, setNewSetName] = useState("");
 
   const createSet = () => {
