@@ -384,7 +384,8 @@ async def upload_creative(
 # -------------------------------------
 #   FRONTEND BUILD
 # -------------------------------------
-
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="auto_ads_frontend")
 
 @app.get("/api/status")
 def status():
