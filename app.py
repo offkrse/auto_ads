@@ -206,7 +206,7 @@ def get_creatives(user_id: str, cabinet_id: str):
         return {"creatives": json.load(file)}
 
 
-@app.get("/auto_ads/video/{cabinet_id}/{filename}")
+@app.get("/video/{cabinet_id}/{filename}")
 def serve_file(cabinet_id: str, filename: str):
     path = cabinet_storage(cabinet_id) / filename
     if not path.exists():
