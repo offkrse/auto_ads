@@ -306,7 +306,6 @@ async def upload_creative(
     cabinet_id: str,
     file: UploadFile = File(...)
 ):
-    # --- 1) Определяем тип файла ---
     content_type = file.content_type
     is_image = content_type.startswith("image")
     is_video = content_type.startswith("video")
@@ -314,63 +313,90 @@ async def upload_creative(
     if not (is_image or is_video):
         raise HTTPException(400, "Only image or video allowed")
 
-    # --- 2) Папка кабинета ---
-    storage = cabinet_storage(cabinet_id)
-
-    # --- 3) Сохраняем файл во временный файл ---
+    # подготовка для анализа размеров
+    import tempfile
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
 
-    # --- 4) Определяем ширину/высоту ---
+    # определяем ширину и высоту
     if is_image:
         img = Image.open(tmp_path)
         width, height = img.size
     else:
-        width, height = (720, 1280)  # можно заменить анализом через ffprobe
+        width, height = (720, 1280)
 
-    # --- 5) Готовим multipart-data для VK ---
-    vk_url = (
-        "https://ads.vk.com/api/v2/content/static.json"
-        if is_image else
-        "https://ads.vk.com/api/v2/content/video.json"
-    )
-
-    # Берём токен кабинета
+    # берём токены
     data = ensure_user_structure(user_id)
-    cabinet = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
-    if not cabinet or not cabinet.get("token"):
-        raise HTTPException(400, "Cabinet token missing")
 
-    headers = {
-        "Authorization": f"Bearer {cabinet['token']}"
-    }
+    # если cabinet_id == "all", выбираем все кабинеты, кроме all
+    if cabinet_id == "all":
+        target_cabinets = [
+            c for c in data["cabinets"]
+            if c["id"] != "all" and c.get("token")
+        ]
+    else:
+        target_cabinets = [
+            c for c in data["cabinets"]
+            if str(c["id"]) == str(cabinet_id)
+        ]
 
-    files = {
-        "file": (file.filename, open(tmp_path, "rb"), content_type),
-        "data": (None, json.dumps({"width": width, "height": height}), "application/json")
-    }
+    if not target_cabinets:
+        raise HTTPException(400, "No valid cabinets found")
 
-    vk_resp = requests.post(vk_url, headers=headers, files=files)
+    results = []
 
-    if vk_resp.status_code != 200:
-        raise HTTPException(500, f"VK upload error: {vk_resp.text}")
+    # перебираем все кабинеты
+    for cabinet in target_cabinets:
+        token_name = cabinet.get("token")
+        if not token_name:
+            continue
 
-    vk_json = vk_resp.json()
+        real_token = os.getenv(token_name)
+        if not real_token:
+            raise HTTPException(500, f"Token {token_name} not found in environment")
 
-    # --- 6) ID от VK ADS ---
-    vk_id = vk_json.get("id")
-    if not vk_id:
-        raise HTTPException(500, "VK did not return id")
+        vk_url = (
+            "https://ads.vk.com/api/v2/content/static.json"
+            if is_image else
+            "https://ads.vk.com/api/v2/content/video.json"
+        )
 
-    # --- 7) Перемещаем файл в постоянное хранилище ---
-    final_path = storage / f"{vk_id}_{file.filename}"
-    shutil.move(tmp_path, final_path)
+        headers = {
+            "Authorization": f"Bearer {real_token}"
+        }
+
+        files = {
+            "file": (file.filename, open(tmp_path, "rb"), content_type),
+            "data": (None, json.dumps({"width": width, "height": height}), "application/json")
+        }
+
+        # отправляем файл в VK ADS
+        resp = requests.post(vk_url, headers=headers, files=files)
+
+        if resp.status_code != 200:
+            raise HTTPException(500, f"VK upload error for {cabinet['id']}: {resp.text}")
+
+        resp_json = resp.json()
+        vk_id = resp_json.get("id")
+        if not vk_id:
+            raise HTTPException(500, f"No id returned for cabinet {cabinet['id']}")
+
+        # сохраняем локально
+        storage = cabinet_storage(cabinet["id"])
+        final_name = f"{vk_id}_{file.filename}"
+        final_path = storage / final_name
+        shutil.copy(tmp_path, final_path)
+
+        results.append({
+            "cabinet_id": cabinet["id"],
+            "vk_id": vk_id,
+            "url": f"/video/{cabinet['id']}/{final_name}"
+        })
 
     return {
         "status": "ok",
-        "vk_id": vk_id,
-        "url": f"/video/{cabinet_id}/{vk_id}_{file.filename}"
+        "results": results
     }
 
 
