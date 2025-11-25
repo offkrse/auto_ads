@@ -2,9 +2,6 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
-import requests
-from PIL import Image
-import tempfile
 import json
 import shutil
 import uvicorn
@@ -25,10 +22,6 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
-def cabinet_storage(cabinet_id: str) -> Path:
-    path = STORAGE_DIR / str(cabinet_id)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
     
 def ensure_user_structure(user_id: str):
     """Создает структуру и единый файл <id>.json, если его нет."""
