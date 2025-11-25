@@ -94,41 +94,14 @@ def user_info_file(user_id: str) -> Path:
 
 
 def load_user_info(user_id: str) -> dict:
-    f = user_info_file(user_id)
-    if not f.exists():
-        data = {
-            "user_id": user_id,
-            "presets": [],
-            "creatives": [],
-            "audiences": [],
-            "settings": {},
-        }
-        save_user_info(user_id, data)
-        return data
+    # всегда сначала создаём базовую структуру
+    base = ensure_user_structure(user_id)
 
-    with open(f, "r") as file:
-        return json.load(file)
+    return base
 
-
-def save_user_info(user_id: str, data: dict):
-    f = user_info_file(user_id)
-    with open(f, "w") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2)
 
 def preset_path(user_id: str, cabinet_id: str, preset_id: str) -> Path:
     return USERS_DIR / user_id / "presets" / cabinet_id / f"{preset_id}.json"
-    
-def preset_file(user_id: str, preset_id: str) -> Path:
-    return udir(user_id) / "presets" / f"{preset_id}.json"
-
-def creatives_file(user_id: str) -> Path:
-    return udir(user_id) / "creatives" / "creatives.json"
-
-def audiences_file(user_id: str) -> Path:
-    return udir(user_id) / "audiences" / "audiences.json"
-
-def settings_file(user_id: str) -> Path:
-    return udir(user_id) / "settings.json"
     
 def creatives_path(user_id: str, cabinet_id: str) -> Path:
     return USERS_DIR / user_id / "creatives" / cabinet_id / "sets.json"
