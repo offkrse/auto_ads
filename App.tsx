@@ -9,9 +9,9 @@ declare global {
 type Theme = "light" | "dark";
 
 type Cabinet = {
-  id_cabinet: string;
-  name_cabinet: string;
-  token_cabinet: string;
+  id: string;
+  name: string;
+  token: string;
 };
 
 type TextSet = {
@@ -50,10 +50,12 @@ type PresetCompany = {
 type PresetGroup = {
   id: string;
   regions: string;
-  gender: "any" | "male" | "female";
+  gender: "male,female" | "male" | "female";
   age: string;
   interests: string;
   audienceIds: string[];
+  budget: string;
+  utm: string;
 };
 
 type PresetAd = {
@@ -64,6 +66,7 @@ type PresetAd = {
   longDescription: string;
   videoIds: string[];
   creativeSetIds: string[];
+  url: string;
 };
 
 type Preset = {
@@ -87,14 +90,49 @@ const App: React.FC = () => {
   const [userId, setUserId] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>("dark");
   const [isMobile, setIsMobile] = useState(false);
+  const [popup, setPopup] = useState<{open: boolean, msg: string}>({
+    open: false,
+    msg: ""
+  });
+
+  const showPopup = (msg: string) => {
+    setPopup({open: true, msg});
+    setTimeout(() => setPopup({open: false, msg: ""}), 2500);
+  };
+
+  // -------- Confirm Dialog --------
+  const [confirmDialog, setConfirmDialog] = useState<{
+    open: boolean;
+    msg: string;
+    resolve?: (val: boolean) => void;
+  }>({
+    open: false,
+    msg: ""
+  });
+
+  const [noCabinetsWarning, setNoCabinetsWarning] = useState(false);
+
+  const askConfirm = (msg: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      setConfirmDialog({
+        open: true,
+        msg,
+        resolve
+      });
+    });
+  };
+
+  const closeConfirm = (result: boolean) => {
+    if (confirmDialog.resolve) confirmDialog.resolve(result);
+    setConfirmDialog({ open: false, msg: "", resolve: undefined });
+  };
+
 
   const [activeTab, setActiveTab] = useState<TabId>("campaigns");
   const [view, setView] = useState<View>({ type: "home" });
 
   const [cabinets, setCabinets] = useState<Cabinet[]>([]);
-  const [selectedCabinetId, setSelectedCabinetId] = useState<string | null>(
-    null
-  );
+  const [selectedCabinetId, setSelectedCabinetId] = useState<string>("all");
 
   const [presets, setPresets] = useState<
     { preset_id: string; data: Preset }[]
@@ -149,19 +187,28 @@ const App: React.FC = () => {
   // ----------------- Telegram init -----------------
   useEffect(() => {
     const tg = window.Telegram?.WebApp;
-    if (tg) {
-      try {
-        tg.ready();
-      } catch {}
-      const id =
-        tg.initDataUnsafe?.user?.id?.toString() ||
-        tg.initDataUnsafe?.user?.username ||
-        "demo_user";
-      setUserId(id);
+    console.log("TG WebApp:", tg); // отладка
+
+    if (!tg) {
+      console.warn("⚠️ Telegram WebApp не найден — вход как demo_user");
+      setUserId("demo_user");
+      return;
+    }
+
+    tg.expand();
+    try { tg.ready(); } catch {}
+
+    const user = tg.initDataUnsafe?.user;
+    console.log("TG User:", user);
+
+    if (user?.id) {
+      setUserId(String(user.id));  // <-- теперь будет реальный Telegram ID
     } else {
+      console.warn("⚠️ Нет user.id в initDataUnsafe — demo_user");
       setUserId("demo_user");
     }
   }, []);
+
 
   // ----------------- Load settings & data -----------------
   useEffect(() => {
@@ -171,59 +218,62 @@ const App: React.FC = () => {
       setLoading(true);
       setError(null);
       try {
-        // settings (тут можем хранить кабинеты)
+        // settings (тут хранятся кабинеты)
         const sResp = await fetch(
           `${API_BASE}/settings/get?user_id=${encodeURIComponent(userId)}`
         );
         const sJson = await sResp.json();
         const settings = sJson.settings || {};
 
-        const cabinetsFromSettings: Cabinet[] =
-          settings.cabinets ??
-          settings.cabinet_list ??
-          [
-            // демо, если ничего нет
-            {
-              id_cabinet: "demo",
-              name_cabinet: "Демо кабинет",
-              token_cabinet: "demo_token",
-            },
-          ];
+        // добавляем виртуальный кабинет "Все кабинеты"
+        const cabinetsFromSettings: Cabinet[] = settings.cabinets ?? [];
+
         setCabinets(cabinetsFromSettings);
-        if (cabinetsFromSettings.length > 0) {
-          setSelectedCabinetId(cabinetsFromSettings[0].id_cabinet);
+        if (cabinetsFromSettings.length <= 1) {
+          setNoCabinetsWarning(true);
+        } else {
+          setNoCabinetsWarning(false);
+        }
+        // Если пользователь раньше выбирал кабинет — восстанавливаем
+        if (settings.selected_cabinet_id) {
+          setSelectedCabinetId(String(settings.selected_cabinet_id));
+        } else {
+          // иначе первый в списке ("Все кабинеты")
+          setSelectedCabinetId(String(cabinetsFromSettings[0].id));
         }
 
         // presets
         const pResp = await fetch(
-          `${API_BASE}/preset/list?user_id=${encodeURIComponent(userId)}`
+          `${API_BASE}/preset/list?user_id=${encodeURIComponent(
+            userId
+          )}&cabinet_id=${encodeURIComponent(selectedCabinetId || "all")}`
         );
         const pJson = await pResp.json();
         setPresets(pJson.presets || []);
 
         // creatives
         const cResp = await fetch(
-          `${API_BASE}/creatives/get?user_id=${encodeURIComponent(userId)}`
+          `${API_BASE}/creatives/get?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}`
         );
         const cJson = await cResp.json();
         setCreativeSets(cJson.creatives || []);
 
         // audiences
         const aResp = await fetch(
-          `${API_BASE}/audiences/get?user_id=${encodeURIComponent(userId)}`
+          `${API_BASE}/audiences/get?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}`
         );
         const aJson = await aResp.json();
         setAudiences(aJson.audiences || []);
       } catch (e: any) {
         console.error(e);
-        setError("Ошибка загрузки данных");
+        showPopup("Ошибка загрузки данных");
       } finally {
         setLoading(false);
       }
     };
 
     loadAll();
-  }, [userId]);
+  }, [userId, selectedCabinetId]);
 
   // ----------------- Preset helpers -----------------
 
@@ -239,11 +289,13 @@ const App: React.FC = () => {
       groups: [
         {
           id: generateId(),
+          budget: "",
           regions: "",
-          gender: "any",
+          gender: "male,female",
           age: "21-55",
           interests: "",
           audienceIds: [],
+          utm: ""
         },
       ],
       ads: [
@@ -255,12 +307,13 @@ const App: React.FC = () => {
           longDescription: "",
           videoIds: [],
           creativeSetIds: [],
+          url: ""
         },
       ],
     };
     setPresetDraft(preset);
     setSelectedStructure({ type: "company" });
-    setView({ type: "presetEditor" });
+    setView({ type: "presetEditor", presetId: undefined });
   };
 
   const openPreset = (presetId: string, data: Preset) => {
@@ -319,13 +372,14 @@ const App: React.FC = () => {
     setError(null);
     try {
       const presetId =
-        view.type === "presetEditor" ? view.presetId : undefined;
+        view.type === "presetEditor" && view.presetId ? view.presetId : undefined;
 
       const resp = await fetch(`${API_BASE}/preset/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId,
+          cabinetId: selectedCabinetId,
           presetId,
           preset: presetDraft,
         }),
@@ -347,7 +401,7 @@ const App: React.FC = () => {
       setPresetDraft(null);
     } catch (e: any) {
       console.error(e);
-      setError(e.message || "Ошибка сохранения пресета");
+      showPopup(e.message || "Ошибка сохранения пресета");
     } finally {
       setSaving(false);
     }
@@ -355,7 +409,7 @@ const App: React.FC = () => {
 
   const deletePreset = async (presetId: string) => {
     if (!userId) return;
-    if (!confirm("Удалить этот пресет?")) return;
+    if (!(await askConfirm("Удалить этот пресет?"))) return;
 
     setSaving(true);
     setError(null);
@@ -363,6 +417,8 @@ const App: React.FC = () => {
       const resp = await fetch(
         `${API_BASE}/preset/delete?user_id=${encodeURIComponent(
           userId
+        )}&cabinet_id=${encodeURIComponent(
+          selectedCabinetId || "all"
         )}&preset_id=${encodeURIComponent(presetId)}`,
         { method: "DELETE" }
       );
@@ -371,13 +427,13 @@ const App: React.FC = () => {
       }
 
       const pResp = await fetch(
-        `${API_BASE}/preset/list?user_id=${encodeURIComponent(userId)}`
+        `${API_BASE}/preset/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}`
       );
       const pJson = await pResp.json();
       setPresets(pJson.presets || []);
     } catch (e: any) {
       console.error(e);
-      setError(e.message || "Ошибка удаления пресета");
+      showPopup(e.message || "Ошибка удаления пресета");
     } finally {
       setSaving(false);
     }
@@ -411,8 +467,8 @@ const App: React.FC = () => {
     saveCreatives(list);
   };
 
-  const deleteCreativeSet = (id: string) => {
-    if (!confirm("Удалить набор креативов?")) return;
+  const deleteCreativeSet = async (id: string) => {
+    if (!(await askConfirm("Удалить набор креативов?"))) return;
     const list = creativeSets.filter((s) => s.id !== id);
     setCreativeSets(list);
     if (selectedCreativeSetId === id) {
@@ -422,12 +478,16 @@ const App: React.FC = () => {
   };
 
   const saveCreatives = async (list: CreativeSet[]) => {
-    if (!userId) return;
+    if (!userId || !selectedCabinetId) return;
     try {
       await fetch(`${API_BASE}/creatives/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, creatives: list }),
+        body: JSON.stringify({
+          userId,
+          cabinetId: selectedCabinetId,
+          creatives: list
+        }),
       });
     } catch (e) {
       console.error(e);
@@ -440,10 +500,11 @@ const App: React.FC = () => {
     for (const file of Array.from(files)) {
       const formData = new FormData();
       formData.append("file", file);
-      const resp = await fetch(`${API_BASE}/upload`, {
-        method: "POST",
-        body: formData,
-      });
+      if (!userId) return;
+      const resp = await fetch(
+        `${API_BASE}/upload?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}`,
+        { method: "POST", body: formData }
+      );
       const json = await resp.json();
       const url: string = json.url;
       newItems.push({
@@ -537,7 +598,7 @@ const App: React.FC = () => {
           onClick={toggleTheme}
           title="Переключить тему"
         >
-          {theme === "light" ? "🌙" : "☀️"}
+          {theme === "light" ? "☀️" : "🌙"}
         </button>
       </div>
       <div className="header-center">
@@ -548,11 +609,24 @@ const App: React.FC = () => {
           <label>Кабинет</label>
           <select
             value={selectedCabinetId ?? ""}
-            onChange={(e) => setSelectedCabinetId(e.target.value)}
+            onChange={(e) => {
+              const id = e.target.value;
+              setSelectedCabinetId(id);
+            
+              // сохранить в backend
+              fetch(`${API_BASE}/settings/save`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  userId,
+                  settings: { selected_cabinet_id: id }
+                })
+              }).catch(console.error);
+            }}
           >
             {cabinets.map((cab) => (
-              <option key={cab.id_cabinet} value={cab.id_cabinet}>
-                {cab.name_cabinet}
+              <option key={cab.id} value={cab.id}>
+                {cab.name} {cab.id !== "all" && ` — id: ${cab.id}`}
               </option>
             ))}
           </select>
@@ -696,14 +770,14 @@ const App: React.FC = () => {
                   title="Дублировать группу"
                   onClick={() => cloneGroup(index)}
                 >
-                  📄
+                  🗐
                 </button>
                 <button
                   className="icon-button"
                   title="Удалить группу"
                   onClick={() => deleteGroup(index)}
                 >
-                  🗑
+                  🗑️
                 </button>
               </div>
             </div>
@@ -765,9 +839,9 @@ const App: React.FC = () => {
             }
           >
             <option value="">Не выбрано</option>
-            <option value="lead">Лид</option>
-            <option value="purchase">Покупка</option>
-            <option value="traffic">Трафик</option>
+            <option value="socialengagement">Сообщение в группу</option>
+            <option value="site_conversions">На сайт</option>
+            <option value="leadads">Лид</option>
           </select>
         </div>
         <div className="form-field">
@@ -809,10 +883,26 @@ const App: React.FC = () => {
     return (
       <div className="form-grid">
         <div className="form-field">
+          <label>Бюджет</label>
+          <input
+            type="text"
+            value={group.budget}
+            onChange={(e) => updateGroup({ budget: e.target.value })}
+          />
+        </div>
+        <div className="form-field">
+          <label>UTM</label>
+          <input
+            type="text"
+            value={group.utm}
+            onChange={(e) => updateGroup({ utm: e.target.value })}
+          />
+        </div>
+        <div className="form-field">
           <label>Регионы</label>
           <input
             type="text"
-            placeholder="Москва, МО..."
+            placeholder="..."
             value={group.regions}
             onChange={(e) => updateGroup({ regions: e.target.value })}
           />
@@ -827,7 +917,7 @@ const App: React.FC = () => {
               })
             }
           >
-            <option value="any">Любой</option>
+            <option value="male,female">Любой</option>
             <option value="male">Мужской</option>
             <option value="female">Женский</option>
           </select>
@@ -972,7 +1062,14 @@ const App: React.FC = () => {
             }
           />
         </div>
-
+        <div className="form-field">
+          <label>URL</label>
+          <input
+            type="text"
+            value={ad.url}
+            onChange={(e) => updateAd({ url: e.target.value })}
+          />
+        </div>
         <div className="form-field">
           <label>Выбрать видео</label>
           <div className="video-picker-field">
@@ -1178,9 +1275,7 @@ const App: React.FC = () => {
         <h2>Аудитории</h2>
       </div>
       <div className="hint">
-        Пока здесь ничего нет. В будущем можно добавить конструктор
-        аудиторий, которые будут использоваться во вкладке «Создание
-        кампаний».
+        Здесь ничего нет
       </div>
     </div>
   );
@@ -1317,11 +1412,38 @@ const App: React.FC = () => {
               <div className="loader" />
             </div>
           )}
-          {error && <div className="error-banner">{error}</div>}
+          {(error || noCabinetsWarning) && (
+            <div className="error-banner">
+              {noCabinetsWarning ? "Кабинеты пока не добавлены" : error}
+            </div>
+          )}
           {renderMain()}
         </main>
       </div>
       {renderVideoPickerDrawer()}
+      {popup.open && (
+        <div className="popup-overlay">
+          <div className="popup-window glass">
+            {popup.msg}
+          </div>
+        </div>
+      )}
+
+      {confirmDialog.open && (
+        <div className="popup-overlay" style={{ zIndex: 300 }}>
+          <div className="confirm-window glass">
+            <div className="confirm-text">{confirmDialog.msg}</div>
+            <div className="confirm-actions">
+              <button className="outline-button" onClick={() => closeConfirm(false)}>
+                Отмена
+              </button>
+              <button className="primary-button" onClick={() => closeConfirm(true)}>
+                Ок
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
