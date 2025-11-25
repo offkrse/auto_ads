@@ -10,6 +10,8 @@ import shutil
 import uvicorn
 import os
 
+from auto_ads.app import app as auto_ads_api
+
 app = FastAPI()
 
 BASE_DIR = Path("/opt/auto_ads")
@@ -384,8 +386,9 @@ async def upload_creative(
 # -------------------------------------
 #   FRONTEND BUILD
 # -------------------------------------
+app.mount("/auto_ads/api", auto_ads_api)
 if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+    app.mount("/auto_ads", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
 
 @app.get("/api/status")
