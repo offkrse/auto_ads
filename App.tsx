@@ -26,6 +26,9 @@ type CreativeItem = {
   url: string;
   name: string;
   type: "video" | "image";
+  uploaded?: boolean;
+  vkByCabinet?: Record<string, string>; // cabinet_id -> vk_id
+  urls?: Record<string, string>; // cabinet_id -> local url
 };
 
 type CreativeSet = {
@@ -99,7 +102,7 @@ const App: React.FC = () => {
     setPopup({open: true, msg});
     setTimeout(() => setPopup({open: false, msg: ""}), 2500);
   };
-
+  
   // -------- Confirm Dialog --------
   const [confirmDialog, setConfirmDialog] = useState<{
     open: boolean;
@@ -505,14 +508,48 @@ const App: React.FC = () => {
         `${API_BASE}/upload?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}`,
         { method: "POST", body: formData }
       );
+
       const json = await resp.json();
-      const url: string = json.url;
-      newItems.push({
-        id: generateId(),
-        url,
-        name: file.name,
-        type: file.type.startsWith("image") ? "image" : "video",
-      });
+      if (!resp.ok || !json.results) {
+          console.error("UPLOAD ERROR:", json);
+          showPopup("Ошибка загрузки файла");
+          continue;
+      }
+      // если один кабинет
+      if (json.results.length === 1) {
+          const r = json.results[0];
+      
+          newItems.push({
+              id: r.vk_id,                                        // ID из VK ADS
+              url: r.url,                                         // локальная ссылка
+              name: file.name,
+              type: file.type.startsWith("image") ? "image" : "video",
+              uploaded: true,                                     // галочка
+              vkByCabinet: { [r.cabinet_id]: r.vk_id }            // словарь cabinet_id → vk_id
+          });
+      } 
+      // если выбран "all" — много кабинетов
+      else {
+          const vkByCabinet: Record<string, any> = {};
+          const urls: Record<string, string> = {};
+      
+          json.results.forEach((r: any) => {
+              vkByCabinet[r.cabinet_id] = r.vk_id;
+              urls[r.cabinet_id] = r.url;
+          });
+
+          const firstUrl: string = json.results[0]?.url || "";
+
+          newItems.push({
+              id: generateId(),
+              name: file.name,
+              url: firstUrl,
+              type: file.type.startsWith("image") ? "image" : "video",
+              uploaded: true,
+              vkByCabinet,
+              urls,
+          });
+      }
     }
 
     const list = creativeSets.map((s) =>
@@ -1220,41 +1257,49 @@ const App: React.FC = () => {
               </div>
 
               <div className="creative-grid">
-                {currentCreativeSet.items.map((item) => (
-                  <div key={item.id} className="creative-card">
-                    {item.type === "image" ? (
-                      <img
-                        src={item.url}
-                        alt={item.name}
-                        className="creative-thumb"
-                      />
-                    ) : (
-                      <video
-                        src={item.url}
-                        className="creative-thumb"
-                        muted
-                        loop
-                      />
-                    )}
-                    <div className="creative-name">{item.name}</div>
-                    <button
-                      className="icon-button delete-button"
-                      onClick={() =>
-                        deleteCreativeItem(
-                          currentCreativeSet.id,
-                          item.id
-                        )
-                      }
-                    >
-                      🗑
-                    </button>
-                  </div>
-                ))}
+                {currentCreativeSet.items.map((item) => {
+                  const realUrl =
+                    item.urls?.[selectedCabinetId] ??
+                    item.url ?? "";
+                                
+                  return (
+                    <div key={item.id} className="creative-card">
+                      {item.uploaded && (
+                        <div className="creative-checkmark">✔</div>
+                      )}
+                
+                      {item.type === "image" ? (
+                        <img
+                          src={realUrl}
+                          alt={item.name}
+                          className="creative-thumb"
+                        />
+                      ) : (
+                        <video
+                          src={realUrl}
+                          className="creative-thumb"
+                          muted
+                          loop
+                        />
+                      )}
+                
+                      <div className="creative-name">{item.name}</div>
+                    
+                      <button
+                        className="icon-button delete-button"
+                        onClick={() =>
+                          deleteCreativeItem(currentCreativeSet.id, item.id)
+                        }
+                      >
+                        🗑
+                      </button>
+                    </div>
+                  );
+                })}
 
                 {currentCreativeSet.items.length === 0 && (
                   <div className="hint">
-                    Загрузите видео или картинки. Они будут сохранены
-                    в <code>/mnt/data/auto_ads_storage/video</code>.
+                    Загрузите видео или картинки
                   </div>
                 )}
               </div>
@@ -1327,39 +1372,32 @@ const App: React.FC = () => {
                   </span>
                 </div>
                 <div className="drawer-grid">
-                  {set.items.map((item) => (
-                    <label
-                      key={item.id}
-                      className={`drawer-item ${
-                        isVideoSelected(item.id) ? "selected" : ""
-                      }`}
-                    >
-                      {item.type === "image" ? (
-                        <img
-                          src={item.url}
-                          alt={item.name}
-                          className="drawer-thumb"
+                  {set.items.map((item) => {
+                    const realUrl =
+                      item.urls?.[selectedCabinetId] ??
+                      item.url ?? "";
+
+                    return (
+                      <label
+                        key={item.id}
+                        className={`drawer-item ${isVideoSelected(item.id) ? "selected" : ""}`}
+                      >
+                        {item.type === "image" ? (
+                          <img src={realUrl} className="drawer-thumb" alt={item.name} />
+                        ) : (
+                          <video src={realUrl} className="drawer-thumb" muted loop />
+                        )}
+
+                        <input
+                          type="checkbox"
+                          checked={isVideoSelected(item.id)}
+                          onChange={() => toggleVideoForAd(ad.id, item)}
                         />
-                      ) : (
-                        <video
-                          src={item.url}
-                          className="drawer-thumb"
-                          muted
-                          loop
-                        />
-                      )}
-                      <input
-                        type="checkbox"
-                        checked={isVideoSelected(item.id)}
-                        onChange={() =>
-                          toggleVideoForAd(ad.id, item)
-                        }
-                      />
-                      <span className="drawer-item-name">
-                        {item.name}
-                      </span>
-                    </label>
-                  ))}
+
+                        <span className="drawer-item-name">{item.name}</span>
+                      </label>
+                    );
+                  })}
                 </div>
               </div>
             ))}
