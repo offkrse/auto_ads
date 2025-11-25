@@ -401,7 +401,7 @@ async def upload_creative(
 
 
 @app.get("/auto_ads/video/{filename}")
-def serve_file(filename: str):
+def serve_auto_video(filename: str):
     path = STORAGE_DIR / filename
     if not path.exists():
         raise HTTPException(404, "File not found")
