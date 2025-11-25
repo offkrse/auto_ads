@@ -309,21 +309,6 @@ def save_abstract_audiences(payload: dict):
     return {"status": "ok"}
 
 
-@app.post("/api/abstract_audiences/save")
-def save_abstract_audiences(payload: dict):
-    user_id = payload.get("userId")
-    items = payload.get("audiences")
-
-    path_dir = USERS_DIR / user_id / "audiences" / "all"
-    path_dir.mkdir(parents=True, exist_ok=True)
-
-    f = path_dir / "abstract.json"
-    with open(f, "w") as file:
-        json.dump(items, file, ensure_ascii=False, indent=2)
-
-    return {"status": "ok"}
-
-
 @app.get("/api/audiences/get")
 def get_audiences(user_id: str, cabinet_id: str):
     ensure_user_structure(user_id)
