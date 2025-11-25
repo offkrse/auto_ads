@@ -229,6 +229,14 @@ def get_creatives(user_id: str, cabinet_id: str):
         return {"creatives": json.load(file)}
 
 
+@app.get("/video/{cabinet_id}/{filename}")
+def serve_file(cabinet_id: str, filename: str):
+    path = cabinet_storage(cabinet_id) / filename
+    if not path.exists():
+        raise HTTPException(404, "File not found")
+    return FileResponse(path)
+
+
 # -------------------------------------
 #   AUDIENCES
 # -------------------------------------
@@ -293,15 +301,77 @@ def get_settings(user_id: str):
 #   FILE STORAGE (videos/images)
 # -------------------------------------
 @app.post("/api/upload")
-async def upload_creative(file: UploadFile = File(...)):
-    filename = file.filename
-    save_path = STORAGE_DIR / filename
+async def upload_creative(
+    user_id: str,
+    cabinet_id: str,
+    file: UploadFile = File(...)
+):
+    # --- 1) Определяем тип файла ---
+    content_type = file.content_type
+    is_image = content_type.startswith("image")
+    is_video = content_type.startswith("video")
 
-    with open(save_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    if not (is_image or is_video):
+        raise HTTPException(400, "Only image or video allowed")
 
-    url = f"/video/{filename}"
-    return {"status": "ok", "url": url}
+    # --- 2) Папка кабинета ---
+    storage = cabinet_storage(cabinet_id)
+
+    # --- 3) Сохраняем файл во временный файл ---
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+
+    # --- 4) Определяем ширину/высоту ---
+    if is_image:
+        img = Image.open(tmp_path)
+        width, height = img.size
+    else:
+        width, height = (720, 1280)  # можно заменить анализом через ffprobe
+
+    # --- 5) Готовим multipart-data для VK ---
+    vk_url = (
+        "https://ads.vk.com/api/v2/content/static.json"
+        if is_image else
+        "https://ads.vk.com/api/v2/content/video.json"
+    )
+
+    # Берём токен кабинета
+    data = ensure_user_structure(user_id)
+    cabinet = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cabinet or not cabinet.get("token"):
+        raise HTTPException(400, "Cabinet token missing")
+
+    headers = {
+        "Authorization": f"Bearer {cabinet['token']}"
+    }
+
+    files = {
+        "file": (file.filename, open(tmp_path, "rb"), content_type),
+        "data": (None, json.dumps({"width": width, "height": height}), "application/json")
+    }
+
+    vk_resp = requests.post(vk_url, headers=headers, files=files)
+
+    if vk_resp.status_code != 200:
+        raise HTTPException(500, f"VK upload error: {vk_resp.text}")
+
+    vk_json = vk_resp.json()
+
+    # --- 6) ID от VK ADS ---
+    vk_id = vk_json.get("id")
+    if not vk_id:
+        raise HTTPException(500, "VK did not return id")
+
+    # --- 7) Перемещаем файл в постоянное хранилище ---
+    final_path = storage / f"{vk_id}_{file.filename}"
+    shutil.move(tmp_path, final_path)
+
+    return {
+        "status": "ok",
+        "vk_id": vk_id,
+        "url": f"/video/{cabinet_id}/{vk_id}_{file.filename}"
+    }
 
 
 @app.get("/auto_ads/video/{filename}")
