@@ -226,12 +226,8 @@ async def save_settings(payload: dict):
 
 @app.get("/api/settings/get")
 def get_settings(user_id: str):
-    f = settings_file(user_id)
-    if not f.exists():
-        return {"settings": {}}
-
-    with open(f, "r") as file:
-        return {"settings": json.load(file)}
+    settings = ensure_user_structure(user_id)
+    return {"settings": settings}
 
 
 # -------------------------------------
