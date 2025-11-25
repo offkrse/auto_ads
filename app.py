@@ -348,7 +348,11 @@ async def upload_creative(
         resp = requests.post(vk_url, headers=headers, files=files)
 
         if resp.status_code != 200:
-            raise HTTPException(500, f"VK upload error for {cabinet['id']}: {resp.text}")
+            return {
+                "status": "error",
+                "cabinet_id": cabinet["id"],
+                "vk_error": resp.text
+            }
 
         resp_json = resp.json()
         vk_id = resp_json.get("id")
