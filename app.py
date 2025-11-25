@@ -21,6 +21,10 @@ STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 FRONTEND_DIR = BASE_DIR / "frontend"
 
+# === env ===
+from dotenv import load_dotenv
+load_dotenv("/opt/auto_ads/.env")
+
 
 # -------------------------------------
 #   HELPERS
