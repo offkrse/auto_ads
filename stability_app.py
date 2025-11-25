@@ -2,6 +2,9 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+import requests
+from PIL import Image
+import tempfile
 import json
 import shutil
 import uvicorn
@@ -18,10 +21,18 @@ STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 FRONTEND_DIR = BASE_DIR / "frontend"
 
+# === env ===
+from dotenv import load_dotenv
+load_dotenv("/opt/auto_ads/.env")
+
 
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
+def cabinet_storage(cabinet_id: str) -> Path:
+    path = STORAGE_DIR / str(cabinet_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
     
 def ensure_user_structure(user_id: str):
     """Создает структуру и единый файл <id>.json, если его нет."""
@@ -87,41 +98,14 @@ def user_info_file(user_id: str) -> Path:
 
 
 def load_user_info(user_id: str) -> dict:
-    f = user_info_file(user_id)
-    if not f.exists():
-        data = {
-            "user_id": user_id,
-            "presets": [],
-            "creatives": [],
-            "audiences": [],
-            "settings": {},
-        }
-        save_user_info(user_id, data)
-        return data
+    # всегда сначала создаём базовую структуру
+    base = ensure_user_structure(user_id)
 
-    with open(f, "r") as file:
-        return json.load(file)
+    return base
 
-
-def save_user_info(user_id: str, data: dict):
-    f = user_info_file(user_id)
-    with open(f, "w") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2)
 
 def preset_path(user_id: str, cabinet_id: str, preset_id: str) -> Path:
     return USERS_DIR / user_id / "presets" / cabinet_id / f"{preset_id}.json"
-    
-def preset_file(user_id: str, preset_id: str) -> Path:
-    return udir(user_id) / "presets" / f"{preset_id}.json"
-
-def creatives_file(user_id: str) -> Path:
-    return udir(user_id) / "creatives" / "creatives.json"
-
-def audiences_file(user_id: str) -> Path:
-    return udir(user_id) / "audiences" / "audiences.json"
-
-def settings_file(user_id: str) -> Path:
-    return udir(user_id) / "settings.json"
     
 def creatives_path(user_id: str, cabinet_id: str) -> Path:
     return USERS_DIR / user_id / "creatives" / cabinet_id / "sets.json"
@@ -222,6 +206,14 @@ def get_creatives(user_id: str, cabinet_id: str):
         return {"creatives": json.load(file)}
 
 
+@app.get("/video/{cabinet_id}/{filename}")
+def serve_file(cabinet_id: str, filename: str):
+    path = cabinet_storage(cabinet_id) / filename
+    if not path.exists():
+        raise HTTPException(404, "File not found")
+    return FileResponse(path)
+
+
 # -------------------------------------
 #   AUDIENCES
 # -------------------------------------
@@ -236,6 +228,83 @@ async def save_audiences(payload: dict):
     f = audiences_path(user_id, cabinet_id)
     with open(f, "w") as file:
         json.dump(audiences, file, ensure_ascii=False, indent=2)
+
+    return {"status": "ok"}
+
+
+@app.get("/api/vk/audiences/fetch")
+def fetch_vk_audiences(user_id: str, cabinet_id: str):
+    """
+    Загружает последние 50 аудиторий из VK ADS
+    """
+    data = ensure_user_structure(user_id)
+
+    # ищем кабинет
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return {"audiences": [], "error": "Invalid cabinet or missing token"}
+
+    token = os.getenv(cab["token"])
+    if not token:
+        return {"audiences": [], "error": f"Token {cab['token']} not found in .env"}
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 1) узнать count
+    url = "https://ads.vk.com/api/v2/remarketing/segments.json?limit=1"
+    r = requests.get(url, headers=headers)
+    j = r.json()
+
+    count = j.get("count", 0)
+    if count == 0:
+        return {"audiences": []}
+
+    offset = max(0, count - 50)
+    url2 = f"https://ads.vk.com/api/v2/remarketing/segments.json?limit=50&offset={offset}"
+
+    r2 = requests.get(url2, headers=headers)
+    j2 = r2.json()
+
+    items = j2.get("items", [])
+
+    # конвертация
+    out = []
+    for it in items:
+        out.append({
+            "type": "vk",
+            "id": str(it["id"]),
+            "name": it["name"],
+            "created": it.get("created", "")
+        })
+
+    # сохраняем локально
+    f = audiences_path(user_id, cabinet_id)
+    with open(f, "w") as file:
+        json.dump(out, file, ensure_ascii=False, indent=2)
+
+    return {"audiences": out}
+
+
+@app.get("/api/abstract_audiences/get")
+def get_abstract_audiences(user_id: str):
+    f = USERS_DIR / user_id / "audiences" / "all" / "abstract.json"
+    if not f.exists():
+        return {"audiences": []}
+    with open(f, "r") as file:
+        return {"audiences": json.load(file)}
+
+
+@app.post("/api/abstract_audiences/save")
+def save_abstract_audiences(payload: dict):
+    user_id = payload.get("userId")
+    items = payload.get("audiences")
+
+    path_dir = USERS_DIR / user_id / "audiences" / "all"
+    path_dir.mkdir(parents=True, exist_ok=True)
+
+    f = path_dir / "abstract.json"
+    with open(f, "w") as file:
+        json.dump(items, file, ensure_ascii=False, indent=2)
 
     return {"status": "ok"}
 
@@ -286,36 +355,118 @@ def get_settings(user_id: str):
 #   FILE STORAGE (videos/images)
 # -------------------------------------
 @app.post("/api/upload")
-async def upload_creative(file: UploadFile = File(...)):
-    filename = file.filename
-    save_path = STORAGE_DIR / filename
+async def upload_creative(
+    user_id: str,
+    cabinet_id: str,
+    file: UploadFile = File(...)
+):
+    content_type = file.content_type
+    is_image = content_type.startswith("image")
+    is_video = content_type.startswith("video")
 
-    with open(save_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    if not (is_image or is_video):
+        raise HTTPException(400, "Only image or video allowed")
 
-    url = f"/video/{filename}"
-    return {"status": "ok", "url": url}
+    # подготовка для анализа размеров
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
 
+    # определяем ширину и высоту
+    if is_image:
+        img = Image.open(tmp_path)
+        width, height = img.size
+    else:
+        width, height = (720, 1280)
 
-@app.get("/auto_ads/video/{filename}")
-def serve_file(filename: str):
-    path = STORAGE_DIR / filename
-    if not path.exists():
-        raise HTTPException(404, "File not found")
-    return FileResponse(path)
+    # берём токены
+    data = ensure_user_structure(user_id)
+
+    # если cabinet_id == "all", выбираем все кабинеты, кроме all
+    if cabinet_id == "all":
+        target_cabinets = [
+            c for c in data["cabinets"]
+            if c["id"] != "all" and c.get("token")
+        ]
+    else:
+        target_cabinets = [
+            c for c in data["cabinets"]
+            if str(c["id"]) == str(cabinet_id)
+        ]
+
+    if not target_cabinets:
+        raise HTTPException(400, "No valid cabinets found")
+
+    results = []
+
+    # перебираем все кабинеты
+    for cabinet in target_cabinets:
+        token_name = cabinet.get("token")
+        if not token_name:
+            continue
+
+        real_token = os.getenv(token_name)
+        if not real_token:
+            raise HTTPException(500, f"Token {token_name} not found in environment")
+
+        vk_url = (
+            "https://ads.vk.com/api/v2/content/static.json"
+            if is_image else
+            "https://ads.vk.com/api/v2/content/video.json"
+        )
+
+        headers = {
+            "Authorization": f"Bearer {real_token}"
+        }
+
+        files = {
+            "file": (file.filename, open(tmp_path, "rb"), content_type),
+            "data": (None, json.dumps({"width": width, "height": height}), "application/json")
+        }
+
+        # отправляем файл в VK ADS
+        resp = requests.post(vk_url, headers=headers, files=files)
+
+        if resp.status_code != 200:
+            return {
+                "status": "error",
+                "cabinet_id": cabinet["id"],
+                "vk_error": resp.text
+            }
+
+        resp_json = resp.json()
+        vk_id = resp_json.get("id")
+        if not vk_id:
+            raise HTTPException(500, f"No id returned for cabinet {cabinet['id']}")
+
+        # сохраняем локально
+        storage = cabinet_storage(cabinet["id"])
+        final_name = f"{vk_id}_{file.filename}"
+        final_path = storage / final_name
+        shutil.copy(tmp_path, final_path)
+
+        results.append({
+            "cabinet_id": cabinet["id"],
+            "vk_id": vk_id,
+            "url": f"/auto_ads/video/{cabinet['id']}/{final_name}"
+        })
+
+    return {
+        "status": "ok",
+        "results": results
+    }
 
 
 # -------------------------------------
 #   FRONTEND BUILD
 # -------------------------------------
-if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
-
-
 @app.get("/api/status")
 def status():
     return {"status": "running"}
-
+    
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="auto_ads_frontend")
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8899, reload=True)
