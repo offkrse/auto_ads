@@ -372,21 +372,13 @@ async def upload_creative(
         results.append({
             "cabinet_id": cabinet["id"],
             "vk_id": vk_id,
-            "url": f"/video/{cabinet['id']}/{final_name}"
+            "url": f"/auto_ads/video/{cabinet['id']}/{final_name}"
         })
 
     return {
         "status": "ok",
         "results": results
     }
-
-
-@app.get("/auto_ads/video/{filename}")
-def serve_auto_video(filename: str):
-    path = STORAGE_DIR / filename
-    if not path.exists():
-        raise HTTPException(404, "File not found")
-    return FileResponse(path)
 
 
 # -------------------------------------
