@@ -232,6 +232,98 @@ async def save_audiences(payload: dict):
     return {"status": "ok"}
 
 
+@app.get("/api/vk/audiences/fetch")
+def fetch_vk_audiences(user_id: str, cabinet_id: str):
+    """
+    Загружает последние 50 аудиторий из VK ADS
+    """
+    data = ensure_user_structure(user_id)
+
+    # ищем кабинет
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return {"audiences": [], "error": "Invalid cabinet or missing token"}
+
+    token = os.getenv(cab["token"])
+    if not token:
+        return {"audiences": [], "error": f"Token {cab['token']} not found in .env"}
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 1) узнать count
+    url = "https://ads.vk.com/api/v2/remarketing/segments.json?limit=1"
+    r = requests.get(url, headers=headers)
+    j = r.json()
+
+    count = j.get("count", 0)
+    if count == 0:
+        return {"audiences": []}
+
+    offset = max(0, count - 50)
+    url2 = f"https://ads.vk.com/api/v2/remarketing/segments.json?limit=50&offset={offset}"
+
+    r2 = requests.get(url2, headers=headers)
+    j2 = r2.json()
+
+    items = j2.get("items", [])
+
+    # конвертация
+    out = []
+    for it in items:
+        out.append({
+            "type": "vk",
+            "id": str(it["id"]),
+            "name": it["name"],
+            "created": it.get("created", "")
+        })
+
+    # сохраняем локально
+    f = audiences_path(user_id, cabinet_id)
+    with open(f, "w") as file:
+        json.dump(out, file, ensure_ascii=False, indent=2)
+
+    return {"audiences": out}
+
+
+@app.get("/api/abstract_audiences/get")
+def get_abstract_audiences(user_id: str):
+    f = USERS_DIR / user_id / "audiences" / "all" / "abstract.json"
+    if not f.exists():
+        return {"audiences": []}
+    with open(f, "r") as file:
+        return {"audiences": json.load(file)}
+
+
+@app.post("/api/abstract_audiences/save")
+def save_abstract_audiences(payload: dict):
+    user_id = payload.get("userId")
+    items = payload.get("audiences")
+
+    path_dir = USERS_DIR / user_id / "audiences" / "all"
+    path_dir.mkdir(parents=True, exist_ok=True)
+
+    f = path_dir / "abstract.json"
+    with open(f, "w") as file:
+        json.dump(items, file, ensure_ascii=False, indent=2)
+
+    return {"status": "ok"}
+
+
+@app.post("/api/abstract_audiences/save")
+def save_abstract_audiences(payload: dict):
+    user_id = payload.get("userId")
+    items = payload.get("audiences")
+
+    path_dir = USERS_DIR / user_id / "audiences" / "all"
+    path_dir.mkdir(parents=True, exist_ok=True)
+
+    f = path_dir / "abstract.json"
+    with open(f, "w") as file:
+        json.dump(items, file, ensure_ascii=False, indent=2)
+
+    return {"status": "ok"}
+
+
 @app.get("/api/audiences/get")
 def get_audiences(user_id: str, cabinet_id: str):
     ensure_user_structure(user_id)
