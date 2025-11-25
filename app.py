@@ -476,13 +476,12 @@ async def upload_creative(
 # -------------------------------------
 #   FRONTEND BUILD
 # -------------------------------------
-if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="auto_ads_frontend")
-
 @app.get("/api/status")
 def status():
     return {"status": "running"}
-
+    
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="auto_ads_frontend")
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8899, reload=True)
