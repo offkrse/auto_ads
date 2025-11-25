@@ -22,6 +22,54 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
+def ensure_user_structure(user_id: str):
+    """Создает структуру и единый файл <id>.json, если его нет."""
+
+    user_dir = USERS_DIR / user_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    # Основные директории
+    (user_dir / "presets").mkdir(exist_ok=True)
+    (user_dir / "creatives").mkdir(exist_ok=True)
+    (user_dir / "audiences").mkdir(exist_ok=True)
+
+    # Файл user.json
+    info_file = user_dir / f"{user_id}.json"
+
+    # Если первый вход — создаём дефолтный файл
+    if not info_file.exists():
+        data = {
+            "user_id": user_id,
+            "cabinets": [  # Всегда создаём кабинет ALL
+                {"id": "all", "name": "Все кабинеты", "token": ""}
+            ],
+            "selected_cabinet_id": "all"
+        }
+        with open(info_file, "w") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # Загружаем файл
+    with open(info_file, "r") as f:
+        data = json.load(f)
+
+    # Гарантируем наличие кабинета all
+    if not any(c["id"] == "all" for c in data["cabinets"]):
+        data["cabinets"].insert(0, {"id": "all", "name": "Все кабинеты", "token": ""})
+
+    # Создаём директории под каждый кабинет
+    for cab in data["cabinets"]:
+        cab_id = str(cab["id"])
+        (user_dir / "presets" / cab_id).mkdir(exist_ok=True)
+        (user_dir / "creatives" / cab_id).mkdir(exist_ok=True)
+        (user_dir / "audiences" / cab_id).mkdir(exist_ok=True)
+
+    # Перезаписываем (если изменилось)
+    with open(info_file, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return data
+
+
 def udir(user_id: str) -> Path:
     d = USERS_DIR / user_id
     d.mkdir(parents=True, exist_ok=True)
@@ -59,22 +107,26 @@ def save_user_info(user_id: str, data: dict):
     with open(f, "w") as file:
         json.dump(data, file, ensure_ascii=False, indent=2)
 
-
+def preset_path(user_id: str, cabinet_id: str, preset_id: str) -> Path:
+    return USERS_DIR / user_id / "presets" / cabinet_id / f"{preset_id}.json"
+    
 def preset_file(user_id: str, preset_id: str) -> Path:
     return udir(user_id) / "presets" / f"{preset_id}.json"
-
 
 def creatives_file(user_id: str) -> Path:
     return udir(user_id) / "creatives" / "creatives.json"
 
-
 def audiences_file(user_id: str) -> Path:
     return udir(user_id) / "audiences" / "audiences.json"
 
-
 def settings_file(user_id: str) -> Path:
     return udir(user_id) / "settings.json"
+    
+def creatives_path(user_id: str, cabinet_id: str) -> Path:
+    return USERS_DIR / user_id / "creatives" / cabinet_id / "sets.json"
 
+def audiences_path(user_id: str, cabinet_id: str) -> Path:
+    return USERS_DIR / user_id / "audiences" / cabinet_id / "audiences.json"
 
 # -------------------------------------
 #   PRESETS (each in separate file)
@@ -82,48 +134,42 @@ def settings_file(user_id: str) -> Path:
 @app.post("/api/preset/save")
 async def save_preset(payload: dict):
     user_id = payload.get("userId")
+    cabinet_id = payload.get("cabinetId")
     preset = payload.get("preset")
     preset_id = payload.get("presetId")
 
-    if not user_id or not preset:
-        raise HTTPException(400, "userId and preset required")
+    if not user_id or not cabinet_id or not preset:
+        raise HTTPException(400, "userId, cabinetId and preset required")
 
-    info = load_user_info(user_id)
+    data = ensure_user_structure(user_id)
 
-    # создаём новый id если нет
+    # создаём новый id
     if not preset_id:
-        preset_id = f"preset_{len(info['presets']) + 1}"
+        preset_id = f"preset_{len(os.listdir(USERS_DIR / user_id / 'presets' / cabinet_id)) + 1}"
 
-    # путь к файлу пресета
-    file_path = preset_file(user_id, preset_id)
-
-    with open(file_path, "w") as f:
+    # файл пресета
+    fpath = preset_path(user_id, cabinet_id, preset_id)
+    with open(fpath, "w") as f:
         json.dump(preset, f, ensure_ascii=False, indent=2)
-
-    # обновляем user info
-    if preset_id not in info["presets"]:
-        info["presets"].append(preset_id)
-
-    save_user_info(user_id, info)
 
     return {"status": "ok", "preset_id": preset_id}
 
 
 @app.get("/api/preset/list")
-def list_presets(user_id: str):
-    info = load_user_info(user_id)
-    result = []
+def list_presets(user_id: str, cabinet_id: str):
+    ensure_user_structure(user_id)
 
-    for preset_id in info["presets"]:
-        f = preset_file(user_id, preset_id)
-        if f.exists():
-            with open(f, "r") as file:
-                result.append({
-                    "preset_id": preset_id,
-                    "data": json.load(file)
-                })
+    pdir = USERS_DIR / user_id / "presets" / cabinet_id
+    presets = []
 
-    return {"presets": result}
+    for file in pdir.glob("*.json"):
+        with open(file, "r") as f:
+            presets.append({
+                "preset_id": file.stem,
+                "data": json.load(f)
+            })
+
+    return {"presets": presets}
 
 
 @app.delete("/api/preset/delete")
@@ -148,26 +194,26 @@ def delete_preset(user_id: str, preset_id: str):
 @app.post("/api/creatives/save")
 async def save_creatives(payload: dict):
     user_id = payload.get("userId")
+    cabinet_id = payload.get("cabinetId")
     creatives = payload.get("creatives")
 
-    if not user_id:
-        raise HTTPException(400, "userId required")
+    if not user_id or not cabinet_id:
+        raise HTTPException(400, "Missing userId or cabinetId")
 
-    f = creatives_file(user_id)
+    ensure_user_structure(user_id)
 
+    f = creatives_path(user_id, cabinet_id)
     with open(f, "w") as file:
         json.dump(creatives, file, ensure_ascii=False, indent=2)
-
-    info = load_user_info(user_id)
-    info["creatives"] = creatives
-    save_user_info(user_id, info)
 
     return {"status": "ok"}
 
 
 @app.get("/api/creatives/get")
-def get_creatives(user_id: str):
-    f = creatives_file(user_id)
+def get_creatives(user_id: str, cabinet_id: str):
+    ensure_user_structure(user_id)
+
+    f = creatives_path(user_id, cabinet_id)
     if not f.exists():
         return {"creatives": []}
 
@@ -181,22 +227,23 @@ def get_creatives(user_id: str):
 @app.post("/api/audiences/save")
 async def save_audiences(payload: dict):
     user_id = payload.get("userId")
+    cabinet_id = payload.get("cabinetId")
     audiences = payload.get("audiences")
 
-    f = audiences_file(user_id)
+    ensure_user_structure(user_id)
+
+    f = audiences_path(user_id, cabinet_id)
     with open(f, "w") as file:
         json.dump(audiences, file, ensure_ascii=False, indent=2)
-
-    info = load_user_info(user_id)
-    info["audiences"] = audiences
-    save_user_info(user_id, info)
 
     return {"status": "ok"}
 
 
 @app.get("/api/audiences/get")
-def get_saved_audiences(user_id: str):
-    f = audiences_file(user_id)
+def get_audiences(user_id: str, cabinet_id: str):
+    ensure_user_structure(user_id)
+
+    f = audiences_path(user_id, cabinet_id)
     if not f.exists():
         return {"audiences": []}
 
@@ -212,23 +259,27 @@ async def save_settings(payload: dict):
     user_id = payload.get("userId")
     settings = payload.get("settings")
 
-    f = settings_file(user_id)
+    if not user_id or not settings:
+        raise HTTPException(400, "Missing userId or settings")
 
-    with open(f, "w") as file:
-        json.dump(settings, file, ensure_ascii=False, indent=2)
+    user_dir = USERS_DIR / user_id
+    info_file = user_dir / f"{user_id}.json"
 
-    info = load_user_info(user_id)
-    info["settings"] = settings
-    save_user_info(user_id, info)
+    data = ensure_user_structure(user_id)
+
+    # Обновляем только settings-поле
+    data.update(settings)
+
+    with open(info_file, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
     return {"status": "ok"}
 
 
 @app.get("/api/settings/get")
 def get_settings(user_id: str):
-    settings = ensure_user_structure(user_id)
-    return {"settings": settings}
-
+    data = ensure_user_structure(user_id)
+    return {"settings": data}
 
 # -------------------------------------
 #   FILE STORAGE (videos/images)
