@@ -30,6 +30,9 @@ load_dotenv("/opt/auto_ads/.env")
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
+def textsets_path(user_id: str, cabinet_id: str) -> Path:
+    return USERS_DIR / user_id / "presets" / cabinet_id / "textsets.json"
+
 def cabinet_storage(cabinet_id: str) -> Path:
     path = STORAGE_DIR / str(cabinet_id)
     path.mkdir(parents=True, exist_ok=True)
@@ -394,6 +397,29 @@ async def save_settings(payload: dict):
 def get_settings(user_id: str):
     data = ensure_user_structure(user_id)
     return {"settings": data}
+# --------------  TEXT  -----------------
+
+@app.get("/api/textsets/get")
+def get_textsets(user_id: str, cabinet_id: str):
+    ensure_user_structure(user_id)
+    f = textsets_path(user_id, cabinet_id)
+    if not f.exists():
+        return {"textsets": []}
+    with open(f, "r") as fh:
+        return {"textsets": json.load(fh)}
+
+@app.post("/api/textsets/save")
+def save_textsets(payload: dict):
+    user_id = payload.get("userId")
+    cabinet_id = payload.get("cabinetId")
+    sets = payload.get("textsets", [])
+    if not user_id or not cabinet_id:
+        raise HTTPException(400, "Missing userId or cabinetId")
+    ensure_user_structure(user_id)
+    f = textsets_path(user_id, cabinet_id)
+    with open(f, "w") as fh:
+        json.dump(sets, fh, ensure_ascii=False, indent=2)
+    return {"status": "ok"}
 
 # -------------------------------------
 #   FILE STORAGE (videos/images)
