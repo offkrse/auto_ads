@@ -35,6 +35,25 @@ def abstract_audiences_path(user_id: str, cabinet_id: str) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p / "abstract.json"
 
+def default_abstract_audiences() -> list[dict]:
+    names = [
+        "LAL Б0 ({день})",
+        "LAL Б1 ({день})",
+        "LAL ББ ({день})",
+        "LAL ББ ДОП_2 ({день})",
+        "LAL ББ ДОП_3 ({день})",
+        "LAL КР 1 ({день})",
+        "LAL КР 2 ({день})",
+        "LAL КР ДОП_3 ({день})",
+        "LAL КР ДОП_4 ({день})",
+        "LAL КР ДОП_5 ({день})",
+        "LAL КР ДОП_6 ({день})",
+        "LAL КР ДОП_8 ({день})",
+        "LAL КР ДОП_9 ({день})",
+        "LAL КР ДОП_10 ({день})",
+    ]
+    return [{"name": n} for n in names]
+
 def textsets_path(user_id: str, cabinet_id: str) -> Path:
     return USERS_DIR / user_id / "presets" / cabinet_id / "textsets.json"
 
@@ -294,22 +313,20 @@ def fetch_vk_audiences(user_id: str, cabinet_id: str):
 @app.get("/api/abstract_audiences/get")
 def get_abstract_audiences(user_id: str, cabinet_id: str):
     """
-    Возвращает абстрактные аудитории для КОНКРЕТНОГО кабинета.
-    Для обратной совместимости: если файла нет, пробуем старый путь users/<id>/audiences/all/abstract.json.
+    Возвращает абстрактные аудитории ДЛЯ КОНКРЕТНОГО кабинета.
+    Если файла нет — создаёт его с дефолтным набором и возвращает.
     """
     ensure_user_structure(user_id)
     f = abstract_audiences_path(user_id, cabinet_id)
-    if f.exists():
-        with open(f, "r") as fh:
-            return {"audiences": json.load(fh)}
 
-    # legacy fallback (чтобы не потерять старые данные из "all")
-    legacy = USERS_DIR / user_id / "audiences" / "all" / "abstract.json"
-    if legacy.exists():
-        with open(legacy, "r") as fh:
-            return {"audiences": json.load(fh)}
+    if not f.exists():
+        defaults = default_abstract_audiences()
+        with open(f, "w") as fh:
+            json.dump(defaults, fh, ensure_ascii=False, indent=2)
+        return {"audiences": defaults}
 
-    return {"audiences": []}
+    with open(f, "r") as fh:
+        return {"audiences": json.load(fh)}
 
 
 @app.post("/api/abstract_audiences/save")
