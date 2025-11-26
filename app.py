@@ -12,12 +12,17 @@ import shutil
 import uvicorn
 import os
 import fcntl
+import errno
 
 app = FastAPI()
 
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
+
+LOG_DIR = Path("/opt/auto_ads/logs")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+GLOBAL_LOG = LOG_DIR / "global_error.log"
 
 DATA_DIR = Path("/opt/auto_ads/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -36,6 +41,46 @@ load_dotenv("/opt/auto_ads/.env")
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
+def log_error(msg: str):
+    try:
+        with open(GLOBAL_LOG, "a", encoding="utf-8") as fh:
+            ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            fh.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass  # последняя линия обороны — лог просто пропускаем
+
+class file_lock:
+    """Простейшая advisory-блокировка на файле (Unix)."""
+    def __init__(self, path: Path):
+        self._path = path
+        self._fh = None
+    def __enter__(self):
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self._path, "a+")  # создаём, если нет
+        while True:
+            try:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+                break
+            except OSError as e:
+                if e.errno in (errno.EINTR, errno.EAGAIN):
+                    continue
+                raise
+        return self._fh
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fh.close()
+
+def atomic_write_json(dst: Path, obj: dict | list):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, ensure_ascii=False, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, dst)  # атомарная замена
+
 def append_to_global_queue(item: dict):
     """
     Безопасно добавляет item в /opt/auto_ads/data/global_queue.json.
@@ -311,27 +356,56 @@ async def save_creatives(payload: dict):
     creatives = payload.get("creatives")
 
     if not user_id or not cabinet_id:
+        log_error(f"creatives/save: missing fields user_id={user_id} cabinet_id={cabinet_id}")
         raise HTTPException(400, "Missing userId or cabinetId")
 
-    ensure_user_structure(user_id)
+    try:
+        ensure_user_structure(user_id)
+        f = creatives_path(user_id, cabinet_id)
+        lock = f.with_suffix(f.suffix + ".lock")
 
-    f = creatives_path(user_id, cabinet_id)
-    with open(f, "w") as file:
-        json.dump(creatives, file, ensure_ascii=False, indent=2)
-
-    return {"status": "ok"}
+        # Блокируем на время записи
+        with file_lock(lock):
+            atomic_write_json(f, creatives if creatives is not None else [])
+        return {"status": "ok"}
+    except Exception as e:
+        log_error(f"creatives/save[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 
 @app.get("/api/creatives/get")
 def get_creatives(user_id: str, cabinet_id: str):
-    ensure_user_structure(user_id)
+    try:
+        ensure_user_structure(user_id)
+        f = creatives_path(user_id, cabinet_id)
+        if not f.exists():
+            return {"creatives": []}
 
-    f = creatives_path(user_id, cabinet_id)
-    if not f.exists():
-        return {"creatives": []}
+        lock = f.with_suffix(f.suffix + ".lock")
+        with file_lock(lock):
+            # читаем целиком безопасно
+            with open(f, "r", encoding="utf-8") as fh:
+                text = fh.read()
 
-    with open(f, "r") as file:
-        return {"creatives": json.load(file)}
+        try:
+            data = json.loads(text) if text.strip() else []
+            if not isinstance(data, list):
+                # если вдруг не список — приводим
+                data = []
+            return {"creatives": data}
+        except json.JSONDecodeError as je:
+            # перекладываем битую версию в .bad и возвращаем пусто
+            bad = f.with_suffix(f.suffix + f".bad_{int(datetime.utcnow().timestamp())}")
+            try:
+                with open(bad, "w", encoding="utf-8") as bfh:
+                    bfh.write(text)
+            except Exception as e2:
+                log_error(f"creatives/get failed to write .bad: {repr(e2)}")
+            log_error(f"creatives/get JSONDecodeError on {f}: {repr(je)}; moved to {bad.name}")
+            return {"creatives": []}
+    except Exception as e:
+        log_error(f"creatives/get[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 
 @app.get("/video/{cabinet_id}/{filename}")
