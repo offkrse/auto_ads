@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from urllib.parse import quote
@@ -171,34 +171,48 @@ async def save_preset(payload: dict):
 @app.get("/api/preset/list")
 def list_presets(user_id: str, cabinet_id: str):
     ensure_user_structure(user_id)
-
     pdir = USERS_DIR / user_id / "presets" / cabinet_id
     presets = []
 
     for file in pdir.glob("*.json"):
-        with open(file, "r") as f:
-            presets.append({
-                "preset_id": file.stem,
-                "data": json.load(f)
-            })
+        try:
+            with open(file, "r") as f:
+                data = json.load(f)
+            # мягкая нормализация минимальных полей, чтобы фронт не падал даже без normalizePreset
+            if not isinstance(data, dict):
+                raise ValueError("Preset file is not an object")
+            if "company" not in data or not isinstance(data["company"], dict):
+                data["company"] = {}
+            if "groups" not in data or not isinstance(data["groups"], list):
+                data["groups"] = []
+            if "ads" not in data or not isinstance(data["ads"], list):
+                data["ads"] = []
+            presets.append({"preset_id": file.stem, "data": data})
+        except Exception as e:
+            # логируем и идём дальше
+            try:
+                logger  # если логгер из предыдущего шага добавлен
+            except NameError:
+                import logging
+                logger = logging.getLogger("auto_ads")
+            logger.warning(f"Skip invalid preset file: {file} | {e}")
 
     return {"presets": presets}
 
 
 @app.delete("/api/preset/delete")
-def delete_preset(user_id: str, preset_id: str):
-    info = load_user_info(user_id)
-
-    if preset_id in info["presets"]:
-        info["presets"].remove(preset_id)
-
-    save_user_info(user_id, info)
-
-    f = preset_file(user_id, preset_id)
+def delete_preset(
+    user_id: str = Query(...),
+    cabinet_id: str = Query(...),
+    preset_id: str = Query(...),
+):
+    ensure_user_structure(user_id)
+    f = preset_path(user_id, cabinet_id, preset_id)
     if f.exists():
         f.unlink()
-
-    return {"status": "deleted"}
+        return {"status": "deleted"}
+    # если файла нет — отвечаем 200, чтобы фронт не падал
+    return {"status": "not_found_but_ok"}
 
 
 # -------------------------------------
