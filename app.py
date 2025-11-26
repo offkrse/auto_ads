@@ -234,16 +234,22 @@ async def save_preset(payload: dict):
     except Exception:
         count_repeats = 1
 
+    # Время триггера (если выбрано "time" и задано поле time)
+    company = preset.get("company", {}) or {}
+    trigger_time = ""
+    if str(company.get("trigger", "time")) == "time":
+        trigger_time = str(company.get("time") or "")
+
     queue_item = {
         "user_id": str(user_id),
         "cabinet_id": str(cabinet_id),
-        "tokens": token_names,                    # имена токенов (не сами секреты!)
+        "tokens": token_names,
         "date_time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "count_repeats": count_repeats
+        "count_repeats": count_repeats,
+        "trigger_time": trigger_time
     }
 
     append_to_global_queue(queue_item)
-    # ====== КОНЕЦ НОВОГО ======
 
     return {"status": "ok", "preset_id": preset_id}
 
