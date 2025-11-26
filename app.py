@@ -329,9 +329,8 @@ def list_presets(user_id: str, cabinet_id: str):
 
     for file in pdir.glob("*.json"):
         try:
-            with open(file, "r") as f:
+            with open(file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # мягкая нормализация минимальных полей, чтобы фронт не падал даже без normalizePreset
             if not isinstance(data, dict):
                 raise ValueError("Preset file is not an object")
             if "company" not in data or not isinstance(data["company"], dict):
@@ -342,13 +341,7 @@ def list_presets(user_id: str, cabinet_id: str):
                 data["ads"] = []
             presets.append({"preset_id": file.stem, "data": data})
         except Exception as e:
-            # логируем и идём дальше
-            try:
-                logger  # если логгер из предыдущего шага добавлен
-            except NameError:
-                import logging
-                logger = logging.getLogger("auto_ads")
-            logger.warning(f"Skip invalid preset file: {file} | {e}")
+            log_error(f"Skip invalid preset file: {file} | {repr(e)}")
 
     return {"presets": presets}
 
