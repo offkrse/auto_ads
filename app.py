@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from datetime import datetime
 from urllib.parse import quote
 from pathlib import Path
 import requests
@@ -10,12 +11,17 @@ import json
 import shutil
 import uvicorn
 import os
+import fcntl
 
 app = FastAPI()
 
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
+
+DATA_DIR = Path("/opt/auto_ads/data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+GLOBAL_QUEUE_FILE = DATA_DIR / "global_queue.json"
 
 STORAGE_DIR = Path("/mnt/data/auto_ads_storage/video")
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,6 +36,48 @@ load_dotenv("/opt/auto_ads/.env")
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
+def append_to_global_queue(item: dict):
+    """
+    Безопасно добавляет item в /opt/auto_ads/data/global_queue.json.
+    Файл хранит МАССИВ JSON-объектов.
+    Используется файловая блокировка + атомарная запись через временный файл.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = GLOBAL_QUEUE_FILE.with_suffix(".json.tmp")
+
+    # Открываем файл для чтения/записи (создаём, если нет)
+    with open(GLOBAL_QUEUE_FILE, "a+", encoding="utf-8") as f:
+        # Эксклюзивная блокировка на время чтения/записи
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.seek(0)
+            raw = f.read().strip()
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    if not isinstance(data, list):
+                        # если вдруг не список — приводим к списку
+                        data = [data]
+                except Exception:
+                    data = []
+            else:
+                data = []
+        except Exception:
+            data = []
+
+        # Добавляем элемент
+        data.append(item)
+
+        # Пишем во временный файл и атомарно подменяем
+        with open(tmp_path, "w", encoding="utf-8") as tf:
+            json.dump(data, tf, ensure_ascii=False, indent=2)
+            tf.flush()
+            os.fsync(tf.fileno())
+        os.replace(tmp_path, GLOBAL_QUEUE_FILE)
+
+        # Снимаем блокировку
+        fcntl.flock(f, fcntl.LOCK_UN)
+
 def abstract_audiences_path(user_id: str, cabinet_id: str) -> Path:
     p = USERS_DIR / user_id / "audiences" / str(cabinet_id)
     p.mkdir(parents=True, exist_ok=True)
@@ -162,8 +210,40 @@ async def save_preset(payload: dict):
 
     # файл пресета
     fpath = preset_path(user_id, cabinet_id, preset_id)
-    with open(fpath, "w") as f:
+    with open(fpath, "w", encoding="utf-8") as f:
         json.dump(preset, f, ensure_ascii=False, indent=2)
+
+    # ====== НОВОЕ: добавляем запись в глобальную очередь ======
+    # Соберём список "tokens" (НЕ секреты, а имена переменных из .env).
+    # Если cabinet_id == "all" — берём все кабинеты кроме "all" с заполненным token.
+    if str(cabinet_id) == "all":
+        token_names = [
+            c.get("token") for c in data.get("cabinets", [])
+            if str(c.get("id")) != "all" and c.get("token")
+        ]
+    else:
+        token_names = [
+            c.get("token") for c in data.get("cabinets", [])
+            if str(c.get("id")) == str(cabinet_id) and c.get("token")
+        ]
+
+    # Кол-во дублей из пресета (по умолчанию 1)
+    count_repeats = 1
+    try:
+        count_repeats = int(preset.get("company", {}).get("duplicates", 1) or 1)
+    except Exception:
+        count_repeats = 1
+
+    queue_item = {
+        "user_id": str(user_id),
+        "cabinet_id": str(cabinet_id),
+        "tokens": token_names,                    # имена токенов (не сами секреты!)
+        "date_time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "count_repeats": count_repeats
+    }
+
+    append_to_global_queue(queue_item)
+    # ====== КОНЕЦ НОВОГО ======
 
     return {"status": "ok", "preset_id": preset_id}
 
