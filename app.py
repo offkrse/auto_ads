@@ -81,47 +81,57 @@ def atomic_write_json(dst: Path, obj: dict | list):
         os.fsync(fh.fileno())
     os.replace(tmp, dst)  # атомарная замена
 
-def append_to_global_queue(item: dict):
+def upsert_global_queue(item: dict):
     """
-    Безопасно добавляет item в /opt/auto_ads/data/global_queue.json.
-    Файл хранит МАССИВ JSON-объектов.
-    Используется файловая блокировка + атомарная запись через временный файл.
+    Безопасно вставляет/обновляет запись в /opt/auto_ads/data/global_queue.json,
+    ключом считаем (user_id, cabinet_id, preset_id).
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    GLOBAL_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = GLOBAL_QUEUE_FILE.with_suffix(".json.tmp")
 
-    # Открываем файл для чтения/записи (создаём, если нет)
+    # читаем + лочим основной файл
     with open(GLOBAL_QUEUE_FILE, "a+", encoding="utf-8") as f:
-        # Эксклюзивная блокировка на время чтения/записи
-        fcntl.flock(f, fcntl.LOCK_EX)
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         try:
             f.seek(0)
-            raw = f.read().strip()
-            if raw:
-                try:
-                    data = json.loads(raw)
-                    if not isinstance(data, list):
-                        # если вдруг не список — приводим к списку
-                        data = [data]
-                except Exception:
-                    data = []
-            else:
+            raw = f.read()
+            try:
+                data = json.loads(raw) if raw.strip() else []
+            except Exception as e:
+                log_error(f"global_queue: broken JSON, resetting. err={repr(e)}")
                 data = []
-        except Exception:
-            data = []
 
-        # Добавляем элемент
-        data.append(item)
+            if not isinstance(data, list):
+                data = []
 
-        # Пишем во временный файл и атомарно подменяем
-        with open(tmp_path, "w", encoding="utf-8") as tf:
-            json.dump(data, tf, ensure_ascii=False, indent=2)
-            tf.flush()
-            os.fsync(tf.fileno())
-        os.replace(tmp_path, GLOBAL_QUEUE_FILE)
+            # ключи
+            uid = str(item.get("user_id", ""))
+            cid = str(item.get("cabinet_id", ""))
+            pid = str(item.get("preset_id", ""))
 
-        # Снимаем блокировку
-        fcntl.flock(f, fcntl.LOCK_UN)
+            # ищем существующую запись
+            idx = -1
+            for i, it in enumerate(data):
+                if (str(it.get("user_id","")) == uid and
+                    str(it.get("cabinet_id","")) == cid and
+                    str(it.get("preset_id","")) == pid):
+                    idx = i
+                    break
+
+            if idx >= 0:
+                data[idx] = item  # обновляем
+            else:
+                data.append(item) # добавляем
+
+            # пишем атомарно
+            with open(tmp_path, "w", encoding="utf-8") as tf:
+                json.dump(data, tf, ensure_ascii=False, indent=2)
+                tf.flush()
+                os.fsync(tf.fileno())
+            os.replace(tmp_path, GLOBAL_QUEUE_FILE)
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 def abstract_audiences_path(user_id: str, cabinet_id: str) -> Path:
     p = USERS_DIR / user_id / "audiences" / str(cabinet_id)
@@ -272,29 +282,41 @@ async def save_preset(payload: dict):
             if str(c.get("id")) == str(cabinet_id) and c.get("token")
         ]
 
-    # Кол-во дублей из пресета (по умолчанию 1)
+    # Кол-во дублей
     count_repeats = 1
     try:
         count_repeats = int(preset.get("company", {}).get("duplicates", 1) or 1)
     except Exception:
         count_repeats = 1
-
-    # Время триггера (если выбрано "time" и задано поле time)
+    
     company = preset.get("company", {}) or {}
     trigger_time = ""
     if str(company.get("trigger", "time")) == "time":
         trigger_time = str(company.get("time") or "")
-
+    
+    # список "token"-имён кабинетов
+    if str(cabinet_id) == "all":
+        token_names = [
+            c.get("token") for c in data.get("cabinets", [])
+            if str(c.get("id")) != "all" and c.get("token")
+        ]
+    else:
+        token_names = [
+            c.get("token") for c in data.get("cabinets", [])
+            if str(c.get("id")) == str(cabinet_id) and c.get("token")
+        ]
+    
     queue_item = {
         "user_id": str(user_id),
         "cabinet_id": str(cabinet_id),
+        "preset_id": str(preset_id),   # ← ВАЖНО: теперь пишем preset_id
         "tokens": token_names,
         "date_time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "count_repeats": count_repeats,
         "trigger_time": trigger_time
     }
-
-    append_to_global_queue(queue_item)
+    
+    upsert_global_queue(queue_item)
 
     return {"status": "ok", "preset_id": preset_id}
 
@@ -603,18 +625,45 @@ async def save_settings(payload: dict):
 
 @app.get("/api/settings/get")
 def get_settings(user_id: str):
-    data = ensure_user_structure(user_id)
-    return {"settings": data}
+    try:
+        data = ensure_user_structure(user_id)
+        return {"settings": data}
+    except Exception as e:
+        log_error(f"/api/settings/get failed for {user_id}: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error":"Internal Server Error"})
 # --------------  TEXT  -----------------
 
 @app.get("/api/textsets/get")
 def get_textsets(user_id: str, cabinet_id: str):
-    ensure_user_structure(user_id)
-    f = textsets_path(user_id, cabinet_id)
-    if not f.exists():
-        return {"textsets": []}
-    with open(f, "r") as fh:
-        return {"textsets": json.load(fh)}
+    try:
+        ensure_user_structure(user_id)
+        f = textsets_path(user_id, cabinet_id)
+        if not f.exists():
+            return {"textsets": []}
+
+        lock = f.with_suffix(f.suffix + ".lock")
+        with file_lock(lock):
+            with open(f, "r", encoding="utf-8") as fh:
+                text = fh.read()
+
+        try:
+            data = json.loads(text) if text.strip() else []
+            if not isinstance(data, list):
+                data = []
+            return {"textsets": data}
+        except json.JSONDecodeError as je:
+            bad = f.with_suffix(f".bad_{int(datetime.utcnow().timestamp())}")
+            try:
+                with open(bad, "w", encoding="utf-8") as bfh:
+                    bfh.write(text)
+            except Exception as e2:
+                log_error(f"textsets/get: failed to write .bad: {repr(e2)}")
+            log_error(f"textsets/get JSONDecodeError: {repr(je)}")
+            return {"textsets": []}
+    except Exception as e:
+        log_error(f"textsets/get[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error":"Internal Server Error"})
+
 
 @app.post("/api/textsets/save")
 def save_textsets(payload: dict):
@@ -623,11 +672,16 @@ def save_textsets(payload: dict):
     sets = payload.get("textsets", [])
     if not user_id or not cabinet_id:
         raise HTTPException(400, "Missing userId or cabinetId")
-    ensure_user_structure(user_id)
-    f = textsets_path(user_id, cabinet_id)
-    with open(f, "w") as fh:
-        json.dump(sets, fh, ensure_ascii=False, indent=2)
-    return {"status": "ok"}
+    try:
+        ensure_user_structure(user_id)
+        f = textsets_path(user_id, cabinet_id)
+        lock = f.with_suffix(f.suffix + ".lock")
+        with file_lock(lock):
+            atomic_write_json(f, sets if isinstance(sets, list) else [])
+        return {"status": "ok"}
+    except Exception as e:
+        log_error(f"textsets/save[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error":"Internal Server Error"})
 
 # -------------------------------------
 #   FILE STORAGE (videos/images)
