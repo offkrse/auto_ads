@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from urllib.parse import quote
 from pathlib import Path
 import requests
 from PIL import Image
@@ -320,6 +321,61 @@ def get_audiences(user_id: str, cabinet_id: str):
     with open(f, "r") as file:
         return {"audiences": json.load(file)}
 
+@app.get("/api/vk/audiences/search")
+def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
+    """
+    Возвращает последние (до 50) аудиторий VK, имя которых начинается с q.
+    Если q пустой — просто последние 50.
+    """
+    data = ensure_user_structure(user_id)
+
+    # находим кабинет и токен
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return {"audiences": [], "error": "Invalid cabinet or missing token"}
+
+    token = os.getenv(cab["token"])
+    if not token:
+        return {"audiences": [], "error": f"Token {cab['token']} not found in .env"}
+
+    headers = {"Authorization": f"Bearer {token}"}
+    base = "https://ads.vk.com/api/v2/remarketing/segments.json"
+    name_filter = f"&_name__startswith={quote(q)}" if q else ""
+
+    # 1) узнаём общее количество с фильтром
+    r = requests.get(f"{base}?limit=1{name_filter}", headers=headers)
+    try:
+        j = r.json()
+    except Exception:
+        raise HTTPException(502, "Bad response from VK")
+
+    count = int(j.get("count", 0) or 0)
+    if count <= 0:
+        return {"audiences": []}
+
+    # 2) считаем смещение, чтобы получить последние 50
+    offset = max(0, count - 50)
+
+    r2 = requests.get(f"{base}?limit=50&offset={offset}{name_filter}", headers=headers)
+    try:
+        j2 = r2.json()
+    except Exception:
+        raise HTTPException(502, "Bad response from VK")
+
+    items = j2.get("items", [])
+
+    out = [{
+        "type": "vk",
+        "id": str(it.get("id", "")),
+        "name": it.get("name", ""),
+        "created": it.get("created", "")
+    } for it in items]
+
+    # На всякий случай упорядочим «новые сверху»
+    out.sort(key=lambda x: ((x.get("created") or ""), (x.get("id") or "")), reverse=True)
+
+    # Ничего не пишем на диск — это именно поиск.
+    return {"audiences": out}
 
 # -------------------------------------
 #   SETTINGS (theme, language, any future)
