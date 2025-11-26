@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from urllib.parse import quote
 from pathlib import Path
@@ -235,48 +235,45 @@ async def save_audiences(payload: dict):
 
 @app.get("/api/vk/audiences/fetch")
 def fetch_vk_audiences(user_id: str, cabinet_id: str):
-    """
-    Загружает последние 50 аудиторий из VK ADS
-    """
     data = ensure_user_structure(user_id)
 
-    # ищем кабинет
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
     if not cab or not cab.get("token"):
-        return {"audiences": [], "error": "Invalid cabinet or missing token"}
+        return JSONResponse(status_code=400, content={"audiences": [], "error": "Invalid cabinet or missing token"})
 
     token = os.getenv(cab["token"])
     if not token:
-        return {"audiences": [], "error": f"Token {cab['token']} not found in .env"}
+        return JSONResponse(status_code=500, content={"audiences": [], "error": f"Token {cab['token']} not found in .env"})
 
     headers = {"Authorization": f"Bearer {token}"}
 
-    # 1) узнать count
-    url = "https://ads.vk.com/api/v2/remarketing/segments.json?limit=1"
-    r = requests.get(url, headers=headers)
-    j = r.json()
+    try:
+        r = requests.get("https://ads.vk.com/api/v2/remarketing/segments.json?limit=1",
+                         headers=headers, timeout=10)
+        j = r.json()
+        count = int(j.get("count", 0))
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"audiences": [], "error": f"VK count error: {str(e)}"})
 
-    count = j.get("count", 0)
     if count == 0:
         return {"audiences": []}
 
     offset = max(0, count - 50)
     url2 = f"https://ads.vk.com/api/v2/remarketing/segments.json?limit=50&offset={offset}"
 
-    r2 = requests.get(url2, headers=headers)
-    j2 = r2.json()
+    try:
+        r2 = requests.get(url2, headers=headers, timeout=15)
+        j2 = r2.json()
+        items = j2.get("items", [])
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"audiences": [], "error": f"VK list error: {str(e)}"})
 
-    items = j2.get("items", [])
-
-    # конвертация
-    out = []
-    for it in items:
-        out.append({
-            "type": "vk",
-            "id": str(it["id"]),
-            "name": it["name"],
-            "created": it.get("created", "")
-        })
+    out = [{
+        "type": "vk",
+        "id": str(it["id"]),
+        "name": it["name"],
+        "created": it.get("created", "")
+    } for it in items]
 
     # сохраняем локально
     f = audiences_path(user_id, cabinet_id)
@@ -324,45 +321,40 @@ def get_audiences(user_id: str, cabinet_id: str):
 @app.get("/api/vk/audiences/search")
 def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
     """
-    Возвращает последние (до 50) аудиторий VK, имя которых начинается с q.
-    Если q пустой — просто последние 50.
+    Возвращает последние (до 50) аудиторий VK, у которых имя начинается с q.
+    Делает JSON-ответ даже при ошибках.
     """
     data = ensure_user_structure(user_id)
 
-    # находим кабинет и токен
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
     if not cab or not cab.get("token"):
-        return {"audiences": [], "error": "Invalid cabinet or missing token"}
+        return JSONResponse(status_code=400, content={"audiences": [], "error": "Invalid cabinet or missing token"})
 
     token = os.getenv(cab["token"])
     if not token:
-        return {"audiences": [], "error": f"Token {cab['token']} not found in .env"}
+        return JSONResponse(status_code=500, content={"audiences": [], "error": f"Token {cab['token']} not found in .env"})
 
     headers = {"Authorization": f"Bearer {token}"}
-    base = "https://ads.vk.com/api/v2/remarketing/segments.json"
-    name_filter = f"&_name__startswith={quote(q)}" if q else ""
 
-    # 1) узнаём общее количество с фильтром
-    r = requests.get(f"{base}?limit=1{name_filter}", headers=headers)
+    # 1) узнаём count
     try:
-        j = r.json()
-    except Exception:
-        raise HTTPException(502, "Bad response from VK")
+        r0 = requests.get("https://ads.vk.com/api/v2/remarketing/segments.json?limit=1",
+                          headers=headers, timeout=10)
+        j0 = r0.json()
+        count = int(j0.get("count", 0))
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"audiences": [], "error": f"VK count error: {str(e)}"})
 
-    count = int(j.get("count", 0) or 0)
-    if count <= 0:
-        return {"audiences": []}
-
-    # 2) считаем смещение, чтобы получить последние 50
+    # 2) берём последние 50 с фильтром по префиксу
     offset = max(0, count - 50)
+    url = f"https://ads.vk.com/api/v2/remarketing/segments.json?limit=50&offset={offset}&_name__startswith={quote(q or '')}"
 
-    r2 = requests.get(f"{base}?limit=50&offset={offset}{name_filter}", headers=headers)
     try:
-        j2 = r2.json()
-    except Exception:
-        raise HTTPException(502, "Bad response from VK")
-
-    items = j2.get("items", [])
+        r = requests.get(url, headers=headers, timeout=15)
+        j = r.json()
+        items = j.get("items", [])
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"audiences": [], "error": f"VK search error: {str(e)}"})
 
     out = [{
         "type": "vk",
@@ -371,10 +363,6 @@ def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
         "created": it.get("created", "")
     } for it in items]
 
-    # На всякий случай упорядочим «новые сверху»
-    out.sort(key=lambda x: ((x.get("created") or ""), (x.get("id") or "")), reverse=True)
-
-    # Ничего не пишем на диск — это именно поиск.
     return {"audiences": out}
 
 # -------------------------------------
