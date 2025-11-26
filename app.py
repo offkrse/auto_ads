@@ -30,6 +30,11 @@ load_dotenv("/opt/auto_ads/.env")
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
+def abstract_audiences_path(user_id: str, cabinet_id: str) -> Path:
+    p = USERS_DIR / user_id / "audiences" / str(cabinet_id)
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "abstract.json"
+
 def textsets_path(user_id: str, cabinet_id: str) -> Path:
     return USERS_DIR / user_id / "presets" / cabinet_id / "textsets.json"
 
@@ -287,26 +292,38 @@ def fetch_vk_audiences(user_id: str, cabinet_id: str):
 
 
 @app.get("/api/abstract_audiences/get")
-def get_abstract_audiences(user_id: str):
-    f = USERS_DIR / user_id / "audiences" / "all" / "abstract.json"
-    if not f.exists():
-        return {"audiences": []}
-    with open(f, "r") as file:
-        return {"audiences": json.load(file)}
+def get_abstract_audiences(user_id: str, cabinet_id: str):
+    """
+    Возвращает абстрактные аудитории для КОНКРЕТНОГО кабинета.
+    Для обратной совместимости: если файла нет, пробуем старый путь users/<id>/audiences/all/abstract.json.
+    """
+    ensure_user_structure(user_id)
+    f = abstract_audiences_path(user_id, cabinet_id)
+    if f.exists():
+        with open(f, "r") as fh:
+            return {"audiences": json.load(fh)}
+
+    # legacy fallback (чтобы не потерять старые данные из "all")
+    legacy = USERS_DIR / user_id / "audiences" / "all" / "abstract.json"
+    if legacy.exists():
+        with open(legacy, "r") as fh:
+            return {"audiences": json.load(fh)}
+
+    return {"audiences": []}
 
 
 @app.post("/api/abstract_audiences/save")
 def save_abstract_audiences(payload: dict):
     user_id = payload.get("userId")
-    items = payload.get("audiences")
+    cabinet_id = payload.get("cabinetId")
+    items = payload.get("audiences", [])
+    if not user_id or not cabinet_id:
+        raise HTTPException(400, "Missing userId or cabinetId")
 
-    path_dir = USERS_DIR / user_id / "audiences" / "all"
-    path_dir.mkdir(parents=True, exist_ok=True)
-
-    f = path_dir / "abstract.json"
-    with open(f, "w") as file:
-        json.dump(items, file, ensure_ascii=False, indent=2)
-
+    ensure_user_structure(user_id)
+    f = abstract_audiences_path(user_id, cabinet_id)
+    with open(f, "w") as fh:
+        json.dump(items, fh, ensure_ascii=False, indent=2)
     return {"status": "ok"}
 
 
