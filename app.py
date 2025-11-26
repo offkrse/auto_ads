@@ -626,11 +626,34 @@ def get_settings(user_id: str):
         return JSONResponse(status_code=500, content={"error":"Internal Server Error"})
 # --------------  TEXT  -----------------
 
+@app.post("/api/textsets/save")
+def save_textsets(payload: dict):
+    user_id = payload.get("userId")
+    cabinet_id = payload.get("cabinetId")
+    sets = payload.get("textsets", [])
+    if not user_id or cabinet_id is None:
+        log_error(f"textsets/save: missing userId={user_id} cabinetId={cabinet_id}")
+        raise HTTPException(400, "Missing userId or cabinetId")
+
+    try:
+        ensure_user_structure(user_id)
+        f = textsets_path(user_id, str(cabinet_id))
+        lock = f.with_suffix(f.suffix + ".lock")
+
+        # атомарная запись под блокировкой
+        with file_lock(lock):
+            atomic_write_json(f, sets if isinstance(sets, list) else [])
+        return {"status": "ok"}
+    except Exception as e:
+        log_error(f"textsets/save[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+
 @app.get("/api/textsets/get")
 def get_textsets(user_id: str, cabinet_id: str):
     try:
         ensure_user_structure(user_id)
-        f = textsets_path(user_id, cabinet_id)
+        f = textsets_path(user_id, str(cabinet_id))
         if not f.exists():
             return {"textsets": []}
 
@@ -645,36 +668,18 @@ def get_textsets(user_id: str, cabinet_id: str):
                 data = []
             return {"textsets": data}
         except json.JSONDecodeError as je:
-            bad = f.with_suffix(f".bad_{int(datetime.utcnow().timestamp())}")
+            # переименуем битый файл, чтобы не валить последующие запросы
+            bad = f.with_suffix(f.suffix + f".bad_{int(datetime.utcnow().timestamp())}")
             try:
                 with open(bad, "w", encoding="utf-8") as bfh:
                     bfh.write(text)
             except Exception as e2:
-                log_error(f"textsets/get: failed to write .bad: {repr(e2)}")
-            log_error(f"textsets/get JSONDecodeError: {repr(je)}")
+                log_error(f"textsets/get failed to write .bad: {repr(e2)}")
+            log_error(f"textsets/get JSONDecodeError on {f}: {repr(je)}; moved to {bad.name}")
             return {"textsets": []}
     except Exception as e:
         log_error(f"textsets/get[{user_id}/{cabinet_id}] error: {repr(e)}")
-        return JSONResponse(status_code=500, content={"error":"Internal Server Error"})
-
-
-@app.post("/api/textsets/save")
-def save_textsets(payload: dict):
-    user_id = payload.get("userId")
-    cabinet_id = payload.get("cabinetId")
-    sets = payload.get("textsets", [])
-    if not user_id or not cabinet_id:
-        raise HTTPException(400, "Missing userId or cabinetId")
-    try:
-        ensure_user_structure(user_id)
-        f = textsets_path(user_id, cabinet_id)
-        lock = f.with_suffix(f.suffix + ".lock")
-        with file_lock(lock):
-            atomic_write_json(f, sets if isinstance(sets, list) else [])
-        return {"status": "ok"}
-    except Exception as e:
-        log_error(f"textsets/save[{user_id}/{cabinet_id}] error: {repr(e)}")
-        return JSONResponse(status_code=500, content={"error":"Internal Server Error"})
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 # -------------------------------------
 #   FILE STORAGE (videos/images)
