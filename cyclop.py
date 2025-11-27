@@ -16,7 +16,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.2"
+VersionCyclop = "0.3 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -307,6 +307,35 @@ def make_banner_variants(company_name: str, ad_object_id: int, ad: Dict[str, Any
 
     return [banner]  # только 1 вариант
 
+def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Строго 2 креатива: icon_256x256 + video_portrait_9_16_30s
+    Тексты: about_company_115, cta_community_vk, text_2000, title_40_vkads
+    """
+    short = (ad.get("shortDescription") or "").strip()
+    title = (ad.get("title") or "").strip()
+
+    video_ids = ad.get("videoIds") or []
+    video_id = int(video_ids[0]) if video_ids else int(VIDEO_ID)
+    icon_id = int(ICON_IMAGE_ID)
+    if not icon_id or not video_id:
+        raise RuntimeError("Нужны оба креатива: ICON_IMAGE_ID и VIDEO_ID (или ad.videoIds).")
+
+    return {
+        "name": f"{company_name} - баннер 1",
+        "urls": {"primary": {"id": ad_object_id}},
+        "content": {
+            "icon_256x256": {"id": icon_id},
+            "video_portrait_9_16_30s": {"id": video_id},
+        },
+        "textblocks": {
+            "about_company_115": {"text": ABOUT_COMPANY_TEXT, "title": ""},
+            "cta_community_vk": {"text": "visitSite", "title": ""},
+            "text_2000": {"text": short, "title": ""},
+            "title_40_vkads": {"text": title, "title": ""},
+        }
+    }
+    
 # ============================ Построение payload ============================
 
 def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index: int) -> Dict[str, Any]:
@@ -393,19 +422,45 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int) -> L
     ad_object_id = resolve_url_id(url, tokens)
 
     ads = preset.get("ads", [])
-    ad_for_banner = ads[0] if ads else {}
+    groups = preset.get("groups", []) or []
+    groups_count = len(groups)
 
-    # готовим ЕДИНСТВЕННЫЙ допустимый баннер
-    banner = make_banner_variants(company_name, ad_object_id, ad_for_banner)[0]
+    if groups_count == 0:
+        raise RuntimeError("В пресете пустой список groups — нечего создавать.")
+
+    # Готовим баннеры по принципу: баннер i = ads[i]
+    # Если ads меньше, чем groups — для оставшихся групп берём ПОСЛЕДНИЙ баннер.
+    # Если ads пустой — делаем один баннер из дефолтов (ICON_IMAGE_ID/VIDEO_ID) и используем его для всех групп.
+    banners_by_group: List[Dict[str, Any]] = []
+    if not ads:
+        log.warning("В пресете пустой ads — используем дефолтный баннер для всех групп.")
+        default_ad = {"title": "", "shortDescription": "", "videoIds": []}
+        default_banner = make_banner_for_ad(company_name, ad_object_id, default_ad)
+        banners_by_group = [default_banner for _ in range(groups_count)]
+    else:
+        prepared_banners: List[Dict[str, Any]] = []
+        for idx, ad in enumerate(ads, start=1):
+            b = make_banner_for_ad(company_name, ad_object_id, ad)
+            prepared_banners.append(b)
+            log.info("Собран баннер #%d из ads[%d]", idx, idx-1)
+
+        for gi in range(groups_count):
+            if gi < len(prepared_banners):
+                banners_by_group.append(prepared_banners[gi])
+            else:
+                banners_by_group.append(prepared_banners[-1])  # берём последний
 
     results = []
     for i in range(1, repeats + 1):
         base_payload = build_ad_plan_payload(preset, ad_object_id, i)
 
-        # подставляем баннер в каждую группу
+        # Подставляем баннер для КАЖДОЙ группы по индексу
         payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
-        for g in payload_try.get("ad_groups", []):
-            g["banners"] = [banner]
+        ad_groups = payload_try.get("ad_groups", [])
+        for gi, g in enumerate(ad_groups):
+            g["banners"] = [banners_by_group[gi]]
+            # Страховка: если вдруг нет UTM — поставим дефолт, чтобы везде он был
+            g["utm"] = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
         endpoint = f"{API_BASE}/api/v2/ad_plans.json"
         resp = with_retries(
@@ -414,8 +469,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int) -> L
             tokens,
             data=json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
         )
-        results.append({"request": payload_try, "response": resp, "variant_used": "icon+video"})
-        log.info("Ad plan created (%d/%d) with strict banner template (icon+video).", i, repeats)
+        results.append({"request": payload_try, "response": resp, "variant_used": "per-group icon+video"})
+        log.info("Ad plan created (%d/%d) with per-group banner mapping (ads[i] -> groups[i]).", i, repeats)
 
     return results
 
