@@ -668,38 +668,77 @@ def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
 
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
     if not cab or not cab.get("token"):
-        return JSONResponse(status_code=400, content={"audiences": [], "error": "Invalid cabinet or missing token"})
+        return JSONResponse(
+            status_code=400,
+            content={"audiences": [], "error": "Invalid cabinet or missing token"}
+        )
 
     token = os.getenv(cab["token"])
     if not token:
-        return JSONResponse(status_code=500, content={"audiences": [], "error": f"Token {cab['token']} not found in .env"})
+        return JSONResponse(
+            status_code=500,
+            content={"audiences": [], "error": f"Token {cab['token']} not found in .env"}
+        )
 
     headers = {"Authorization": f"Bearer {token}"}
 
-    # 1) узнаём count
+    # нормализуем строку поиска
+    q = (q or "").strip()
+
+    # --- 1) узнаём count с теми же фильтрами, что и основной запрос ---
+
+    # если нет строки поиска — считаем общее количество без фильтров
+    if not q:
+        count_url = "https://ads.vk.com/api/v2/remarketing/segments.json?limit=1"
+    else:
+        # есть строка поиска — считаем количество только тех,
+        # у кого name начинается с q
+        count_url = (
+            "https://ads.vk.com/api/v2/remarketing/segments.json"
+            f"?limit=1&_name__startswith={quote(q)}"
+        )
+
     try:
-        r0 = requests.get("https://ads.vk.com/api/v2/remarketing/segments.json?limit=1",
-                          headers=headers, timeout=10)
+        r0 = requests.get(count_url, headers=headers, timeout=10)
         j0 = r0.json()
         count = int(j0.get("count", 0))
     except Exception as e:
-        return JSONResponse(status_code=502, content={"audiences": [], "error": f"VK count error: {str(e)}"})
+        return JSONResponse(
+            status_code=502,
+            content={"audiences": [], "error": f"VK count error: {str(e)}"}
+        )
 
-    # 2) берём последние 50 с фильтром по префиксу
+    # --- 2) по этому count берём "последние 50" с теми же фильтрами ---
+
     offset = max(0, count - 50)
-    url = f"https://ads.vk.com/api/v2/remarketing/segments.json?limit=50&offset={offset}&_name__startswith={quote(q or '')}"
+
+    if not q:
+        # без фильтра по имени — просто хвост списка
+        url = (
+            "https://ads.vk.com/api/v2/remarketing/segments.json"
+            f"?limit=50&offset={offset}"
+        )
+    else:
+        # тот же фильтр по имени + смещение
+        url = (
+            "https://ads.vk.com/api/v2/remarketing/segments.json"
+            f"?limit=50&offset={offset}&_name__startswith={quote(q)}"
+        )
 
     try:
         r = requests.get(url, headers=headers, timeout=15)
         j = r.json()
         items = j.get("items", [])
     except Exception as e:
-        return JSONResponse(status_code=502, content={"audiences": [], "error": f"VK search error: {str(e)}"})
+        return JSONResponse(
+            status_code=502,
+            content={"audiences": [], "error": f"VK search error: {str(e)}"}
+        )
 
     out = [{
         "type": "vk",
         "id": str(it.get("id", "")),
-        "name": it.get("name", ""),
+        "name": it.get("name", "")),
         "created": it.get("created", "")
     } for it in items]
 
