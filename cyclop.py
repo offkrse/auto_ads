@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.5"
+VersionCyclop = "0.6"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -31,6 +31,8 @@ API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 TRIGGER_EXTRA_HOURS = -4
 MATCH_WINDOW_SECONDS = int(os.getenv("MATCH_WINDOW_SECONDS", "55"))  # окно совпадения, сек
 
+DEBUG_SAVE_PAYLOAD = os.getenv("DEBUG_SAVE_PAYLOAD", "0") == "1"
+DEBUG_DRY_RUN = os.getenv("DEBUG_DRY_RUN", "0") == "1"
 # Ретраи и таймауты
 RETRY_MAX = int(os.getenv("RETRY_MAX", "7"))
 RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.7"))
@@ -91,7 +93,16 @@ PADS_FOR_PACKAGE: Dict[int, List[int]] = {
 }
 
 # ============================ Утилиты ============================
-
+def save_debug_payload(user_id: str, cabinet_id: str, name: str, payload: Dict[str, Any]) -> None:
+    if not DEBUG_SAVE_PAYLOAD:
+        return
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    out_dir = USERS_ROOT / str(user_id) / "created_company" / str(cabinet_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{name}_{ts}.payload.json"
+    dump_json(path, payload)
+    log.info("Saved debug payload to %s", path)
+    
 def load_tokens_from_envfile() -> None:
     """
     Загружаем ТОЛЬКО ключи VK_TOKEN_* из /opt/auto_ads/.env.
@@ -478,17 +489,36 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         base_payload = build_ad_plan_payload(preset, ad_object_id, i)
         payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
 
-        # подставляем баннеры в группы и имена «Группа i/Объявление i»
+        # подставляем баннеры в группы
         ad_groups = payload_try.get("ad_groups", [])
         for gi, g in enumerate(ad_groups):
             g["banners"] = [banners_by_group[gi]]
 
+        # DEBUG: сохранить payload (если включено)
+        save_debug_payload(user_id, cabinet_id, f"ad_plan_{i}", payload_try)
+
+        # DEBUG: сухой прогон — не отправляем в VK, сразу успех с пустым id_company
+        if DEBUG_DRY_RUN:
+            log.warning("[DRY RUN] Skipping POST /api/v2/ad_plans.json (no request sent).")
+            results.append({"request": payload_try, "response": {"response": {"campaigns": []}}})
+            continue
+
+        # Информативный лог перед POST
+        body_bytes = json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
+        post_timeout = VK_HTTP_TIMEOUT_POST  # из env
+        log.info(
+            "POST ad_plan (%d/%d): groups=%d, banners_per_group=1, payload=%.1f KB, timeout=%ss",
+            i, repeats, len(ad_groups), len(body_bytes)/1024.0, post_timeout
+        )
+
+        # Сам POST (ретраи и таймауты уже настроены)
         try:
             resp = with_retries(
                 "POST", endpoint, tokens,
-                data=json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
+                data=body_bytes
             )
             results.append({"request": payload_try, "response": resp})
+            log.info("POST OK (%d/%d).", i, repeats)
         except Exception as e:
             write_result_error(user_id, cabinet_id, "Ошибка создания кампании в VK Ads", repr(e))
             raise
