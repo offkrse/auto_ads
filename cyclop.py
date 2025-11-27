@@ -16,7 +16,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.3 unstable"
+VersionCyclop = "0.4 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -345,19 +345,18 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     objective = company.get("targetAction", "socialengagement")
     package_id = package_id_for_objective(objective)
 
-    # стартовая дата = сегодня +/- EXTRA (как и было в вашем воркере)
+    # стартовая дата = сегодня +/- EXTRA (как у вас было)
     now_local = datetime.now(LOCAL_TZ) + timedelta(hours=TRIGGER_EXTRA_HOURS)
     start_date_str = now_local.date().isoformat()
 
     ad_groups_payload = []
-    plan_budget_limit_day_sum = 0
 
     for g_idx, g in enumerate(groups, start=1):
         group_name = f"{company_name} - группа {g_idx}"
         regions = as_int_list(g.get("regions"))
         genders = split_gender(g.get("gender", ""))
         segments = as_int_list(g.get("audienceIds"))
-        # interests УДАЛЕНЫ
+        # interests удалены
         age_list = build_age_list(g.get("age", ""))
 
         targetings: Dict[str, Any] = {"geo": {"regions": regions}}
@@ -374,10 +373,9 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             targetings["pads"] = pads_vals
 
         budget_day = int(g.get("budget") or 0)
-        plan_budget_limit_day_sum += max(0, budget_day)
         utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
-        # баннер — наполняется в create_ad_plan()
+        # баннер заполнится позже (в create_ad_plan)
         banners_payload = [{"name": f"{company_name} - баннер 1", "urls": {"primary": {"id": ad_object_id}}}]
 
         ad_groups_payload.append({
@@ -385,7 +383,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             "targetings": targetings,
             "max_price": 0,
             "budget_limit": None,
-            "budget_limit_day": budget_day,
+            "budget_limit_day": budget_day,  # у групп оставляем как было
             "date_start": start_date_str,
             "date_end": None,
             "age_restrictions": "18+",
@@ -394,14 +392,15 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             "banners": banners_payload,
         })
 
+    # ⬇️ На уровне КОМПАНИИ делаем строго null для трёх полей
     payload = {
         "name": f"{company_name}",
         "status": "active",
         "date_start": start_date_str,
         "date_end": None,
-        "autobidding_mode": "max_goals",
-        "budget_limit_day": plan_budget_limit_day_sum or None,  # важно для max_goals
-        "budget_limit": None,
+        "autobidding_mode": None,   # <-- null
+        "budget_limit_day": None,   # <-- null
+        "budget_limit": None,       # <-- null
         "max_price": 0,
         "objective": objective,
         "ad_object_id": ad_object_id,
