@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.6"
+VersionCyclop = "0.7"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -235,18 +235,15 @@ def env_token(name: str) -> Optional[str]:
 
 def api_request(method: str, url: str, token: str, **kwargs) -> requests.Response:
     headers = kwargs.pop("headers", {})
-    timeout = kwargs.pop("timeout", None)
 
     headers["Authorization"] = f"Bearer {token}"
     headers["Accept"] = "application/json"
     if method.upper() == "POST":
         headers.setdefault("Content-Type", "application/json; charset=utf-8")
 
-    if timeout is None:
-        timeout = VK_HTTP_TIMEOUT_POST if method.upper() == "POST" else VK_HTTP_TIMEOUT
-
-    log.debug("API %s %s | timeout=%ss", method, url, timeout)
-    return requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
+    # таймауты отключены — не передаём параметр timeout вовсе
+    log.debug("API %s %s | timeout=disabled", method, url)
+    return requests.request(method, url, headers=headers, **kwargs)
 
 def with_retries(method: str, url: str, tokens: List[str], **kwargs) -> Dict[str, Any]:
     last_error = None
@@ -507,8 +504,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         body_bytes = json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
         post_timeout = VK_HTTP_TIMEOUT_POST  # из env
         log.info(
-            "POST ad_plan (%d/%d): groups=%d, banners_per_group=1, payload=%.1f KB, timeout=%ss",
-            i, repeats, len(ad_groups), len(body_bytes)/1024.0, post_timeout
+            "POST ad_plan (%d/%d): groups=%d, banners_per_group=1, payload=%.1f KB, timeout=disabled",
+            i, repeats, len(ad_groups), len(body_bytes)/1024.0
         )
 
         # Сам POST (ретраи и таймауты уже настроены)
