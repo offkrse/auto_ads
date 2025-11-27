@@ -191,12 +191,7 @@ def check_trigger(trigger_hhmm: str, now_local: Optional[datetime] = None) -> Tu
         "MATCH": str(match),
     }
 
-    log.info(
-        "TimeCheck | tz=%s | trig=%s | extra=%sh | now_local=%s | now_utc=%s | target=%s | delta=%.3fs | window=%ss | match=%s",
-        info["LOCAL_TZ"], info["TRIGGER"], info["TRIGGER_EXTRA_HOURS"],
-        info["NOW_LOCAL"], info["NOW_UTC"], info["TARGET_LOCAL"],
-        float(info["DELTA_SEC"]), info["WINDOW_SEC"], info["MATCH"]
-    )
+    log.info("trig=%s | %s | match=%s", trigger_hhmm, TRIGGER_EXTRA_HOURS, match)
     return match, info
 
 def as_int_list(maybe_csv_or_list) -> List[int]:
