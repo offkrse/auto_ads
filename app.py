@@ -17,6 +17,7 @@ import errno
 
 app = FastAPI()
 
+VersionApp = "0.2 unstable"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -670,14 +671,14 @@ def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
     if not cab or not cab.get("token"):
         return JSONResponse(
             status_code=400,
-            content={"audiences": [], "error": "Invalid cabinet or missing token"}
+            content={"audiences": [], "error": "Invalid cabinet or missing token"},
         )
 
     token = os.getenv(cab["token"])
     if not token:
         return JSONResponse(
             status_code=500,
-            content={"audiences": [], "error": f"Token {cab['token']} not found in .env"}
+            content={"audiences": [], "error": f"Token {cab['token']} not found in .env"},
         )
 
     headers = {"Authorization": f"Bearer {token}"}
@@ -687,12 +688,11 @@ def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
 
     # --- 1) узнаём count с теми же фильтрами, что и основной запрос ---
 
-    # если нет строки поиска — считаем общее количество без фильтров
     if not q:
+        # без строки поиска — общее количество без фильтров
         count_url = "https://ads.vk.com/api/v2/remarketing/segments.json?limit=1"
     else:
-        # есть строка поиска — считаем количество только тех,
-        # у кого name начинается с q
+        # есть строка поиска — считаем количество только совпадающих по префиксу имени
         count_url = (
             "https://ads.vk.com/api/v2/remarketing/segments.json"
             f"?limit=1&_name__startswith={quote(q)}"
@@ -705,7 +705,7 @@ def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
     except Exception as e:
         return JSONResponse(
             status_code=502,
-            content={"audiences": [], "error": f"VK count error: {str(e)}"}
+            content={"audiences": [], "error": f"VK count error: {str(e)}"},
         )
 
     # --- 2) по этому count берём "последние 50" с теми же фильтрами ---
@@ -719,7 +719,7 @@ def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
             f"?limit=50&offset={offset}"
         )
     else:
-        # тот же фильтр по имени + смещение
+        # тот же префикс по имени + смещение
         url = (
             "https://ads.vk.com/api/v2/remarketing/segments.json"
             f"?limit=50&offset={offset}&_name__startswith={quote(q)}"
@@ -732,15 +732,18 @@ def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
     except Exception as e:
         return JSONResponse(
             status_code=502,
-            content={"audiences": [], "error": f"VK search error: {str(e)}"}
+            content={"audiences": [], "error": f"VK search error: {str(e)}"},
         )
 
-    out = [{
-        "type": "vk",
-        "id": str(it.get("id", "")),
-        "name": it.get("name", "")),
-        "created": it.get("created", "")
-    } for it in items]
+    out = [
+        {
+            "type": "vk",
+            "id": str(it.get("id", "")),
+            "name": it.get("name", ""),
+            "created": it.get("created", ""),
+        }
+        for it in items
+    ]
 
     return {"audiences": out}
 
