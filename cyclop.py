@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.72"
+VersionCyclop = "0.73"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -215,13 +215,16 @@ def check_trigger(trigger_hhmm: str, now_local: Optional[datetime] = None) -> Tu
         now_local = datetime.now(LOCAL_TZ)
     now_utc = datetime.now(UTC_TZ)
 
+    # считаем в «сдвинутой» шкале: now(+4ч)
+    adjusted_now = now_local + timedelta(hours=SERVER_SHIFT_HOURS)
+
     try:
-        target = compute_target_dt(trigger_hhmm, now_local)
+        # ВАЖНО: target строим на ДАТЕ adjusted_now, чтобы при переходе через полночь дата тоже сместилась
+        target = compute_target_dt(trigger_hhmm, adjusted_now)
     except Exception as e:
         log.error("Trigger parse error '%s': %s", trigger_hhmm, e)
         return False, {"error": str(e)}
 
-    adjusted_now = now_local + timedelta(hours=SERVER_SHIFT_HOURS)
     delta_sec = (adjusted_now - target).total_seconds()
     match = 0 <= delta_sec <= MATCH_WINDOW_SECONDS
 
@@ -232,7 +235,7 @@ def check_trigger(trigger_hhmm: str, now_local: Optional[datetime] = None) -> Tu
         "NOW_LOCAL": now_local.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "NOW_UTC": now_utc.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "ADJUSTED_NOW": adjusted_now.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "TARGET_LOCAL": target.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "TARGET_SHIFTED": target.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "DELTA_SEC": f"{delta_sec:.3f}",
         "WINDOW_SEC": str(MATCH_WINDOW_SECONDS),
         "MATCH": str(match),
