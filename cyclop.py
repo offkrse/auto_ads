@@ -7,32 +7,73 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
+import logging
+from logging.handlers import TimedRotatingFileHandler
+
 import requests
 from dateutil import tz
 from filelock import FileLock
 from dotenv import load_dotenv
 
-# ============================ Конфигурация ============================
+# ============================ Пути/конфигурация ============================
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
 ENV_FILE = Path("/opt/auto_ads/.env")
+LOGS_DIR = Path("/opt/auto_ads/logs")
+LOG_FILE = LOGS_DIR / "auto_ads_worker.log"
 
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
-# Сдвиг для условия "trigger_time (+4 часа)"
-TRIGGER_EXTRA_HOURS = int(os.getenv("TRIGGER_EXTRA_HOURS", "4"))
-# Минутное окно допуска (на случай дрожания cron/таймеров)
-MATCH_WINDOW_SECONDS = int(os.getenv("MATCH_WINDOW_SECONDS", "55"))
-# Максимум попыток при floodlimit/429 на один вызов
-RETRY_MAX = int(os.getenv("RETRY_MAX", "6"))
-# Базовая пауза бэкоффа (сек)
-RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.5"))
+TRIGGER_EXTRA_HOURS = int(os.getenv("TRIGGER_EXTRA_HOURS", "4"))        # +4 часа к trigger_time
+MATCH_WINDOW_SECONDS = int(os.getenv("MATCH_WINDOW_SECONDS", "55"))      # окно совпадения, сек
+RETRY_MAX = int(os.getenv("RETRY_MAX", "6"))                              # попытки при 429/5xx
+RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.5"))        # экспоненциальный бэкофф
 
 ABOUT_COMPANY_TEXT = (os.getenv("ABOUT_COMPANY_TEXT") or "").strip() or None
-ICON_IMAGE_ID = os.getenv("ICON_IMAGE_ID")  # необязательно
+ICON_IMAGE_ID = os.getenv("ICON_IMAGE_ID")  # можно не задавать
 
-# Для логики времени. По умолчанию МСК (обычно релевантно для VK).
 LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "Europe/Moscow"))
+
+# ============================ Логирование ============================
+
+def setup_logger() -> logging.Logger:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("auto_ads")
+    if logger.handlers:
+        return logger  # уже сконфигурирован
+
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logger.setLevel(level)
+
+    fmt = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Ротация по дням, хранить 14 файлов
+    file_handler = TimedRotatingFileHandler(
+        filename=str(LOG_FILE),
+        when="midnight",
+        interval=1,
+        backupCount=14,
+        encoding="utf-8",
+        utc=False,
+    )
+    file_handler.setFormatter(fmt)
+    file_handler.setLevel(level)
+
+    # Дублируем в stdout (удобно для systemd/journal)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(fmt)
+    stream_handler.setLevel(level)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+    logger.propagate = False
+    return logger
+
+log = setup_logger()
 
 # =====================================================================
 
@@ -40,6 +81,7 @@ def load_env() -> None:
     """Подгружаем .env (override=True, чтобы обновлять значения)."""
     if ENV_FILE.exists():
         load_dotenv(dotenv_path=str(ENV_FILE), override=True)
+        log.debug("Env loaded from %s", ENV_FILE)
 
 def load_json(path: Path) -> Any:
     with open(path, "r", encoding="utf-8") as f:
@@ -107,6 +149,7 @@ def api_request(method: str, url: str, token: str, **kwargs) -> requests.Respons
     headers["Accept"] = "application/json"
     if method.upper() == "POST":
         headers.setdefault("Content-Type", "application/json; charset=utf-8")
+    log.debug("API %s %s", method, url)
     return requests.request(method, url, headers=headers, timeout=30, **kwargs)
 
 def with_retries(method: str, url: str, tokens: List[str], **kwargs) -> Dict[str, Any]:
@@ -126,25 +169,32 @@ def with_retries(method: str, url: str, tokens: List[str], **kwargs) -> Dict[str
         except requests.RequestException as e:
             last_error = f"RequestException: {e}"
             sleep = RETRY_BACKOFF_BASE ** attempt
+            log.warning("RequestException (attempt %s): %s; sleep=%.2fs", attempt, e, sleep)
             time.sleep(sleep)
             continue
 
         if resp.status_code == 429 or 500 <= resp.status_code < 600:
             last_error = f"{resp.status_code}: {resp.text[:200]}"
             sleep = RETRY_BACKOFF_BASE ** attempt
+            log.warning("API %s (attempt %s). Backoff %.2fs. Body: %s", resp.status_code, attempt, sleep, resp.text[:300])
             time.sleep(sleep)
             continue
 
         if not (200 <= resp.status_code < 300):
             last_error = f"{resp.status_code}: {resp.text[:500]}"
             sleep = min(60, RETRY_BACKOFF_BASE ** attempt)
+            log.warning("Non-2xx %s (attempt %s). Backoff %.2fs. Body: %s", resp.status_code, attempt, sleep, resp.text[:300])
             time.sleep(sleep)
             continue
 
         try:
-            return resp.json()
+            j = resp.json()
+            log.debug("API OK %s %s", resp.status_code, url)
+            return j
         except ValueError:
-            return {"raw": resp.text}
+            raw = {"raw": resp.text}
+            log.debug("API OK (raw response) %s %s", resp.status_code, url)
+            return raw
 
     raise RuntimeError(f"API failed after retries: {last_error}")
 
@@ -155,7 +205,9 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
     payload = with_retries("GET", endpoint, tokens)
     if "id" not in payload:
         raise RuntimeError(f"No id in resolve_url response: {payload}")
-    return int(payload["id"])
+    ad_id = int(payload["id"])
+    log.info("Resolved URL '%s' -> id=%s", url_str, ad_id)
+    return ad_id
 
 def package_id_for_objective(obj: str) -> int:
     return {
@@ -288,6 +340,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int) -> L
         endpoint = f"{API_BASE}/api/v2/ad_plans.json"
         resp = with_retries("POST", endpoint, tokens, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         results.append({"request": payload, "response": resp})
+        log.info("Ad plan created (%d/%d) for url_id=%s", i, repeats, ad_object_id)
     return results
 
 def should_fire_now(trigger_hhmm: str, now: Optional[datetime] = None) -> bool:
@@ -305,6 +358,7 @@ def process_queue_once() -> None:
     load_env()
 
     if not GLOBAL_QUEUE_PATH.exists():
+        log.debug("Queue file does not exist: %s", GLOBAL_QUEUE_PATH)
         return
 
     # Лочим файл, чтобы не было гонок при параллельных запусках
@@ -313,11 +367,11 @@ def process_queue_once() -> None:
         try:
             queue = load_json(GLOBAL_QUEUE_PATH)
         except Exception as e:
-            print(f"[WARN] cannot read queue: {e}")
+            log.warning("Cannot read queue: %s", e)
             return
 
     if not isinstance(queue, list):
-        print("[WARN] queue is not a list")
+        log.warning("Queue is not a list")
         return
 
     now = datetime.now(LOCAL_TZ)
@@ -331,36 +385,37 @@ def process_queue_once() -> None:
             count_repeats = int(item.get("count_repeats") or 1)
 
             if not trigger_time:
-                print(f"[SKIP] {user_id}/{cabinet_id}: no trigger_time")
+                log.info("[SKIP] %s/%s: no trigger_time", user_id, cabinet_id)
                 continue
 
             if not should_fire_now(trigger_time, now):
+                log.debug("[WAIT] %s/%s: now not in trigger window (%s + %sh)", user_id, cabinet_id, trigger_time, TRIGGER_EXTRA_HOURS)
                 continue
 
             preset_path = USERS_ROOT / str(user_id) / "presets" / str(cabinet_id) / f"{preset_id}.json"
             if not preset_path.exists():
-                print(f"[ERROR] preset not found: {preset_path}")
+                log.error("Preset not found: %s", preset_path)
                 continue
 
             preset = load_json(preset_path)
+            log.info("Processing %s/%s preset=%s repeats=%s", user_id, cabinet_id, preset_id, count_repeats)
             results = create_ad_plan(preset, tokens, count_repeats)
 
             out_path = USERS_ROOT / str(user_id) / "created_company" / str(cabinet_id) / "created.json"
             dump_json(out_path, results)
-            print(f"[OK] created {len(results)} plan(s) -> {out_path}")
+            log.info("Saved %d result(s) to %s", len(results), out_path)
 
         except Exception as e:
-            print(f"[ERROR] process item failed: {e}")
+            log.exception("Process item failed: %s", e)
 
 def main_loop() -> None:
-    # первичная загрузка .env
     load_env()
-    print("[worker] auto_ads started. tick each 60s.")
+    log.info("auto_ads worker started. Tick each 60s.")
     while True:
         try:
             process_queue_once()
         except Exception as e:
-            print(f"[FATAL] {e}")
+            log.exception("Fatal error: %s", e)
         time.sleep(60)
 
 if __name__ == "__main__":
