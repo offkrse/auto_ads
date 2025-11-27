@@ -25,7 +25,7 @@ LOGS_DIR = Path("/opt/auto_ads/logs")
 LOG_FILE = LOGS_DIR / "auto_ads_worker.log"
 
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
-TRIGGER_EXTRA_HOURS = int(os.getenv("TRIGGER_EXTRA_HOURS", "-4"))        # -4 часа от trigger_time
+TRIGGER_EXTRA_HOURS = -4       # -4 часа от trigger_time
 MATCH_WINDOW_SECONDS = int(os.getenv("MATCH_WINDOW_SECONDS", "55"))      # окно совпадения, сек
 RETRY_MAX = int(os.getenv("RETRY_MAX", "6"))                              # попытки при 429/5xx
 RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.5"))        # экспоненциальный бэкофф
