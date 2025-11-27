@@ -654,10 +654,10 @@ def process_queue_once() -> None:
 
             match, info = check_trigger(trigger_time, now_local)
             if not match:
-                log.info("[WAIT] %s/%s preset=%s | trigger=%s | target=%s | now=%s | delta=%ss (window=%ss)",
-                         user_id, cabinet_id, preset_id,
-                         info.get("TRIGGER"), info.get("TARGET_LOCAL"),
-                         info.get("NOW_LOCAL"), info.get("DELTA_SEC"), info.get("WINDOW_SEC"))
+                log.info("[WAIT] %s/%s preset=%s | trigger=%s | target=%s | now(+%sh)=%s | delta=%ss (window=%ss)",
+                     user_id, cabinet_id, preset_id,
+                     info.get("TRIGGER"), info.get("TARGET_LOCAL"),
+                     SERVER_SHIFT_HOURS, info.get("ADJUSTED_NOW"), info.get("DELTA_SEC"), info.get("WINDOW_SEC"))
                 continue
 
             preset_path = USERS_ROOT / user_id / "presets" / str(cabinet_id) / f"{preset_id}.json"
@@ -683,7 +683,7 @@ def main_loop() -> None:
     now_local = datetime.now(LOCAL_TZ)
     now_utc = datetime.now(UTC_TZ)
     log.info(
-        "auto_ads worker started. Tick each 60s. LOCAL_TZ=%s | now_local=%s | now_utc=%s | EXTRA=%sh | WINDOW=%ss",
+        "auto_ads worker started. Tick each 60s. LOCAL_TZ=%s | now_local=%s | now_utc=%s | SHIFT=%sh | WINDOW=%ss",
         LOCAL_TZ,
         now_local.strftime("%Y-%m-%d %H:%M:%S %Z"),
         now_utc.strftime("%Y-%m-%d %H:%M:%S %Z"),
