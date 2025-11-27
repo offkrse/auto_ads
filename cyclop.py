@@ -16,7 +16,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.1"
+VersionCyclop = "0.2"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -30,9 +30,14 @@ MATCH_WINDOW_SECONDS = int(os.getenv("MATCH_WINDOW_SECONDS", "55"))      # ок�
 RETRY_MAX = int(os.getenv("RETRY_MAX", "6"))                              # попытки при 429/5xx
 RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.5"))        # экспоненциальный бэкофф
 
-# НЕ берем из .env — только из окружения/дефолтов:
-ABOUT_COMPANY_TEXT = (os.getenv("ABOUT_COMPANY_TEXT") or "").strip() or None
-ICON_IMAGE_ID = os.getenv("ICON_IMAGE_ID")  # необязательно
+# ====== Креативы и тексты по умолчанию (можно переопределить через env) ======
+DEFAULT_ABOUT = (
+    "ООО «БСМЕДИА» 443080, Россия, г. Самара, Московское шоссе, д. 43, оф. 706 ОГРН 1216300005536"
+)
+ABOUT_COMPANY_TEXT = (os.getenv("ABOUT_COMPANY_TEXT") or "").strip() or DEFAULT_ABOUT
+
+ICON_IMAGE_ID = int(os.getenv("ICON_IMAGE_ID", "98308610"))  # иконка из ТЗ
+VIDEO_ID = int(os.getenv("VIDEO_ID", "79401418"))            # видео из ТЗ
 
 # Если сервер в UTC — дефолт уже UTC
 LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "UTC"))
@@ -82,7 +87,7 @@ log = setup_logger()
 def package_id_for_objective(obj: str) -> int:
     return {"socialengagement": 3127}.get(obj, 3127)
 
-# Площадки (pads), разрешённые для пакета 3127 (из твоего дампа)
+# Площадки (pads), разрешённые для пакета 3127
 PADS_FOR_PACKAGE: Dict[int, List[int]] = {
     3127: [102641, 1254386, 111756, 1265106, 1010345, 2243453],
 }
@@ -264,88 +269,43 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
     log.info("Resolved URL '%s' -> id=%s", url_str, ad_id)
     return ad_id
 
-# ============================ Patterns / баннерные варианты ============================
-
-def is_patterns_validation_error(resp_json: Dict[str, Any]) -> bool:
-    """
-    True, если 400 object_validation про 'patterns'.
-    """
-    try:
-        err = resp_json.get("error") or {}
-        fields = err.get("fields") or {}
-        campaigns = fields.get("campaigns") or {}
-        items = (campaigns.get("items") or [])
-        for it in items:
-            b = (it.get("fields") or {}).get("banners") or {}
-            b_items = b.get("items") or []
-            for bit in b_items:
-                f = bit.get("fields") or {}
-                if "patterns" in f:
-                    return True
-        return False
-    except Exception:
-        return False
+# ============================ Баннер (строго 2 креатива) ============================
 
 def make_banner_variants(company_name: str, ad_object_id: int, ad: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Варианты баннеров для пакета 3127 — в порядке совместимости:
-    1) icon + texts (400/401)
-    2) text only (145/150)
-    3) video_portrait_9_16_30s + texts (486 и др.)
-    4) icon + video + texts (если площадка примет)
+    ЕДИНСТВЕННЫЙ допустимый вариант:
+    - content: icon_256x256 + video_portrait_9_16_30s
+    - textblocks: about_company_115, cta_community_vk, text_2000, title_40_vkads
+    Если чего-то нет — кидаем ошибку (чтобы не отправлять лишние/неверные шаблоны).
     """
-    short = ad.get("shortDescription") or ""
-    title = ad.get("title") or ""
+    # Тексты
+    short = (ad.get("shortDescription") or "").strip()
+    title = (ad.get("title") or "").strip()
+
+    # Видео: берём из ad.videoIds[0], если нет — используем VIDEO_ID из окружения/дефолта
     video_ids = ad.get("videoIds") or []
+    video_id = int(video_ids[0]) if video_ids else int(VIDEO_ID)
+    icon_id = int(ICON_IMAGE_ID)
 
-    base_textblocks = {
-        "cta_community_vk": {"text": "visitSite", "title": ""},
-        "text_2000": {"text": short, "title": ""},
-        "title_40_vkads": {"text": title, "title": ""},
-    }
-    if ABOUT_COMPANY_TEXT:
-        base_textblocks["about_company_115"] = {"text": ABOUT_COMPANY_TEXT, "title": ""}
+    if not icon_id or not video_id:
+        raise RuntimeError("Нужны оба креатива: ICON_IMAGE_ID и VIDEO_ID (или ad.videoIds).")
 
-    v: List[Dict[str, Any]] = []
-
-    # v1: icon + texts
-    if ICON_IMAGE_ID:
-        v.append({
-            "name": f"{company_name} - баннер 1",
-            "urls": {"primary": {"id": ad_object_id}},
-            "content": {"icon_256x256": {"id": int(ICON_IMAGE_ID)}},
-            "textblocks": base_textblocks,
-        })
-
-    # v2: text only
-    v.append({
+    banner = {
         "name": f"{company_name} - баннер 1",
         "urls": {"primary": {"id": ad_object_id}},
-        "textblocks": base_textblocks,
-    })
+        "content": {
+            "icon_256x256": {"id": icon_id},
+            "video_portrait_9_16_30s": {"id": video_id},
+        },
+        "textblocks": {
+            "about_company_115": {"text": ABOUT_COMPANY_TEXT, "title": ""},
+            "cta_community_vk": {"text": "visitSite", "title": ""},
+            "text_2000": {"text": short, "title": ""},
+            "title_40_vkads": {"text": title, "title": ""},
+        }
+    }
 
-    # v3: video portrait + texts
-    if video_ids:
-        v.append({
-            "name": f"{company_name} - баннер 1",
-            "urls": {"primary": {"id": ad_object_id}},
-            "content": {"video_portrait_9_16_30s": {"id": int(video_ids[0])}},
-            "textblocks": base_textblocks,
-        })
-
-    # v4: icon + video + texts
-    if ICON_IMAGE_ID and video_ids:
-        v.append({
-            "name": f"{company_name} - баннер 1",
-            "urls": {"primary": {"id": ad_object_id}},
-            "content": {
-                "icon_256x256": {"id": int(ICON_IMAGE_ID)},
-                "video_portrait_9_16_30s": {"id": int(video_ids[0])},
-            },
-            "textblocks": base_textblocks,
-        })
-
-    return v
+    return [banner]  # только 1 вариант
 
 # ============================ Построение payload ============================
 
@@ -356,6 +316,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     objective = company.get("targetAction", "socialengagement")
     package_id = package_id_for_objective(objective)
 
+    # стартовая дата = сегодня +/- EXTRA (как и было в вашем воркере)
     now_local = datetime.now(LOCAL_TZ) + timedelta(hours=TRIGGER_EXTRA_HOURS)
     start_date_str = now_local.date().isoformat()
 
@@ -367,26 +328,27 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         regions = as_int_list(g.get("regions"))
         genders = split_gender(g.get("gender", ""))
         segments = as_int_list(g.get("audienceIds"))
-        interests_raw = str(g.get("interests") or "").strip()
-        interests = as_int_list(interests_raw) if interests_raw else []
+        # interests УДАЛЕНЫ
         age_list = build_age_list(g.get("age", ""))
 
         targetings: Dict[str, Any] = {"geo": {"regions": regions}}
-        if genders:   targetings["sex"] = genders
-        if segments:  targetings["segments"] = segments
-        if interests: targetings["interests"] = interests
-        if age_list:  targetings["age"] = {"age_list": age_list}
+        if genders:
+            targetings["sex"] = genders
+        if segments:
+            targetings["segments"] = segments
+        if age_list:
+            targetings["age"] = {"age_list": age_list}
 
-        # фиксируем pads для пакета 3127
+        # фиксируем pads для пакета
         pads_vals = PADS_FOR_PACKAGE.get(package_id)
         if pads_vals:
             targetings["pads"] = pads_vals
 
         budget_day = int(g.get("budget") or 0)
         plan_budget_limit_day_sum += max(0, budget_day)
-        utm = g.get("utm") or ""
+        utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
-        # баннеры — заглушка, реальный вариант подставим позже
+        # баннер — наполняется в create_ad_plan()
         banners_payload = [{"name": f"{company_name} - баннер 1", "urls": {"primary": {"id": ad_object_id}}}]
 
         ad_groups_payload.append({
@@ -419,7 +381,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     }
     return payload
 
-# ============================ Создание плана (адаптивно) ============================
+# ============================ Создание плана (строго с нужным шаблоном) ============================
 
 def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int) -> List[Dict[str, Any]]:
     company = preset["company"]
@@ -431,43 +393,29 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int) -> L
     ad_object_id = resolve_url_id(url, tokens)
 
     ads = preset.get("ads", [])
-    ad_for_variants = ads[0] if ads else {}
-    banner_variants = make_banner_variants(company_name, ad_object_id, ad_for_variants)
+    ad_for_banner = ads[0] if ads else {}
+
+    # готовим ЕДИНСТВЕННЫЙ допустимый баннер
+    banner = make_banner_variants(company_name, ad_object_id, ad_for_banner)[0]
 
     results = []
     for i in range(1, repeats + 1):
         base_payload = build_ad_plan_payload(preset, ad_object_id, i)
 
-        last_err = None
-        for variant_idx, banner in enumerate(banner_variants, start=1):
-            payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
-            for g in payload_try.get("ad_groups", []):
-                g["banners"] = [banner]
+        # подставляем баннер в каждую группу
+        payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
+        for g in payload_try.get("ad_groups", []):
+            g["banners"] = [banner]
 
-            endpoint = f"{API_BASE}/api/v2/ad_plans.json"
-            try:
-                resp = with_retries("POST", endpoint, tokens, data=json.dumps(payload_try, ensure_ascii=False).encode("utf-8"))
-                results.append({"request": payload_try, "response": resp, "variant_used": variant_idx})
-                log.info("Ad plan created (%d/%d) using banner variant #%d", i, repeats, variant_idx)
-                break
-            except RuntimeError as e:
-                err_msg = str(e)
-                try:
-                    err_json = json.loads(err_msg.split(":", 1)[1].strip())
-                except Exception:
-                    err_json = {}
-
-                if is_patterns_validation_error(err_json):
-                    log.warning("Variant #%d rejected by patterns. Trying next...", variant_idx)
-                    last_err = e
-                    continue
-                else:
-                    raise
-
-        else:
-            if last_err:
-                raise last_err
-            raise RuntimeError("All banner variants were rejected")
+        endpoint = f"{API_BASE}/api/v2/ad_plans.json"
+        resp = with_retries(
+            "POST",
+            endpoint,
+            tokens,
+            data=json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
+        )
+        results.append({"request": payload_try, "response": resp, "variant_used": "icon+video"})
+        log.info("Ad plan created (%d/%d) with strict banner template (icon+video).", i, repeats)
 
     return results
 
