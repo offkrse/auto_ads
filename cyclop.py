@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.7"
+VersionCyclop = "0.71"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -28,7 +28,7 @@ LOG_FILE = LOGS_DIR / "auto_ads_worker.log"
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 
 # Фиксированное смещение: от trigger_time ВСЕГДА вычитаем 4 часа
-TRIGGER_EXTRA_HOURS = -4
+SERVER_SHIFT_HOURS = 4
 MATCH_WINDOW_SECONDS = int(os.getenv("MATCH_WINDOW_SECONDS", "55"))  # окно совпадения, сек
 
 DEBUG_SAVE_PAYLOAD = os.getenv("DEBUG_SAVE_PAYLOAD", "0") == "1"
@@ -43,6 +43,8 @@ VK_HTTP_TIMEOUT_POST = float(os.getenv("VK_HTTP_TIMEOUT_POST", "150")) # POST
 LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "UTC"))
 UTC_TZ = tz.gettz("UTC")
 
+BASE_DATE = datetime(2025, 7, 14)
+BASE_NUMBER = 53
 # ============================ Логирование ============================
 
 def setup_logger() -> logging.Logger:
@@ -93,6 +95,43 @@ PADS_FOR_PACKAGE: Dict[int, List[int]] = {
 }
 
 # ============================ Утилиты ============================
+def compute_day_number(now_ref: datetime) -> int:
+    """
+    {день} = BASE_NUMBER + (сегодня - BASE_DATE).days
+    Для «сегодня» берём серверное локальное время со смещением +4 часа,
+    чтобы соответствовать логике триггера (не перескочить дату около полуночи).
+    """
+    # now_ref уже приходит как now_local
+    adjusted = now_ref + timedelta(hours=SERVER_SHIFT_HOURS)
+    return BASE_NUMBER + (adjusted.date() - BASE_DATE.date()).days
+
+def resolve_abstract_audiences(tokens: List[str], names: List[str], day_number: int) -> List[int]:
+    """
+    Для каждого имени в names подставляем {день} -> day_number,
+    зовём GET /api/v2/remarketing/segments.json?_name=<name>,
+    берём items[].id (все найденные) и возвращаем список ID.
+    """
+    ids: List[int] = []
+    for raw in names or []:
+        name = str(raw).replace("{день}", str(day_number))
+        from urllib.parse import quote
+        endpoint = f"{API_BASE}/api/v2/remarketing/segments.json?_name={quote(name, safe='')}"
+        try:
+            resp = with_retries("GET", endpoint, tokens)
+        except Exception as e:
+            log.warning("abstractAudience '%s' lookup failed: %s", name, e)
+            continue
+
+        items = (resp or {}).get("items") or []
+        found = [int(it["id"]) for it in items if isinstance(it, dict) and "id" in it]
+        if found:
+            log.info("abstractAudience '%s' -> segment_ids=%s", name, found)
+            ids.extend(found)
+        else:
+            log.warning("abstractAudience '%s' not found", name)
+    # уникализируем
+    return list(dict.fromkeys(ids))
+
 def save_debug_payload(user_id: str, cabinet_id: str, name: str, payload: Dict[str, Any]) -> None:
     if not DEBUG_SAVE_PAYLOAD:
         return
@@ -166,17 +205,12 @@ def parse_hhmm(s: str) -> Tuple[int, int]:
 
 def compute_target_dt(trigger_hhmm: str, ref_now: datetime) -> datetime:
     """
-    Берём часы/минуты из trigger_hhmm для СЕГОДНЯ в LOCAL_TZ
-    и добавляем фиксированно -4 часа (TRIGGER_EXTRA_HOURS).
+    Берём часы/минуты из trigger_hhmm для СЕГОДНЯ в LOCAL_TZ (без смещений).
     """
     h, m = parse_hhmm(trigger_hhmm)
-    base = ref_now.replace(hour=h, minute=m, second=0, microsecond=0)
-    return base + timedelta(hours=TRIGGER_EXTRA_HOURS)
+    return ref_now.replace(hour=h, minute=m, second=0, microsecond=0)
 
 def check_trigger(trigger_hhmm: str, now_local: Optional[datetime] = None) -> Tuple[bool, Dict[str, str]]:
-    """
-    Возвращает (match, info_dict) и логирует подробности сравнения времени.
-    """
     if now_local is None:
         now_local = datetime.now(LOCAL_TZ)
     now_utc = datetime.now(UTC_TZ)
@@ -187,22 +221,26 @@ def check_trigger(trigger_hhmm: str, now_local: Optional[datetime] = None) -> Tu
         log.error("Trigger parse error '%s': %s", trigger_hhmm, e)
         return False, {"error": str(e)}
 
-    delta_sec = (now_local - target).total_seconds()
+    adjusted_now = now_local + timedelta(hours=SERVER_SHIFT_HOURS)
+    delta_sec = (adjusted_now - target).total_seconds()
     match = 0 <= delta_sec <= MATCH_WINDOW_SECONDS
 
     info = {
         "LOCAL_TZ": str(LOCAL_TZ),
         "TRIGGER": trigger_hhmm,
-        "TRIGGER_EXTRA_HOURS": str(TRIGGER_EXTRA_HOURS),
+        "SERVER_SHIFT_HOURS": str(SERVER_SHIFT_HOURS),
         "NOW_LOCAL": now_local.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "NOW_UTC": now_utc.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "ADJUSTED_NOW": adjusted_now.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "TARGET_LOCAL": target.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "DELTA_SEC": f"{delta_sec:.3f}",
         "WINDOW_SEC": str(MATCH_WINDOW_SECONDS),
         "MATCH": str(match),
     }
 
-    log.info("trig=%s | %s | match=%s", trigger_hhmm, TRIGGER_EXTRA_HOURS, match)
+    # короткий лог
+    sign = f"+{SERVER_SHIFT_HOURS}" if SERVER_SHIFT_HOURS >= 0 else str(SERVER_SHIFT_HOURS)
+    log.info("trig=%s | %s | match=%s", trigger_hhmm, sign, match)
     return match, info
 
 def as_int_list(maybe_csv_or_list) -> List[int]:
@@ -425,6 +463,37 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     При успехе — пишет success с массивом id_company из response.campaigns[].id
     Возвращает список «сырого» ответа VK Ads (для внутренней отладки).
     """
+    # --- локальные хелперы для abstractAudiences ---
+    BASE_DATE = datetime(2025, 7, 14)
+    BASE_NUMBER = 53
+
+    def _compute_day_number(now_ref: datetime) -> int:
+        # серверное время +4 часа (как в триггере), затем считаем дни
+        adjusted = now_ref + timedelta(hours=SERVER_SHIFT_HOURS)
+        return BASE_NUMBER + (adjusted.date() - BASE_DATE.date()).days
+
+    def _resolve_abstract_audiences(_tokens: List[str], names: List[str], day_number: int) -> List[int]:
+        ids: List[int] = []
+        for raw in names or []:
+            name = str(raw).replace("{день}", str(day_number))
+            from urllib.parse import quote
+            endpoint = f"{API_BASE}/api/v2/remarketing/segments.json?_name={quote(name, safe='')}"
+            try:
+                resp = with_retries("GET", endpoint, _tokens)
+            except Exception as e:
+                log.warning("abstractAudience '%s' lookup failed: %s", name, e)
+                continue
+            items = (resp or {}).get("items") or []
+            found = [int(it["id"]) for it in items if isinstance(it, dict) and "id" in it]
+            if found:
+                log.info("abstractAudience '%s' -> segment_ids=%s", name, found)
+                ids.extend(found)
+            else:
+                log.warning("abstractAudience '%s' not found", name)
+        # уникализация с сохранением порядка
+        return list(dict.fromkeys(ids))
+    # --- конец локальных хелперов ---
+
     company = preset["company"]
     url = company.get("url")
     if not url:
@@ -456,13 +525,28 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         write_result_error(user_id, cabinet_id, "Не удалось получить ad_object_id по URL", repr(e))
         raise
 
-    ads = preset.get("ads", []) or []
-    groups = preset.get("groups", []) or []
+    # Работаем с копией пресета, чтобы расширить audienceIds из abstractAudiences
+    preset_mut = json.loads(json.dumps(preset, ensure_ascii=False))
+    groups = preset_mut.get("groups", []) or []
+    ads = preset_mut.get("ads", []) or []
+
     if not groups:
         write_result_error(user_id, cabinet_id, "В пресете отсутствуют группы", "groups is empty")
         raise RuntimeError("groups is empty")
 
-    # Готовим баннеры 1:1 с группами (каждой группе — свой баннер из ads[i])
+    # 1) Обогащение segments из abstractAudiences
+    day_number = _compute_day_number(datetime.now(LOCAL_TZ))
+    for gi, g in enumerate(groups):
+        abstract_names = g.get("abstractAudiences") or []
+        if abstract_names:
+            add_ids = _resolve_abstract_audiences(tokens, abstract_names, day_number)
+            if add_ids:
+                base_ids = g.get("audienceIds") or []
+                merged = as_int_list(base_ids) + add_ids
+                g["audienceIds"] = list(dict.fromkeys(merged))
+                log.info("Group #%d segments extended by abstractAudiences: +%d id(s)", gi+1, len(add_ids))
+
+    # 2) Баннеры 1:1 с группами (каждой группе — свой баннер из ads[i])
     banners_by_group: List[Dict[str, Any]] = []
     for gi in range(len(groups)):
         ad = ads[gi] if gi < len(ads) else None
@@ -483,7 +567,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     endpoint = f"{API_BASE}/api/v2/ad_plans.json"
 
     for i in range(1, repeats + 1):
-        base_payload = build_ad_plan_payload(preset, ad_object_id, i)
+        base_payload = build_ad_plan_payload(preset_mut, ad_object_id, i)
         payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
 
         # подставляем баннеры в группы
@@ -502,13 +586,12 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
         # Информативный лог перед POST
         body_bytes = json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
-        post_timeout = VK_HTTP_TIMEOUT_POST  # из env
         log.info(
             "POST ad_plan (%d/%d): groups=%d, banners_per_group=1, payload=%.1f KB, timeout=disabled",
             i, repeats, len(ad_groups), len(body_bytes)/1024.0
         )
 
-        # Сам POST (ретраи и таймауты уже настроены)
+        # Сам POST
         try:
             resp = with_retries(
                 "POST", endpoint, tokens,
@@ -516,6 +599,10 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             )
             results.append({"request": payload_try, "response": resp})
             log.info("POST OK (%d/%d).", i, repeats)
+            try:
+                log.debug("VK response:\n%s", json.dumps(resp, ensure_ascii=False, indent=2))
+            except Exception:
+                log.debug("VK response (raw): %s", str(resp)[:800])
         except Exception as e:
             write_result_error(user_id, cabinet_id, "Ошибка создания кампании в VK Ads", repr(e))
             raise
@@ -531,6 +618,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
     write_result_success(user_id, cabinet_id, campaign_ids)
     return results
+
 
 # ============================ Основной цикл ============================
 
