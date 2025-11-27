@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+"""
+auto_ads_worker.py
+
+- Каждую минуту читает /opt/auto_ads/data/global_queue.json
+- Срабатывает, когда текущая минута попадает в (trigger_time + TRIGGER_EXTRA_HOURS)
+- TRIGGER_EXTRA_HOURS по умолчанию = -4 (сервер в UTC)
+- Логи: текущее время (UTC/LOCAL), trigger HH:MM, целевое время, delta, окно
+- Токены берём ТОЛЬКО из /opt/auto_ads/.env (ключи VK_TOKEN_*) и/или из реального окружения
+"""
+
 import json
 import os
 import time
@@ -13,7 +24,7 @@ from logging.handlers import TimedRotatingFileHandler
 import requests
 from dateutil import tz
 from filelock import FileLock
-from dotenv import load_dotenv
+from dotenv import dotenv_values  # используем для выборочной загрузки токенов
 
 # ============================ Пути/конфигурация ============================
 
@@ -24,15 +35,18 @@ LOGS_DIR = Path("/opt/auto_ads/logs")
 LOG_FILE = LOGS_DIR / "auto_ads_worker.log"
 
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
-TRIGGER_EXTRA_HOURS = int(os.getenv("TRIGGER_EXTRA_HOURS", "-4"))        # +4 часа к trigger_time
+TRIGGER_EXTRA_HOURS = int(os.getenv("TRIGGER_EXTRA_HOURS", "-4"))        # -4ч от trigger_time
 MATCH_WINDOW_SECONDS = int(os.getenv("MATCH_WINDOW_SECONDS", "55"))      # окно совпадения, сек
 RETRY_MAX = int(os.getenv("RETRY_MAX", "6"))                              # попытки при 429/5xx
 RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.5"))        # экспоненциальный бэкофф
 
+# Эти два параметра НЕ берём из .env — только из окружения/дефолтов
 ABOUT_COMPANY_TEXT = (os.getenv("ABOUT_COMPANY_TEXT") or "").strip() or None
 ICON_IMAGE_ID = os.getenv("ICON_IMAGE_ID")  # можно не задавать
 
-LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "Europe/Moscow"))
+# Если сервер реально в UTC — оставь дефолт или выстави переменную окружения LOCAL_TZ=UTC (НЕ в .env)
+LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "UTC"))
+UTC_TZ = tz.gettz("UTC")
 
 # ============================ Логирование ============================
 
@@ -40,7 +54,7 @@ def setup_logger() -> logging.Logger:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("auto_ads")
     if logger.handlers:
-        return logger  # уже сконфигурирован
+        return logger
 
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
@@ -51,7 +65,6 @@ def setup_logger() -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # Ротация по дням, хранить 14 файлов
     file_handler = TimedRotatingFileHandler(
         filename=str(LOG_FILE),
         when="midnight",
@@ -63,7 +76,6 @@ def setup_logger() -> logging.Logger:
     file_handler.setFormatter(fmt)
     file_handler.setLevel(level)
 
-    # Дублируем в stdout (удобно для systemd/journal)
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(fmt)
     stream_handler.setLevel(level)
@@ -77,11 +89,23 @@ log = setup_logger()
 
 # =====================================================================
 
-def load_env() -> None:
-    """Подгружаем .env (override=True, чтобы обновлять значения)."""
-    if ENV_FILE.exists():
-        load_dotenv(dotenv_path=str(ENV_FILE), override=True)
-        log.debug("Env loaded from %s", ENV_FILE)
+def load_tokens_from_envfile() -> None:
+    """
+    Загружаем ТОЛЬКО ключи, начинающиеся с VK_TOKEN_*, из /opt/auto_ads/.env.
+    Никакие другие переменные из .env в окружение не попадают.
+    """
+    if not ENV_FILE.exists():
+        return
+    try:
+        values = dotenv_values(str(ENV_FILE))  # читает как dict, ничего не пишет в окружение
+        added = 0
+        for k, v in (values or {}).items():
+            if k and v and k.startswith("VK_TOKEN_"):
+                os.environ[k] = v  # прокидываем токены в env
+                added += 1
+        log.debug("Loaded %d VK tokens from %s", added, ENV_FILE)
+    except Exception as e:
+        log.warning("Failed to read tokens from %s: %s", ENV_FILE, e)
 
 def load_json(path: Path) -> Any:
     with open(path, "r", encoding="utf-8") as f:
@@ -94,13 +118,6 @@ def dump_json(path: Path, payload: Any) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
-def within_now(target: datetime, now: Optional[datetime] = None) -> bool:
-    """now попадает в [target, target + MATCH_WINDOW_SECONDS]."""
-    if now is None:
-        now = datetime.now(LOCAL_TZ)
-    delta = (now - target).total_seconds()
-    return 0 <= delta <= MATCH_WINDOW_SECONDS
-
 def parse_hhmm(s: str) -> Tuple[int, int]:
     m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", s or "")
     if not m:
@@ -111,18 +128,50 @@ def parse_hhmm(s: str) -> Tuple[int, int]:
         raise ValueError(f"Out of range HH:MM: {s}")
     return h, mi
 
-def build_age_list(age_range_str: str) -> List[int]:
-    """Из '21-55' -> [0,21,22,...,55]. Если формат странный — вернём [0]."""
-    m = re.fullmatch(r"\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", age_range_str or "")
-    ages = [0]
-    if not m:
-        return ages
-    a = int(m.group(1))
-    b = int(m.group(2))
-    if a > b:
-        a, b = b, a
-    ages.extend(list(range(a, b + 1)))
-    return ages
+def compute_target_dt(trigger_hhmm: str, ref_now: datetime) -> datetime:
+    """
+    Берём часы/минуты из trigger_hhmm для СЕГОДНЯ в LOCAL_TZ и добавляем TRIGGER_EXTRA_HOURS.
+    """
+    h, m = parse_hhmm(trigger_hhmm)
+    base = ref_now.replace(hour=h, minute=m, second=0, microsecond=0)
+    return base + timedelta(hours=TRIGGER_EXTRA_HOURS)
+
+def check_trigger(trigger_hhmm: str, now_local: Optional[datetime] = None) -> Tuple[bool, Dict[str, str]]:
+    """
+    Возвращает (match, info_dict) и логирует подробности сравнения времени.
+    """
+    if now_local is None:
+        now_local = datetime.now(LOCAL_TZ)
+    now_utc = datetime.now(UTC_TZ)
+
+    try:
+        target = compute_target_dt(trigger_hhmm, now_local)
+    except Exception as e:
+        log.error("Trigger parse error '%s': %s", trigger_hhmm, e)
+        return False, {"error": str(e)}
+
+    delta_sec = (now_local - target).total_seconds()
+    match = 0 <= delta_sec <= MATCH_WINDOW_SECONDS
+
+    info = {
+        "LOCAL_TZ": str(LOCAL_TZ),
+        "TRIGGER": trigger_hhmm,
+        "TRIGGER_EXTRA_HOURS": str(TRIGGER_EXTRA_HOURS),
+        "NOW_LOCAL": now_local.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "NOW_UTC": now_utc.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "TARGET_LOCAL": target.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "DELTA_SEC": f"{delta_sec:.3f}",
+        "WINDOW_SEC": str(MATCH_WINDOW_SECONDS),
+        "MATCH": str(match),
+    }
+
+    log.info(
+        "TimeCheck | tz=%s | trig=%s | extra=%sh | now_local=%s | now_utc=%s | target=%s | delta=%.3fs | window=%ss | match=%s",
+        info["LOCAL_TZ"], info["TRIGGER"], info["TRIGGER_EXTRA_HOURS"],
+        info["NOW_LOCAL"], info["NOW_UTC"], info["TARGET_LOCAL"],
+        float(info["DELTA_SEC"]), info["WINDOW_SEC"], info["MATCH"]
+    )
+    return match, info
 
 def as_int_list(maybe_csv_or_list) -> List[int]:
     if maybe_csv_or_list is None:
@@ -139,8 +188,17 @@ def split_gender(gender_str: str) -> List[str]:
         return []
     return [g.strip() for g in str(gender_str).split(",") if g.strip()]
 
+def build_age_list(age_range_str: str) -> List[int]:
+    m = re.fullmatch(r"\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", age_range_str or "")
+    ages = [0]
+    if not m:
+        return ages
+    a = int(m.group(1)); b = int(m.group(2))
+    if a > b: a, b = b, a
+    ages.extend(list(range(a, b + 1)))
+    return ages
+
 def env_token(name: str) -> Optional[str]:
-    """Берём значение токена из окружения (которое поддерживает .env)."""
     return os.getenv(name)
 
 def api_request(method: str, url: str, token: str, **kwargs) -> requests.Response:
@@ -153,16 +211,12 @@ def api_request(method: str, url: str, token: str, **kwargs) -> requests.Respons
     return requests.request(method, url, headers=headers, timeout=30, **kwargs)
 
 def with_retries(method: str, url: str, tokens: List[str], **kwargs) -> Dict[str, Any]:
-    """
-    Повтор с экспоненциальным бэкоффом при 429/5xx.
-    Перебираем токены циклически. Если в tokens передали уже "сырой" токен, тоже сработает.
-    """
     last_error = None
     total_tokens = max(1, len(tokens))
     for attempt in range(1, RETRY_MAX + 1):
         token_idx = (attempt - 1) % total_tokens
         token_key_or_value = tokens[token_idx] if tokens else ""
-        token_value = env_token(token_key_or_value) or token_key_or_value  # либо по имени из .env, либо строка как есть
+        token_value = env_token(token_key_or_value) or token_key_or_value
 
         try:
             resp = api_request(method, url, token_value, **kwargs)
@@ -210,19 +264,13 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
     return ad_id
 
 def package_id_for_objective(obj: str) -> int:
-    return {
-        "socialengagement": 3127,
-    }.get(obj, 3127)
+    return {"socialengagement": 3127}.get(obj, 3127)
 
 def build_ad_plan_payload(
     preset: Dict[str, Any],
     ad_object_id: int,
     plan_index: int
 ) -> Dict[str, Any]:
-    """
-    Формируем тело POST /api/v2/ad_plans.json
-    plan_index начинается с 1 (можно расширить, если захотите нумеровать имена).
-    """
     company = preset["company"]
     groups = preset.get("groups", [])
     ads = preset.get("ads", [])
@@ -230,11 +278,13 @@ def build_ad_plan_payload(
     company_name = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
     objective = company.get("targetAction", "socialengagement")
 
-    # дата старта = сегодня (+4ч), формат YYYY-MM-DD
+    # дата старта = сегодня с учётом TRIGGER_EXTRA_HOURS
     now_local = datetime.now(LOCAL_TZ) + timedelta(hours=TRIGGER_EXTRA_HOURS)
     start_date_str = now_local.date().isoformat()
 
     ad_groups_payload = []
+    plan_budget_limit_day_sum = 0  # <--- добавили накопитель
+
     for g_idx, g in enumerate(groups, start=1):
         group_name = f"{company_name} - группа {g_idx}"
         regions = as_int_list(g.get("regions"))
@@ -245,33 +295,27 @@ def build_ad_plan_payload(
         age_list = build_age_list(g.get("age", ""))
 
         targetings: Dict[str, Any] = {"geo": {"regions": regions}}
-        if genders:
-            targetings["sex"] = genders
-        if segments:
-            targetings["segments"] = segments
-        if interests:
-            targetings["interests"] = interests
-        if age_list:
-            targetings["age"] = {"age_list": age_list}
+        if genders:   targetings["sex"] = genders
+        if segments:  targetings["segments"] = segments
+        if interests: targetings["interests"] = interests
+        if age_list:  targetings["age"] = {"age_list": age_list}
 
         budget_day = int(g.get("budget") or 0)
+        plan_budget_limit_day_sum += max(0, budget_day)   # <--- копим дневной бюджет групп
         utm = g.get("utm") or ""
 
-        # баннеры — по числу объявлений
         banners_payload = []
         for a_idx, ad in enumerate(ads, start=1):
             banner_name = f"{company_name} - баннер {a_idx}"
             content: Dict[str, Any] = {}
             textblocks: Dict[str, Any] = {}
 
-            # Медиаконтент
             if ICON_IMAGE_ID:
                 content["icon_256x256"] = {"id": int(ICON_IMAGE_ID)}
             video_ids = ad.get("videoIds") or []
             if video_ids:
                 content["video_portrait_9_16_30s"] = {"id": int(video_ids[0])}
 
-            # Тексты
             short = ad.get("shortDescription") or ""
             title = ad.get("title") or ""
 
@@ -308,13 +352,16 @@ def build_ad_plan_payload(
             "banners": banners_payload,
         })
 
+    # если суммы нет (все 0/пусто) — оставим None, но для max_goals нужна >0
+    plan_budget_limit_day = plan_budget_limit_day_sum or None
+
     payload = {
         "name": f"{company_name}",
         "status": "active",
         "date_start": start_date_str,
         "date_end": None,
         "autobidding_mode": "max_goals",
-        "budget_limit_day": None,
+        "budget_limit_day": plan_budget_limit_day,   # <--- вот тут главное изменение
         "budget_limit": None,
         "max_price": 0,
         "objective": objective,
@@ -325,9 +372,6 @@ def build_ad_plan_payload(
     return payload
 
 def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int) -> List[Dict[str, Any]]:
-    """
-    Возвращает список ответов API по числу созданий (count_repeats).
-    """
     company = preset["company"]
     url = company.get("url")
     if not url:
@@ -343,25 +387,14 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int) -> L
         log.info("Ad plan created (%d/%d) for url_id=%s", i, repeats, ad_object_id)
     return results
 
-def should_fire_now(trigger_hhmm: str, now: Optional[datetime] = None) -> bool:
-    """
-    Условие запуска: текущая минута совпадает с (trigger_time + TRIGGER_EXTRA_HOURS).
-    """
-    if now is None:
-        now = datetime.now(LOCAL_TZ)
-    h, m = parse_hhmm(trigger_hhmm)
-    target = now.replace(hour=h, minute=m, second=0, microsecond=0) + timedelta(hours=TRIGGER_EXTRA_HOURS)
-    return within_now(target, now)
-
 def process_queue_once() -> None:
-    # Подхватим актуальные переменные окружения из .env
-    load_env()
+    # Подтягиваем только VK_TOKEN_* из .env (остальное — игнорируем)
+    load_tokens_from_envfile()
 
     if not GLOBAL_QUEUE_PATH.exists():
         log.debug("Queue file does not exist: %s", GLOBAL_QUEUE_PATH)
         return
 
-    # Лочим файл, чтобы не было гонок при параллельных запусках
     lock = FileLock(str(GLOBAL_QUEUE_PATH) + ".lock")
     with lock:
         try:
@@ -374,22 +407,22 @@ def process_queue_once() -> None:
         log.warning("Queue is not a list")
         return
 
-    now = datetime.now(LOCAL_TZ)
+    now_local = datetime.now(LOCAL_TZ)
     for item in queue:
         try:
             user_id = item["user_id"]
             cabinet_id = item["cabinet_id"]
             preset_id = item["preset_id"]
-            tokens = item.get("tokens") or []  # имена переменных из .env или сырые токены
+            tokens = item.get("tokens") or []  # имена VK_TOKEN_* или сырые токены
             trigger_time = item.get("trigger_time") or item.get("time") or ""
             count_repeats = int(item.get("count_repeats") or 1)
 
-            if not trigger_time:
-                log.info("[SKIP] %s/%s: no trigger_time", user_id, cabinet_id)
-                continue
-
-            if not should_fire_now(trigger_time, now):
-                log.debug("[WAIT] %s/%s: now not in trigger window (%s + %sh)", user_id, cabinet_id, trigger_time, TRIGGER_EXTRA_HOURS)
+            match, info = check_trigger(trigger_time, now_local)
+            if not match:
+                log.info("[WAIT] %s/%s preset=%s | trigger=%s | target=%s | now=%s | delta=%ss (window=%ss)",
+                         user_id, cabinet_id, preset_id,
+                         info.get("TRIGGER"), info.get("TARGET_LOCAL"),
+                         info.get("NOW_LOCAL"), info.get("DELTA_SEC"), info.get("WINDOW_SEC"))
                 continue
 
             preset_path = USERS_ROOT / str(user_id) / "presets" / str(cabinet_id) / f"{preset_id}.json"
@@ -409,8 +442,18 @@ def process_queue_once() -> None:
             log.exception("Process item failed: %s", e)
 
 def main_loop() -> None:
-    load_env()
-    log.info("auto_ads worker started. Tick each 60s.")
+    # При старте один раз подхватим токены (и дальше на каждом тике тоже)
+    load_tokens_from_envfile()
+    now_local = datetime.now(LOCAL_TZ)
+    now_utc = datetime.now(UTC_TZ)
+    log.info(
+        "auto_ads worker started. Tick each 60s. LOCAL_TZ=%s | now_local=%s | now_utc=%s | EXTRA=%sh | WINDOW=%ss",
+        LOCAL_TZ,
+        now_local.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        now_utc.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        TRIGGER_EXTRA_HOURS,
+        MATCH_WINDOW_SECONDS
+    )
     while True:
         try:
             process_queue_once()
