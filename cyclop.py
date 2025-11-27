@@ -4,6 +4,7 @@ import json
 import os
 import time
 import re
+import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
@@ -16,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.4 unstable"
+VersionCyclop = "0.5"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -25,19 +26,16 @@ LOGS_DIR = Path("/opt/auto_ads/logs")
 LOG_FILE = LOGS_DIR / "auto_ads_worker.log"
 
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
-TRIGGER_EXTRA_HOURS = -4       # -4 часа от trigger_time
-MATCH_WINDOW_SECONDS = int(os.getenv("MATCH_WINDOW_SECONDS", "55"))      # окно совпадения, сек
-RETRY_MAX = int(os.getenv("RETRY_MAX", "6"))                              # попытки при 429/5xx
-RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.5"))        # экспоненциальный бэкофф
 
-# ====== Креативы и тексты по умолчанию (можно переопределить через env) ======
-DEFAULT_ABOUT = (
-    "ООО «БСМЕДИА» 443080, Россия, г. Самара, Московское шоссе, д. 43, оф. 706 ОГРН 1216300005536"
-)
-ABOUT_COMPANY_TEXT = (os.getenv("ABOUT_COMPANY_TEXT") or "").strip() or DEFAULT_ABOUT
+# Фиксированное смещение: от trigger_time ВСЕГДА вычитаем 4 часа
+TRIGGER_EXTRA_HOURS = -4
+MATCH_WINDOW_SECONDS = int(os.getenv("MATCH_WINDOW_SECONDS", "55"))  # окно совпадения, сек
 
-ICON_IMAGE_ID = int(os.getenv("ICON_IMAGE_ID", "98308610"))  # иконка из ТЗ
-VIDEO_ID = int(os.getenv("VIDEO_ID", "79401418"))            # видео из ТЗ
+# Ретраи и таймауты
+RETRY_MAX = int(os.getenv("RETRY_MAX", "7"))
+RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.7"))
+VK_HTTP_TIMEOUT = float(os.getenv("VK_HTTP_TIMEOUT", "60"))            # GET/прочее
+VK_HTTP_TIMEOUT_POST = float(os.getenv("VK_HTTP_TIMEOUT_POST", "150")) # POST
 
 # Если сервер в UTC — дефолт уже UTC
 LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "UTC"))
@@ -82,12 +80,12 @@ def setup_logger() -> logging.Logger:
 
 log = setup_logger()
 
-# ============================ Константы пакетов/площадок ============================
+# ============================ Пакеты / площадки ============================
 
 def package_id_for_objective(obj: str) -> int:
     return {"socialengagement": 3127}.get(obj, 3127)
 
-# Площадки (pads), разрешённые для пакета 3127
+# Площадки (pads), разрешённые для пакета 3127 (примерный список)
 PADS_FOR_PACKAGE: Dict[int, List[int]] = {
     3127: [102641, 1254386, 111756, 1265106, 1010345, 2243453],
 }
@@ -124,6 +122,27 @@ def dump_json(path: Path, payload: Any) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+def write_result_success(user_id: str, cabinet_id: str, campaign_ids: List[int]) -> None:
+    out_path = USERS_ROOT / str(user_id) / "created_company" / str(cabinet_id) / "created.json"
+    payload = [{
+        "cabinet_id": str(cabinet_id),
+        "status": "success",
+        "text_error": "null",
+        "code_error": "null",
+        "id_company": campaign_ids,
+    }]
+    dump_json(out_path, payload)
+
+def write_result_error(user_id: str, cabinet_id: str, human: str, tech: str) -> None:
+    out_path = USERS_ROOT / str(user_id) / "created_company" / str(cabinet_id) / "created.json"
+    payload = [{
+        "cabinet_id": str(cabinet_id),
+        "status": "error",
+        "text_error": human,
+        "code_error": tech,
+    }]
+    dump_json(out_path, payload)
+
 def parse_hhmm(s: str) -> Tuple[int, int]:
     m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", s or "")
     if not m:
@@ -136,7 +155,8 @@ def parse_hhmm(s: str) -> Tuple[int, int]:
 
 def compute_target_dt(trigger_hhmm: str, ref_now: datetime) -> datetime:
     """
-    Берём часы/минуты из trigger_hhmm для СЕГОДНЯ в LOCAL_TZ и добавляем TRIGGER_EXTRA_HOURS.
+    Берём часы/минуты из trigger_hhmm для СЕГОДНЯ в LOCAL_TZ
+    и добавляем фиксированно -4 часа (TRIGGER_EXTRA_HOURS).
     """
     h, m = parse_hhmm(trigger_hhmm)
     base = ref_now.replace(hour=h, minute=m, second=0, microsecond=0)
@@ -209,12 +229,18 @@ def env_token(name: str) -> Optional[str]:
 
 def api_request(method: str, url: str, token: str, **kwargs) -> requests.Response:
     headers = kwargs.pop("headers", {})
+    timeout = kwargs.pop("timeout", None)
+
     headers["Authorization"] = f"Bearer {token}"
     headers["Accept"] = "application/json"
     if method.upper() == "POST":
         headers.setdefault("Content-Type", "application/json; charset=utf-8")
-    log.debug("API %s %s", method, url)
-    return requests.request(method, url, headers=headers, timeout=30, **kwargs)
+
+    if timeout is None:
+        timeout = VK_HTTP_TIMEOUT_POST if method.upper() == "POST" else VK_HTTP_TIMEOUT
+
+    log.debug("API %s %s | timeout=%ss", method, url, timeout)
+    return requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
 
 def with_retries(method: str, url: str, tokens: List[str], **kwargs) -> Dict[str, Any]:
     last_error = None
@@ -228,22 +254,28 @@ def with_retries(method: str, url: str, tokens: List[str], **kwargs) -> Dict[str
             resp = api_request(method, url, token_value, **kwargs)
         except requests.RequestException as e:
             last_error = f"RequestException: {e}"
-            sleep = RETRY_BACKOFF_BASE ** attempt
-            log.warning("RequestException (attempt %s): %s; sleep=%.2fs", attempt, e, sleep)
+            base_sleep = RETRY_BACKOFF_BASE ** attempt
+            jitter = random.uniform(0, 0.4 * base_sleep)
+            sleep = min(60.0, base_sleep + jitter)
+            log.warning("RequestException (attempt %s/%s): %s; sleep=%.2fs", attempt, RETRY_MAX, e, sleep)
             time.sleep(sleep)
             continue
 
         if resp.status_code == 429 or 500 <= resp.status_code < 600:
             last_error = f"{resp.status_code}: {resp.text[:200]}"
-            sleep = RETRY_BACKOFF_BASE ** attempt
-            log.warning("API %s (attempt %s). Backoff %.2fs. Body: %s", resp.status_code, attempt, sleep, resp.text[:300])
+            base_sleep = RETRY_BACKOFF_BASE ** attempt
+            jitter = random.uniform(0, 0.4 * base_sleep)
+            sleep = min(60.0, base_sleep + jitter)
+            log.warning("API %s (attempt %s/%s). Backoff %.2fs. Body: %s", resp.status_code, attempt, RETRY_MAX, sleep, resp.text[:300])
             time.sleep(sleep)
             continue
 
         if not (200 <= resp.status_code < 300):
             last_error = f"{resp.status_code}: {resp.text[:500]}"
-            sleep = min(60, RETRY_BACKOFF_BASE ** attempt)
-            log.warning("Non-2xx %s (attempt %s). Backoff %.2fs. Body: %s", resp.status_code, attempt, sleep, resp.text[:300])
+            base_sleep = RETRY_BACKOFF_BASE ** attempt
+            jitter = random.uniform(0, 0.3 * base_sleep)
+            sleep = min(30.0, base_sleep + jitter)
+            log.warning("Non-2xx %s (attempt %s/%s). Backoff %.2fs. Body: %s", resp.status_code, attempt, RETRY_MAX, sleep, resp.text[:300])
             time.sleep(sleep)
             continue
 
@@ -271,71 +303,43 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
 
 # ============================ Баннер (строго 2 креатива) ============================
 
-def make_banner_variants(company_name: str, ad_object_id: int, ad: Dict[str, Any]) -> List[Dict[str, Any]]:
+def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
+                       idx: int, advertiser_info: str, icon_id: Optional[int]) -> Dict[str, Any]:
     """
-    ЕДИНСТВЕННЫЙ допустимый вариант:
-    - content: icon_256x256 + video_portrait_9_16_30s
-    - textblocks: about_company_115, cta_community_vk, text_2000, title_40_vkads
-    Если чего-то нет — кидаем ошибку (чтобы не отправлять лишние/неверные шаблоны).
+    Строго 2 креатива: icon_256x256 (из company.logoId) + video_portrait_9_16_30s (из ads[i].videoIds[0])
+    Тексты:
+      - about_company_115: из company.advertiserInfo
+      - cta_community_vk: visitSite
+      - text_2000: ad.shortDescription
+      - title_40_vkads: ad.title
     """
-    # Тексты
-    short = (ad.get("shortDescription") or "").strip()
     title = (ad.get("title") or "").strip()
-
-    # Видео: берём из ad.videoIds[0], если нет — используем VIDEO_ID из окружения/дефолта
-    video_ids = ad.get("videoIds") or []
-    video_id = int(video_ids[0]) if video_ids else int(VIDEO_ID)
-    icon_id = int(ICON_IMAGE_ID)
-
-    if not icon_id or not video_id:
-        raise RuntimeError("Нужны оба креатива: ICON_IMAGE_ID и VIDEO_ID (или ad.videoIds).")
-
-    banner = {
-        "name": f"{company_name} - баннер 1",
-        "urls": {"primary": {"id": ad_object_id}},
-        "content": {
-            "icon_256x256": {"id": icon_id},
-            "video_portrait_9_16_30s": {"id": video_id},
-        },
-        "textblocks": {
-            "about_company_115": {"text": ABOUT_COMPANY_TEXT, "title": ""},
-            "cta_community_vk": {"text": "visitSite", "title": ""},
-            "text_2000": {"text": short, "title": ""},
-            "title_40_vkads": {"text": title, "title": ""},
-        }
-    }
-
-    return [banner]  # только 1 вариант
-
-def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Строго 2 креатива: icon_256x256 + video_portrait_9_16_30s
-    Тексты: about_company_115, cta_community_vk, text_2000, title_40_vkads
-    """
     short = (ad.get("shortDescription") or "").strip()
-    title = (ad.get("title") or "").strip()
+    vids = ad.get("videoIds") or []
+    video_id = vids[0] if vids else None
 
-    video_ids = ad.get("videoIds") or []
-    video_id = int(video_ids[0]) if video_ids else int(VIDEO_ID)
-    icon_id = int(ICON_IMAGE_ID)
-    if not icon_id or not video_id:
-        raise RuntimeError("Нужны оба креатива: ICON_IMAGE_ID и VIDEO_ID (или ad.videoIds).")
+    if not advertiser_info:
+        raise ValueError("Отсутствует advertiserInfo в company (для about_company_115).")
+    if not icon_id:
+        raise ValueError("Отсутствует logoId в company (для icon_256x256.id).")
+    if not video_id:
+        raise ValueError(f"У объявления ads[{idx-1}] отсутствует videoIds[0].")
 
     return {
-        "name": f"{company_name} - баннер 1",
+        "name": f"Объявление {idx}",
         "urls": {"primary": {"id": ad_object_id}},
         "content": {
-            "icon_256x256": {"id": icon_id},
-            "video_portrait_9_16_30s": {"id": video_id},
+            "icon_256x256": {"id": int(icon_id)},
+            "video_portrait_9_16_30s": {"id": int(video_id)},
         },
         "textblocks": {
-            "about_company_115": {"text": ABOUT_COMPANY_TEXT, "title": ""},
+            "about_company_115": {"text": advertiser_info, "title": ""},
             "cta_community_vk": {"text": "visitSite", "title": ""},
             "text_2000": {"text": short, "title": ""},
             "title_40_vkads": {"text": title, "title": ""},
         }
     }
-    
+
 # ============================ Построение payload ============================
 
 def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index: int) -> Dict[str, Any]:
@@ -345,18 +349,17 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     objective = company.get("targetAction", "socialengagement")
     package_id = package_id_for_objective(objective)
 
-    # стартовая дата = сегодня +/- EXTRA (как у вас было)
     now_local = datetime.now(LOCAL_TZ) + timedelta(hours=TRIGGER_EXTRA_HOURS)
     start_date_str = now_local.date().isoformat()
 
     ad_groups_payload = []
 
     for g_idx, g in enumerate(groups, start=1):
-        group_name = f"{company_name} - группа {g_idx}"
+        group_name = f"Группа {g_idx}"
         regions = as_int_list(g.get("regions"))
         genders = split_gender(g.get("gender", ""))
         segments = as_int_list(g.get("audienceIds"))
-        # interests удалены
+        # interests — УДАЛЕНЫ
         age_list = build_age_list(g.get("age", ""))
 
         targetings: Dict[str, Any] = {"geo": {"regions": regions}}
@@ -367,7 +370,6 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         if age_list:
             targetings["age"] = {"age_list": age_list}
 
-        # фиксируем pads для пакета
         pads_vals = PADS_FOR_PACKAGE.get(package_id)
         if pads_vals:
             targetings["pads"] = pads_vals
@@ -375,15 +377,17 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         budget_day = int(g.get("budget") or 0)
         utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
-        # баннер заполнится позже (в create_ad_plan)
-        banners_payload = [{"name": f"{company_name} - баннер 1", "urls": {"primary": {"id": ad_object_id}}}]
+        # баннер заполним позже (в create_ad_plan)
+        banners_payload = [{"name": f"Объявление {g_idx}", "urls": {"primary": {"id": ad_object_id}}}]
 
         ad_groups_payload.append({
             "name": group_name,
             "targetings": targetings,
             "max_price": 0,
+            # ГРУППА: как просили
+            "autobidding_mode": "max_goals",
             "budget_limit": None,
-            "budget_limit_day": budget_day,  # у групп оставляем как было
+            "budget_limit_day": budget_day,
             "date_start": start_date_str,
             "date_end": None,
             "age_restrictions": "18+",
@@ -392,15 +396,15 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             "banners": banners_payload,
         })
 
-    # ⬇️ На уровне КОМПАНИИ делаем строго null для трёх полей
+    # КОМПАНИЯ: три поля — строго null
     payload = {
         "name": f"{company_name}",
         "status": "active",
         "date_start": start_date_str,
         "date_end": None,
-        "autobidding_mode": None,   # <-- null
-        "budget_limit_day": None,   # <-- null
-        "budget_limit": None,       # <-- null
+        "autobidding_mode": None,
+        "budget_limit_day": None,
+        "budget_limit": None,
         "max_price": 0,
         "objective": objective,
         "ad_object_id": ad_object_id,
@@ -409,68 +413,101 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     }
     return payload
 
-# ============================ Создание плана (строго с нужным шаблоном) ============================
+# ============================ Создание плана ============================
 
-def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int) -> List[Dict[str, Any]]:
+def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
+                   user_id: str, cabinet_id: str) -> List[Dict[str, Any]]:
+    """
+    При ошибке пишет файл error с понятным текстом и техническим кодом.
+    При успехе — пишет success с массивом id_company из response.campaigns[].id
+    Возвращает список «сырого» ответа VK Ads (для внутренней отладки).
+    """
     company = preset["company"]
     url = company.get("url")
     if not url:
-        raise RuntimeError("В пресете нет company.url")
+        human = "Отсутствует URL компании (company.url)"
+        tech = "Missing company.url"
+        write_result_error(user_id, cabinet_id, human, tech)
+        raise RuntimeError(tech)
+
+    advertiser_info = (company.get("advertiserInfo") or "").strip()
+    logo_id = company.get("logoId")
+
+    # Жёсткие проверки входных данных (без дефолтов):
+    if not advertiser_info:
+        human = "Отсутствует текст 'advertiserInfo' в company"
+        tech = "Missing company.advertiserInfo"
+        write_result_error(user_id, cabinet_id, human, tech)
+        raise RuntimeError(tech)
+    if not logo_id:
+        human = "Отсутствует 'logoId' в company"
+        tech = "Missing company.logoId"
+        write_result_error(user_id, cabinet_id, human, tech)
+        raise RuntimeError(tech)
 
     company_name = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
-    ad_object_id = resolve_url_id(url, tokens)
 
-    ads = preset.get("ads", [])
+    try:
+        ad_object_id = resolve_url_id(url, tokens)
+    except Exception as e:
+        write_result_error(user_id, cabinet_id, "Не удалось получить ad_object_id по URL", repr(e))
+        raise
+
+    ads = preset.get("ads", []) or []
     groups = preset.get("groups", []) or []
-    groups_count = len(groups)
+    if not groups:
+        write_result_error(user_id, cabinet_id, "В пресете отсутствуют группы", "groups is empty")
+        raise RuntimeError("groups is empty")
 
-    if groups_count == 0:
-        raise RuntimeError("В пресете пустой список groups — нечего создавать.")
-
-    # Готовим баннеры по принципу: баннер i = ads[i]
-    # Если ads меньше, чем groups — для оставшихся групп берём ПОСЛЕДНИЙ баннер.
-    # Если ads пустой — делаем один баннер из дефолтов (ICON_IMAGE_ID/VIDEO_ID) и используем его для всех групп.
+    # Готовим баннеры 1:1 с группами (каждой группе — свой баннер из ads[i])
     banners_by_group: List[Dict[str, Any]] = []
-    if not ads:
-        log.warning("В пресете пустой ads — используем дефолтный баннер для всех групп.")
-        default_ad = {"title": "", "shortDescription": "", "videoIds": []}
-        default_banner = make_banner_for_ad(company_name, ad_object_id, default_ad)
-        banners_by_group = [default_banner for _ in range(groups_count)]
-    else:
-        prepared_banners: List[Dict[str, Any]] = []
-        for idx, ad in enumerate(ads, start=1):
-            b = make_banner_for_ad(company_name, ad_object_id, ad)
-            prepared_banners.append(b)
-            log.info("Собран баннер #%d из ads[%d]", idx, idx-1)
-
-        for gi in range(groups_count):
-            if gi < len(prepared_banners):
-                banners_by_group.append(prepared_banners[gi])
-            else:
-                banners_by_group.append(prepared_banners[-1])  # берём последний
+    for gi in range(len(groups)):
+        ad = ads[gi] if gi < len(ads) else None
+        if not ad:
+            human = f"Для группы #{gi+1} отсутствует объявление в 'ads'"
+            tech = f"ads[{gi}] is missing"
+            write_result_error(user_id, cabinet_id, human, tech)
+            raise RuntimeError(tech)
+        try:
+            banner = make_banner_for_ad(company_name, ad_object_id, ad, gi + 1, advertiser_info, int(logo_id))
+            banners_by_group.append(banner)
+            log.info("Собран баннер #%d из ads[%d]", gi+1, gi)
+        except Exception as e:
+            write_result_error(user_id, cabinet_id, "Ошибка сборки баннера", repr(e))
+            raise
 
     results = []
+    endpoint = f"{API_BASE}/api/v2/ad_plans.json"
+
     for i in range(1, repeats + 1):
         base_payload = build_ad_plan_payload(preset, ad_object_id, i)
-
-        # Подставляем баннер для КАЖДОЙ группы по индексу
         payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
+
+        # подставляем баннеры в группы и имена «Группа i/Объявление i»
         ad_groups = payload_try.get("ad_groups", [])
         for gi, g in enumerate(ad_groups):
             g["banners"] = [banners_by_group[gi]]
-            # Страховка: если вдруг нет UTM — поставим дефолт, чтобы везде он был
-            g["utm"] = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
-        endpoint = f"{API_BASE}/api/v2/ad_plans.json"
-        resp = with_retries(
-            "POST",
-            endpoint,
-            tokens,
-            data=json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
-        )
-        results.append({"request": payload_try, "response": resp, "variant_used": "per-group icon+video"})
-        log.info("Ad plan created (%d/%d) with per-group banner mapping (ads[i] -> groups[i]).", i, repeats)
+        try:
+            resp = with_retries(
+                "POST", endpoint, tokens,
+                data=json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
+            )
+            results.append({"request": payload_try, "response": resp})
+        except Exception as e:
+            write_result_error(user_id, cabinet_id, "Ошибка создания кампании в VK Ads", repr(e))
+            raise
 
+    # Успех: извлекаем id кампаний
+    try:
+        last = results[-1]["response"] if results else {}
+        campaigns = (last.get("response") or {}).get("campaigns") or []
+        campaign_ids = [int(x.get("id")) for x in campaigns if isinstance(x, dict) and "id" in x]
+    except Exception as e:
+        write_result_error(user_id, cabinet_id, "Не удалось распарсить ответ VK Ads", repr(e))
+        raise
+
+    write_result_success(user_id, cabinet_id, campaign_ids)
     return results
 
 # ============================ Основной цикл ============================
@@ -498,8 +535,8 @@ def process_queue_once() -> None:
     now_local = datetime.now(LOCAL_TZ)
     for item in queue:
         try:
-            user_id = item["user_id"]
-            cabinet_id = item["cabinet_id"]
+            user_id = str(item["user_id"])
+            cabinet_id = str(item["cabinet_id"])
             preset_id = item["preset_id"]
             tokens = item.get("tokens") or []      # имена VK_TOKEN_* или сырые токены
             trigger_time = item.get("trigger_time") or item.get("time") or ""
@@ -513,18 +550,20 @@ def process_queue_once() -> None:
                          info.get("NOW_LOCAL"), info.get("DELTA_SEC"), info.get("WINDOW_SEC"))
                 continue
 
-            preset_path = USERS_ROOT / str(user_id) / "presets" / str(cabinet_id) / f"{preset_id}.json"
+            preset_path = USERS_ROOT / user_id / "presets" / str(cabinet_id) / f"{preset_id}.json"
             if not preset_path.exists():
                 log.error("Preset not found: %s", preset_path)
+                write_result_error(user_id, cabinet_id, "Не найден пресет", f"missing preset file: {preset_path}")
                 continue
 
             preset = load_json(preset_path)
             log.info("Processing %s/%s preset=%s repeats=%s", user_id, cabinet_id, preset_id, count_repeats)
-            results = create_ad_plan(preset, tokens, count_repeats)
 
-            out_path = USERS_ROOT / str(user_id) / "created_company" / str(cabinet_id) / "created.json"
-            dump_json(out_path, results)
-            log.info("Saved %d result(s) to %s", len(results), out_path)
+            try:
+                _ = create_ad_plan(preset, tokens, count_repeats, user_id, cabinet_id)
+            except Exception:
+                # ошибка уже записана write_result_error внутри create_ad_plan
+                continue
 
         except Exception as e:
             log.exception("Process item failed: %s", e)
