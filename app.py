@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 from urllib.parse import quote
 from pathlib import Path
+from io import BytesIO
 import requests
 from PIL import Image
 import tempfile
@@ -24,6 +25,9 @@ LOG_DIR = Path("/opt/auto_ads/logs")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 GLOBAL_LOG = LOG_DIR / "global_error.log"
 
+LOGO_STORAGE_DIR = Path("/mnt/data/auto_ads_storage/logo")
+LOGO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
 DATA_DIR = Path("/opt/auto_ads/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 GLOBAL_QUEUE_FILE = DATA_DIR / "global_queue.json"
@@ -41,6 +45,15 @@ load_dotenv("/opt/auto_ads/.env")
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
+def logo_storage(cabinet_id: str) -> Path:
+    p = LOGO_STORAGE_DIR / str(cabinet_id)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def logo_meta_path(user_id: str, cabinet_id: str) -> Path:
+    return USERS_DIR / user_id / "creatives" / cabinet_id / "logo.json"
+
+
 def log_error(msg: str):
     try:
         with open(GLOBAL_LOG, "a", encoding="utf-8") as fh:
@@ -429,8 +442,109 @@ def serve_file(cabinet_id: str, filename: str):
     if not path.exists():
         raise HTTPException(404, "File not found")
     return FileResponse(path)
+    
+# -------------------------------------
+#   LOGO SETS
+# -------------------------------------
 
+@app.get("/logo/{cabinet_id}/{filename}")
+def serve_logo(cabinet_id: str, filename: str):
+    path = logo_storage(cabinet_id) / filename
+    if not path.exists():
+        raise HTTPException(404, "Logo not found")
+    return FileResponse(path)
 
+@app.post("/api/logo/upload")
+async def upload_logo(
+    user_id: str,
+    cabinet_id: str,
+    file: UploadFile = File(...),
+):
+    try:
+        ensure_user_structure(user_id)
+        if not file.content_type.startswith("image/"):
+            raise HTTPException(400, "Only image allowed")
+
+        # читаем в память
+        content = await file.read()
+        img = Image.open(BytesIO(content)).convert("RGBA")
+        w, h = img.size
+
+        # центр-кроп до квадрата
+        side = min(w, h)
+        left = (w - side) // 2
+        top = (h - side) // 2
+        img = img.crop((left, top, left + side, top + side))
+
+        # resize 256x256
+        img = img.resize((256, 256), Image.LANCZOS).convert("RGB")
+
+        # сохраняем во временный файл (jpeg)
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            img.save(tmp, format="JPEG", quality=95)
+            tmp_path = tmp.name
+
+        # берём токен кабинета (как в upload_creative)
+        data = ensure_user_structure(user_id)
+        cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+        if not cab or not cab.get("token"):
+            return JSONResponse(status_code=400, content={"error": "Invalid cabinet or missing token"})
+        real_token = os.getenv(cab["token"])
+        if not real_token:
+            raise HTTPException(500, f"Token {cab['token']} not found in environment")
+
+        headers = {"Authorization": f"Bearer {real_token}"}
+        files = {
+            "file": ("img256x256.jpg", open(tmp_path, "rb"), "image/jpeg"),
+            "data": (None, json.dumps({"width": 256, "height": 256}), "application/json"),
+        }
+
+        # загружаем в VK
+        vk_url = "https://ads.vk.com/api/v2/content/static.json"
+        resp = requests.post(vk_url, headers=headers, files=files, timeout=20)
+        if resp.status_code != 200:
+            return JSONResponse(status_code=502, content={"error": resp.text})
+        vk_id = resp.json().get("id")
+        if not vk_id:
+            raise HTTPException(500, "VK did not return id")
+
+        # сохраняем локально
+        storage = logo_storage(cabinet_id)
+        final_name = f"{vk_id}_logo.jpg"
+        final_path = storage / final_name
+        shutil.copy(tmp_path, final_path)
+
+        # сохраняем мету под блокировкой
+        meta_path = logo_meta_path(user_id, cabinet_id)
+        lock = meta_path.with_suffix(".lock")
+        with file_lock(lock):
+            atomic_write_json(meta_path, {
+                "id": vk_id,
+                "url": f"/auto_ads/logo/{cabinet_id}/{final_name}"
+            })
+
+        return {"status": "ok", "logo": {"id": vk_id, "url": f"/auto_ads/logo/{cabinet_id}/{final_name}"}}
+    except Exception as e:
+        log_error(f"logo/upload[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+    finally:
+        try:
+            os.remove(tmp_path)  # type: ignore
+        except Exception:
+            pass
+
+@app.get("/api/logo/get")
+def get_logo(user_id: str, cabinet_id: str):
+    try:
+        ensure_user_structure(user_id)
+        meta_path = logo_meta_path(user_id, cabinet_id)
+        if not meta_path.exists():
+            return {"logo": None}
+        with open(meta_path, "r", encoding="utf-8") as fh:
+            return {"logo": json.load(fh)}
+    except Exception as e:
+        log_error(f"logo/get[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 # -------------------------------------
 #   AUDIENCES
 # -------------------------------------
