@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-auto_ads_worker.py
-
-- Каждую минуту читает /opt/auto_ads/data/global_queue.json
-- Срабатывает, когда текущая минута попадает в (trigger_time + TRIGGER_EXTRA_HOURS)
-- TRIGGER_EXTRA_HOURS по умолчанию = -4 (сервер в UTC)
-- Логи: текущее время (UTC/LOCAL), trigger HH:MM, целевое время, delta, окно
-- Токены берём ТОЛЬКО из /opt/auto_ads/.env (ключи VK_TOKEN_*) и/или из реального окружения
-"""
-
 import json
 import os
 import time
@@ -24,7 +13,7 @@ from logging.handlers import TimedRotatingFileHandler
 import requests
 from dateutil import tz
 from filelock import FileLock
-from dotenv import dotenv_values  # используем для выборочной загрузки токенов
+from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
 
@@ -35,16 +24,16 @@ LOGS_DIR = Path("/opt/auto_ads/logs")
 LOG_FILE = LOGS_DIR / "auto_ads_worker.log"
 
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
-TRIGGER_EXTRA_HOURS = int(os.getenv("TRIGGER_EXTRA_HOURS", "-4"))        # -4ч от trigger_time
+TRIGGER_EXTRA_HOURS = int(os.getenv("TRIGGER_EXTRA_HOURS", "-4"))        # -4 часа от trigger_time
 MATCH_WINDOW_SECONDS = int(os.getenv("MATCH_WINDOW_SECONDS", "55"))      # окно совпадения, сек
 RETRY_MAX = int(os.getenv("RETRY_MAX", "6"))                              # попытки при 429/5xx
 RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.5"))        # экспоненциальный бэкофф
 
-# Эти два параметра НЕ берём из .env — только из окружения/дефолтов
+# НЕ берем из .env — только из окружения/дефолтов:
 ABOUT_COMPANY_TEXT = (os.getenv("ABOUT_COMPANY_TEXT") or "").strip() or None
-ICON_IMAGE_ID = os.getenv("ICON_IMAGE_ID")  # можно не задавать
+ICON_IMAGE_ID = os.getenv("ICON_IMAGE_ID")  # необязательно
 
-# Если сервер реально в UTC — оставь дефолт или выстави переменную окружения LOCAL_TZ=UTC (НЕ в .env)
+# Если сервер в UTC — дефолт уже UTC
 LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "UTC"))
 UTC_TZ = tz.gettz("UTC")
 
@@ -87,23 +76,34 @@ def setup_logger() -> logging.Logger:
 
 log = setup_logger()
 
-# =====================================================================
+# ============================ Константы пакетов/площадок ============================
+
+def package_id_for_objective(obj: str) -> int:
+    return {"socialengagement": 3127}.get(obj, 3127)
+
+# Площадки (pads), разрешённые для пакета 3127 (из твоего дампа)
+PADS_FOR_PACKAGE: Dict[int, List[int]] = {
+    3127: [102641, 1254386, 111756, 1265106, 1010345, 2243453],
+}
+
+# ============================ Утилиты ============================
 
 def load_tokens_from_envfile() -> None:
     """
-    Загружаем ТОЛЬКО ключи, начинающиеся с VK_TOKEN_*, из /opt/auto_ads/.env.
+    Загружаем ТОЛЬКО ключи VK_TOKEN_* из /opt/auto_ads/.env.
     Никакие другие переменные из .env в окружение не попадают.
     """
     if not ENV_FILE.exists():
         return
     try:
-        values = dotenv_values(str(ENV_FILE))  # читает как dict, ничего не пишет в окружение
+        values = dotenv_values(str(ENV_FILE))  # dict
         added = 0
         for k, v in (values or {}).items():
             if k and v and k.startswith("VK_TOKEN_"):
-                os.environ[k] = v  # прокидываем токены в env
+                os.environ[k] = v
                 added += 1
-        log.debug("Loaded %d VK tokens from %s", added, ENV_FILE)
+        if added:
+            log.debug("Loaded %d VK_TOKEN_* from %s", added, ENV_FILE)
     except Exception as e:
         log.warning("Failed to read tokens from %s: %s", ENV_FILE, e)
 
@@ -263,27 +263,103 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
     log.info("Resolved URL '%s' -> id=%s", url_str, ad_id)
     return ad_id
 
-def package_id_for_objective(obj: str) -> int:
-    return {"socialengagement": 3127}.get(obj, 3127)
+# ============================ Patterns / баннерные варианты ============================
 
-def build_ad_plan_payload(
-    preset: Dict[str, Any],
-    ad_object_id: int,
-    plan_index: int
-) -> Dict[str, Any]:
+def is_patterns_validation_error(resp_json: Dict[str, Any]) -> bool:
+    """
+    True, если 400 object_validation про 'patterns'.
+    """
+    try:
+        err = resp_json.get("error") or {}
+        fields = err.get("fields") or {}
+        campaigns = fields.get("campaigns") or {}
+        items = (campaigns.get("items") or [])
+        for it in items:
+            b = (it.get("fields") or {}).get("banners") or {}
+            b_items = b.get("items") or []
+            for bit in b_items:
+                f = bit.get("fields") or {}
+                if "patterns" in f:
+                    return True
+        return False
+    except Exception:
+        return False
+
+def make_banner_variants(company_name: str, ad_object_id: int, ad: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Варианты баннеров для пакета 3127 — в порядке совместимости:
+    1) icon + texts (400/401)
+    2) text only (145/150)
+    3) video_portrait_9_16_30s + texts (486 и др.)
+    4) icon + video + texts (если площадка примет)
+    """
+    short = ad.get("shortDescription") or ""
+    title = ad.get("title") or ""
+    video_ids = ad.get("videoIds") or []
+
+    base_textblocks = {
+        "cta_community_vk": {"text": "visitSite", "title": ""},
+        "text_2000": {"text": short, "title": ""},
+        "title_40_vkads": {"text": title, "title": ""},
+    }
+    if ABOUT_COMPANY_TEXT:
+        base_textblocks["about_company_115"] = {"text": ABOUT_COMPANY_TEXT, "title": ""}
+
+    v: List[Dict[str, Any]] = []
+
+    # v1: icon + texts
+    if ICON_IMAGE_ID:
+        v.append({
+            "name": f"{company_name} - баннер 1",
+            "urls": {"primary": {"id": ad_object_id}},
+            "content": {"icon_256x256": {"id": int(ICON_IMAGE_ID)}},
+            "textblocks": base_textblocks,
+        })
+
+    # v2: text only
+    v.append({
+        "name": f"{company_name} - баннер 1",
+        "urls": {"primary": {"id": ad_object_id}},
+        "textblocks": base_textblocks,
+    })
+
+    # v3: video portrait + texts
+    if video_ids:
+        v.append({
+            "name": f"{company_name} - баннер 1",
+            "urls": {"primary": {"id": ad_object_id}},
+            "content": {"video_portrait_9_16_30s": {"id": int(video_ids[0])}},
+            "textblocks": base_textblocks,
+        })
+
+    # v4: icon + video + texts
+    if ICON_IMAGE_ID and video_ids:
+        v.append({
+            "name": f"{company_name} - баннер 1",
+            "urls": {"primary": {"id": ad_object_id}},
+            "content": {
+                "icon_256x256": {"id": int(ICON_IMAGE_ID)},
+                "video_portrait_9_16_30s": {"id": int(video_ids[0])},
+            },
+            "textblocks": base_textblocks,
+        })
+
+    return v
+
+# ============================ Построение payload ============================
+
+def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index: int) -> Dict[str, Any]:
     company = preset["company"]
     groups = preset.get("groups", [])
-    ads = preset.get("ads", [])
-
     company_name = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
     objective = company.get("targetAction", "socialengagement")
+    package_id = package_id_for_objective(objective)
 
-    # дата старта = сегодня с учётом TRIGGER_EXTRA_HOURS
     now_local = datetime.now(LOCAL_TZ) + timedelta(hours=TRIGGER_EXTRA_HOURS)
     start_date_str = now_local.date().isoformat()
 
     ad_groups_payload = []
-    plan_budget_limit_day_sum = 0  # <--- добавили накопитель
+    plan_budget_limit_day_sum = 0
 
     for g_idx, g in enumerate(groups, start=1):
         group_name = f"{company_name} - группа {g_idx}"
@@ -300,43 +376,17 @@ def build_ad_plan_payload(
         if interests: targetings["interests"] = interests
         if age_list:  targetings["age"] = {"age_list": age_list}
 
+        # фиксируем pads для пакета 3127
+        pads_vals = PADS_FOR_PACKAGE.get(package_id)
+        if pads_vals:
+            targetings["pads"] = pads_vals
+
         budget_day = int(g.get("budget") or 0)
-        plan_budget_limit_day_sum += max(0, budget_day)   # <--- копим дневной бюджет групп
+        plan_budget_limit_day_sum += max(0, budget_day)
         utm = g.get("utm") or ""
 
-        banners_payload = []
-        for a_idx, ad in enumerate(ads, start=1):
-            banner_name = f"{company_name} - баннер {a_idx}"
-            content: Dict[str, Any] = {}
-            textblocks: Dict[str, Any] = {}
-
-            if ICON_IMAGE_ID:
-                content["icon_256x256"] = {"id": int(ICON_IMAGE_ID)}
-            video_ids = ad.get("videoIds") or []
-            if video_ids:
-                content["video_portrait_9_16_30s"] = {"id": int(video_ids[0])}
-
-            short = ad.get("shortDescription") or ""
-            title = ad.get("title") or ""
-
-            if ABOUT_COMPANY_TEXT:
-                textblocks["about_company_115"] = {"text": ABOUT_COMPANY_TEXT, "title": ""}
-            textblocks["cta_community_vk"] = {"text": "visitSite", "title": ""}
-            textblocks["text_2000"] = {"text": short, "title": ""}
-            textblocks["title_40_vkads"] = {"text": title, "title": ""}
-
-            banners_payload.append({
-                "name": banner_name,
-                "urls": {"primary": {"id": ad_object_id}},
-                "content": content,
-                "textblocks": textblocks,
-            })
-
-        if not banners_payload:
-            banners_payload.append({
-                "name": f"{company_name} - баннер 1",
-                "urls": {"primary": {"id": ad_object_id}},
-            })
+        # баннеры — заглушка, реальный вариант подставим позже
+        banners_payload = [{"name": f"{company_name} - баннер 1", "urls": {"primary": {"id": ad_object_id}}}]
 
         ad_groups_payload.append({
             "name": group_name,
@@ -347,13 +397,10 @@ def build_ad_plan_payload(
             "date_start": start_date_str,
             "date_end": None,
             "age_restrictions": "18+",
-            "package_id": package_id_for_objective(objective),
+            "package_id": package_id,
             "utm": utm,
             "banners": banners_payload,
         })
-
-    # если суммы нет (все 0/пусто) — оставим None, но для max_goals нужна >0
-    plan_budget_limit_day = plan_budget_limit_day_sum or None
 
     payload = {
         "name": f"{company_name}",
@@ -361,7 +408,7 @@ def build_ad_plan_payload(
         "date_start": start_date_str,
         "date_end": None,
         "autobidding_mode": "max_goals",
-        "budget_limit_day": plan_budget_limit_day,   # <--- вот тут главное изменение
+        "budget_limit_day": plan_budget_limit_day_sum or None,  # важно для max_goals
         "budget_limit": None,
         "max_price": 0,
         "objective": objective,
@@ -371,24 +418,62 @@ def build_ad_plan_payload(
     }
     return payload
 
+# ============================ Создание плана (адаптивно) ============================
+
 def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int) -> List[Dict[str, Any]]:
     company = preset["company"]
     url = company.get("url")
     if not url:
         raise RuntimeError("В пресете нет company.url")
 
+    company_name = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
     ad_object_id = resolve_url_id(url, tokens)
+
+    ads = preset.get("ads", [])
+    ad_for_variants = ads[0] if ads else {}
+    banner_variants = make_banner_variants(company_name, ad_object_id, ad_for_variants)
+
     results = []
     for i in range(1, repeats + 1):
-        payload = build_ad_plan_payload(preset, ad_object_id, i)
-        endpoint = f"{API_BASE}/api/v2/ad_plans.json"
-        resp = with_retries("POST", endpoint, tokens, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-        results.append({"request": payload, "response": resp})
-        log.info("Ad plan created (%d/%d) for url_id=%s", i, repeats, ad_object_id)
+        base_payload = build_ad_plan_payload(preset, ad_object_id, i)
+
+        last_err = None
+        for variant_idx, banner in enumerate(banner_variants, start=1):
+            payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
+            for g in payload_try.get("ad_groups", []):
+                g["banners"] = [banner]
+
+            endpoint = f"{API_BASE}/api/v2/ad_plans.json"
+            try:
+                resp = with_retries("POST", endpoint, tokens, data=json.dumps(payload_try, ensure_ascii=False).encode("utf-8"))
+                results.append({"request": payload_try, "response": resp, "variant_used": variant_idx})
+                log.info("Ad plan created (%d/%d) using banner variant #%d", i, repeats, variant_idx)
+                break
+            except RuntimeError as e:
+                err_msg = str(e)
+                try:
+                    err_json = json.loads(err_msg.split(":", 1)[1].strip())
+                except Exception:
+                    err_json = {}
+
+                if is_patterns_validation_error(err_json):
+                    log.warning("Variant #%d rejected by patterns. Trying next...", variant_idx)
+                    last_err = e
+                    continue
+                else:
+                    raise
+
+        else:
+            if last_err:
+                raise last_err
+            raise RuntimeError("All banner variants were rejected")
+
     return results
 
+# ============================ Основной цикл ============================
+
 def process_queue_once() -> None:
-    # Подтягиваем только VK_TOKEN_* из .env (остальное — игнорируем)
+    # Подтягиваем только VK_TOKEN_* из .env
     load_tokens_from_envfile()
 
     if not GLOBAL_QUEUE_PATH.exists():
@@ -413,7 +498,7 @@ def process_queue_once() -> None:
             user_id = item["user_id"]
             cabinet_id = item["cabinet_id"]
             preset_id = item["preset_id"]
-            tokens = item.get("tokens") or []  # имена VK_TOKEN_* или сырые токены
+            tokens = item.get("tokens") or []      # имена VK_TOKEN_* или сырые токены
             trigger_time = item.get("trigger_time") or item.get("time") or ""
             count_repeats = int(item.get("count_repeats") or 1)
 
@@ -442,7 +527,6 @@ def process_queue_once() -> None:
             log.exception("Process item failed: %s", e)
 
 def main_loop() -> None:
-    # При старте один раз подхватим токены (и дальше на каждом тике тоже)
     load_tokens_from_envfile()
     now_local = datetime.now(LOCAL_TZ)
     now_utc = datetime.now(UTC_TZ)
