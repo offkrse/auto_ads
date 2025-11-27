@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.71"
+VersionCyclop = "0.72"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -390,7 +390,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     objective = company.get("targetAction", "socialengagement")
     package_id = package_id_for_objective(objective)
 
-    now_local = datetime.now(LOCAL_TZ) + timedelta(hours=TRIGGER_EXTRA_HOURS)
+    now_local = datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)
     start_date_str = now_local.date().isoformat()
 
     ad_groups_payload = []
@@ -687,7 +687,7 @@ def main_loop() -> None:
         LOCAL_TZ,
         now_local.strftime("%Y-%m-%d %H:%M:%S %Z"),
         now_utc.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        TRIGGER_EXTRA_HOURS,
+        SERVER_SHIFT_HOURS,
         MATCH_WINDOW_SECONDS
     )
     while True:
