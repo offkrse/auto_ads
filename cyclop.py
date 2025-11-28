@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.73"
+VersionCyclop = "0.74"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -471,7 +471,6 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     BASE_NUMBER = 53
 
     def _compute_day_number(now_ref: datetime) -> int:
-        # серверное время +4 часа (как в триггере), затем считаем дни
         adjusted = now_ref + timedelta(hours=SERVER_SHIFT_HOURS)
         return BASE_NUMBER + (adjusted.date() - BASE_DATE.date()).days
 
@@ -493,9 +492,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 ids.extend(found)
             else:
                 log.warning("abstractAudience '%s' not found", name)
-        # уникализация с сохранением порядка
         return list(dict.fromkeys(ids))
-    # --- конец локальных хелперов ---
+    # --- конец хелперов ---
 
     company = preset["company"]
     url = company.get("url")
@@ -505,20 +503,9 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         write_result_error(user_id, cabinet_id, human, tech)
         raise RuntimeError(tech)
 
-    advertiser_info = (company.get("advertiserInfo") or "").strip()
-    logo_id = company.get("logoId")
-
-    # Жёсткие проверки входных данных (без дефолтов):
-    if not advertiser_info:
-        human = "Отсутствует текст 'advertiserInfo' в company"
-        tech = "Missing company.advertiserInfo"
-        write_result_error(user_id, cabinet_id, human, tech)
-        raise RuntimeError(tech)
-    if not logo_id:
-        human = "Отсутствует 'logoId' в company"
-        tech = "Missing company.logoId"
-        write_result_error(user_id, cabinet_id, human, tech)
-        raise RuntimeError(tech)
+    # допустим company может содержать дефолты, но это не обязательно
+    company_adv = (company.get("advertiserInfo") or "").strip()
+    company_logo = company.get("logoId")
 
     company_name = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
 
@@ -528,7 +515,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         write_result_error(user_id, cabinet_id, "Не удалось получить ad_object_id по URL", repr(e))
         raise
 
-    # Работаем с копией пресета, чтобы расширить audienceIds из abstractAudiences
+    # Работаем с копией пресета (обогащаем audienceIds из abstractAudiences)
     preset_mut = json.loads(json.dumps(preset, ensure_ascii=False))
     groups = preset_mut.get("groups", []) or []
     ads = preset_mut.get("ads", []) or []
@@ -537,7 +524,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         write_result_error(user_id, cabinet_id, "В пресете отсутствуют группы", "groups is empty")
         raise RuntimeError("groups is empty")
 
-    # 1) Обогащение segments из abstractAudiences
+    # 1) Обогащаем segments из abstractAudiences
     day_number = _compute_day_number(datetime.now(LOCAL_TZ))
     for gi, g in enumerate(groups):
         abstract_names = g.get("abstractAudiences") or []
@@ -549,7 +536,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 g["audienceIds"] = list(dict.fromkeys(merged))
                 log.info("Group #%d segments extended by abstractAudiences: +%d id(s)", gi+1, len(add_ids))
 
-    # 2) Баннеры 1:1 с группами (каждой группе — свой баннер из ads[i])
+    # 2) Баннеры 1:1 с группами. Для каждого объявления берём advertiserInfo/logoId:
     banners_by_group: List[Dict[str, Any]] = []
     for gi in range(len(groups)):
         ad = ads[gi] if gi < len(ads) else None
@@ -558,8 +545,25 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             tech = f"ads[{gi}] is missing"
             write_result_error(user_id, cabinet_id, human, tech)
             raise RuntimeError(tech)
+
+        # приоритет: ad.* → company.*
+        adv_info = (ad.get("advertiserInfo") or company_adv or "").strip()
+        icon_id = ad.get("logoId") or company_logo
+
+        if not adv_info:
+            human = f"В объявлении #{gi+1} отсутствует 'advertiserInfo' и не задан в company"
+            tech = f"Missing ads[{gi}].advertiserInfo and company.advertiserInfo"
+            write_result_error(user_id, cabinet_id, human, tech)
+            raise RuntimeError(tech)
+
+        if not icon_id:
+            human = f"В объявлении #{gi+1} отсутствует 'logoId' и не задан в company"
+            tech = f"Missing ads[{gi}].logoId and company.logoId"
+            write_result_error(user_id, cabinet_id, human, tech)
+            raise RuntimeError(tech)
+
         try:
-            banner = make_banner_for_ad(company_name, ad_object_id, ad, gi + 1, advertiser_info, int(logo_id))
+            banner = make_banner_for_ad(company_name, ad_object_id, ad, gi + 1, adv_info, int(icon_id))
             banners_by_group.append(banner)
             log.info("Собран баннер #%d из ads[%d]", gi+1, gi)
         except Exception as e:
@@ -581,25 +585,19 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         # DEBUG: сохранить payload (если включено)
         save_debug_payload(user_id, cabinet_id, f"ad_plan_{i}", payload_try)
 
-        # DEBUG: сухой прогон — не отправляем в VK, сразу успех с пустым id_company
         if DEBUG_DRY_RUN:
             log.warning("[DRY RUN] Skipping POST /api/v2/ad_plans.json (no request sent).")
             results.append({"request": payload_try, "response": {"response": {"campaigns": []}}})
             continue
 
-        # Информативный лог перед POST
         body_bytes = json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
         log.info(
             "POST ad_plan (%d/%d): groups=%d, banners_per_group=1, payload=%.1f KB, timeout=disabled",
             i, repeats, len(ad_groups), len(body_bytes)/1024.0
         )
 
-        # Сам POST
         try:
-            resp = with_retries(
-                "POST", endpoint, tokens,
-                data=body_bytes
-            )
+            resp = with_retries("POST", endpoint, tokens, data=body_bytes)
             results.append({"request": payload_try, "response": resp})
             log.info("POST OK (%d/%d).", i, repeats)
             try:
@@ -610,7 +608,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             write_result_error(user_id, cabinet_id, "Ошибка создания кампании в VK Ads", repr(e))
             raise
 
-    # Успех: извлекаем id кампаний
+    # Успех: вытаскиваем id кампаний
     try:
         last = results[-1]["response"] if results else {}
         campaigns = (last.get("response") or {}).get("campaigns") or []
