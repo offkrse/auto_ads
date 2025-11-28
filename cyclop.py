@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.74"
+VersionCyclop = "0.75"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -350,34 +350,36 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
 def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
                        idx: int, advertiser_info: str, icon_id: Optional[int]) -> Dict[str, Any]:
     """
-    Строго 2 креатива: icon_256x256 (из company.logoId) + video_portrait_9_16_30s (из ads[i].videoIds[0])
-    Тексты:
-      - about_company_115: из company.advertiserInfo
-      - cta_community_vk: visitSite
-      - text_2000: ad.shortDescription
-      - title_40_vkads: ad.title
+    Строго 2 креатива:
+      - icon_256x256.id ← icon_id (из ad.logoId или company.logoId)
+      - video_portrait_9_16_30s.id ← ТОЛЬКО из ad.videoIds[0]
     """
     title = (ad.get("title") or "").strip()
     short = (ad.get("shortDescription") or "").strip()
-    vids = ad.get("videoIds") or []
-    video_id = vids[0] if vids else None
+
+    # Жёстко: video только из ad.videoIds[0]
+    vids = ad.get("videoIds")
+    if not isinstance(vids, list) or not vids:
+        raise ValueError(f"У объявления ads[{idx-1}] отсутствует videoIds[0].")
+    try:
+        video_id = int(vids[0])
+    except Exception:
+        raise ValueError(f"У объявления ads[{idx-1}] videoIds[0] не число: {vids[0]!r}")
 
     if not advertiser_info:
-        raise ValueError("Отсутствует advertiserInfo в company (для about_company_115).")
+        raise ValueError("Отсутствует advertiserInfo (about_company_115).")
     if not icon_id:
-        raise ValueError("Отсутствует logoId в company (для icon_256x256.id).")
-    if not video_id:
-        raise ValueError(f"У объявления ads[{idx-1}] отсутствует videoIds[0].")
-    log.info(
-        "Banner #%d media: icon_id=%s, video_id=%s, title='%s'",
-        idx, int(icon_id), int(video_id), title
-    )
+        raise ValueError("Отсутствует logoId (icon_256x256.id).")
+
+    log.info("Banner #%d media from ads[%d]: icon_id=%s, video_id=%s, title='%s'",
+             idx, idx-1, int(icon_id), video_id, title)
+
     return {
         "name": f"Объявление {idx}",
         "urls": {"primary": {"id": ad_object_id}},
         "content": {
             "icon_256x256": {"id": int(icon_id)},
-            "video_portrait_9_16_30s": {"id": int(video_id)},
+            "video_portrait_9_16_30s": {"id": video_id},
         },
         "textblocks": {
             "about_company_115": {"text": advertiser_info, "title": ""},
