@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.75"
+VersionCyclop = "0.8"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -172,26 +172,75 @@ def dump_json(path: Path, payload: Any) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
-def write_result_success(user_id: str, cabinet_id: str, campaign_ids: List[int]) -> None:
+def append_result_entry(user_id: str, cabinet_id: str, entry: Dict[str, Any]) -> None:
+    """
+    Добавляет запись в /opt/auto_ads/users/<user_id>/created_company/<cabinet_id>/created.json.
+    Если файла нет — создаёт список с одной записью.
+    """
     out_path = USERS_ROOT / str(user_id) / "created_company" / str(cabinet_id) / "created.json"
-    payload = [{
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists():
+        try:
+            data = load_json(out_path)
+            if not isinstance(data, list):
+                data = []
+        except Exception:
+            data = []
+    else:
+        data = []
+
+    data.append(entry)
+    dump_json(out_path, data)
+
+
+def write_result_success(user_id: str, cabinet_id: str, preset_id: str, preset_name: str,
+                         trigger_time: str, id_company: List[int]) -> None:
+    entry = {
         "cabinet_id": str(cabinet_id),
+        "date_time": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "preset_id": str(preset_id),
+        "preset_name": str(preset_name or ""),
+        "trigger_time": str(trigger_time or ""),
         "status": "success",
         "text_error": "null",
         "code_error": "null",
-        "id_company": campaign_ids,
-    }]
-    dump_json(out_path, payload)
+        "id_company": id_company or [],
+    }
+    append_result_entry(user_id, cabinet_id, entry)
 
-def write_result_error(user_id: str, cabinet_id: str, human: str, tech: str) -> None:
-    out_path = USERS_ROOT / str(user_id) / "created_company" / str(cabinet_id) / "created.json"
-    payload = [{
+
+def write_result_error(user_id: str, cabinet_id: str, preset_id: str, preset_name: str,
+                       trigger_time: str, human: str, tech: str) -> None:
+    entry = {
         "cabinet_id": str(cabinet_id),
+        "date_time": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "preset_id": str(preset_id),
+        "preset_name": str(preset_name or ""),
+        "trigger_time": str(trigger_time or ""),
         "status": "error",
         "text_error": human,
         "code_error": tech,
-    }]
-    dump_json(out_path, payload)
+        "id_company": [],
+    }
+    append_result_entry(user_id, cabinet_id, entry)
+
+def extract_campaign_ids_from_resp(resp: Dict[str, Any]) -> List[int]:
+    #Возвращаем список int без дублей (порядок сохраняем).
+    ids: List[int] = []
+
+    if isinstance(resp, dict):
+        r = resp.get("response")
+        if isinstance(r, dict):
+            camps = r.get("campaigns")
+            if isinstance(camps, list):
+                ids.extend(int(x["id"]) for x in camps if isinstance(x, dict) and "id" in x)
+
+        camps_flat = resp.get("campaigns")
+        if isinstance(camps_flat, list):
+            ids.extend(int(x["id"]) for x in camps_flat if isinstance(x, dict) and "id" in x)
+
+    # уникализация
+    return list(dict.fromkeys(ids))
 
 def parse_hhmm(s: str) -> Tuple[int, int]:
     m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", s or "")
@@ -465,114 +514,99 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
 # ============================ Создание плана ============================
 
 def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
-                   user_id: str, cabinet_id: str) -> List[Dict[str, Any]]:
+                   user_id: str, cabinet_id: str,
+                   preset_id: str, preset_name: str, trigger_time: str) -> List[Dict[str, Any]]:
     """
-    При ошибке пишет файл error с понятным текстом и техническим кодом.
-    При успехе — пишет success с массивом id_company из response.campaigns[].id
-    Возвращает список «сырого» ответа VK Ads (для внутренней отладки).
+    При ошибке пишет файл error с понятным текстом и техническим кодом (append в created.json).
+    При успехе — пишет success с массивом id_company из всех ответов.
+    Возвращает список «сырого» ответа VK (для внутренней отладки).
     """
-    # --- локальные хелперы для abstractAudiences ---
-    BASE_DATE = datetime(2025, 7, 14)
-    BASE_NUMBER = 53
-
-    def _compute_day_number(now_ref: datetime) -> int:
-        adjusted = now_ref + timedelta(hours=SERVER_SHIFT_HOURS)
-        return BASE_NUMBER + (adjusted.date() - BASE_DATE.date()).days
-
-    def _resolve_abstract_audiences(_tokens: List[str], names: List[str], day_number: int) -> List[int]:
-        ids: List[int] = []
-        for raw in names or []:
-            name = str(raw).replace("{день}", str(day_number))
-            from urllib.parse import quote
-            endpoint = f"{API_BASE}/api/v2/remarketing/segments.json?_name={quote(name, safe='')}"
-            try:
-                resp = with_retries("GET", endpoint, _tokens)
-            except Exception as e:
-                log.warning("abstractAudience '%s' lookup failed: %s", name, e)
-                continue
-            items = (resp or {}).get("items") or []
-            found = [int(it["id"]) for it in items if isinstance(it, dict) and "id" in it]
-            if found:
-                log.info("abstractAudience '%s' -> segment_ids=%s", name, found)
-                ids.extend(found)
-            else:
-                log.warning("abstractAudience '%s' not found", name)
-        return list(dict.fromkeys(ids))
-    # --- конец хелперов ---
-
     company = preset["company"]
     url = company.get("url")
     if not url:
-        human = "Отсутствует URL компании (company.url)"
-        tech = "Missing company.url"
-        write_result_error(user_id, cabinet_id, human, tech)
-        raise RuntimeError(tech)
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "Отсутствует URL компании (company.url)", "Missing company.url")
+        raise RuntimeError("Missing company.url")
 
-    # допустим company может содержать дефолты, но это не обязательно
+    # company может содержать дефолты
     company_adv = (company.get("advertiserInfo") or "").strip()
     company_logo = company.get("logoId")
 
     company_name = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
 
+    # Разрешаем URL -> id
     try:
         ad_object_id = resolve_url_id(url, tokens)
     except Exception as e:
-        write_result_error(user_id, cabinet_id, "Не удалось получить ad_object_id по URL", repr(e))
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "Не удалось получить ad_object_id по URL", repr(e))
         raise
 
-    # Работаем с копией пресета (обогащаем audienceIds из abstractAudiences)
+    # Копия пресета — будем расширять audienceIds из abstractAudiences
     preset_mut = json.loads(json.dumps(preset, ensure_ascii=False))
     groups = preset_mut.get("groups", []) or []
     ads = preset_mut.get("ads", []) or []
 
     if not groups:
-        write_result_error(user_id, cabinet_id, "В пресете отсутствуют группы", "groups is empty")
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "В пресете отсутствуют группы", "groups is empty")
         raise RuntimeError("groups is empty")
 
     # 1) Обогащаем segments из abstractAudiences
-    day_number = _compute_day_number(datetime.now(LOCAL_TZ))
+    day_number = compute_day_number(datetime.now(LOCAL_TZ))
     for gi, g in enumerate(groups):
         abstract_names = g.get("abstractAudiences") or []
         if abstract_names:
-            add_ids = _resolve_abstract_audiences(tokens, abstract_names, day_number)
+            try:
+                add_ids = resolve_abstract_audiences(tokens, abstract_names, day_number)
+            except Exception as e:
+                # не критично — просто лог и без добавления
+                log.warning("resolve_abstract_audiences failed for group %d: %s", gi+1, e)
+                add_ids = []
             if add_ids:
                 base_ids = g.get("audienceIds") or []
                 merged = as_int_list(base_ids) + add_ids
                 g["audienceIds"] = list(dict.fromkeys(merged))
                 log.info("Group #%d segments extended by abstractAudiences: +%d id(s)", gi+1, len(add_ids))
 
-    # 2) Баннеры 1:1 с группами. Для каждого объявления берём advertiserInfo/logoId:
+    # 2) Диагностика объявлений
+    for i, ad in enumerate(ads):
+        log.info("ads[%d] summary: title=%r, videoIds=%r, logoId=%r, advertiserInfo=%r",
+                 i, ad.get("title"), ad.get("videoIds"),
+                 ad.get("logoId") or company.get("logoId"),
+                 ad.get("advertiserInfo") or company.get("advertiserInfo"))
+
+    # 3) Баннеры 1:1 с группами (каждой группе — свой баннер из ads[i])
     banners_by_group: List[Dict[str, Any]] = []
     for gi in range(len(groups)):
         ad = ads[gi] if gi < len(ads) else None
         if not ad:
-            human = f"Для группы #{gi+1} отсутствует объявление в 'ads'"
-            tech = f"ads[{gi}] is missing"
-            write_result_error(user_id, cabinet_id, human, tech)
-            raise RuntimeError(tech)
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               f"Для группы #{gi+1} отсутствует объявление в 'ads'",
+                               f"ads[{gi}] is missing")
+            raise RuntimeError(f"ads[{gi}] is missing")
 
         # приоритет: ad.* → company.*
         adv_info = (ad.get("advertiserInfo") or company_adv or "").strip()
         icon_id = ad.get("logoId") or company_logo
-
         if not adv_info:
-            human = f"В объявлении #{gi+1} отсутствует 'advertiserInfo' и не задан в company"
-            tech = f"Missing ads[{gi}].advertiserInfo and company.advertiserInfo"
-            write_result_error(user_id, cabinet_id, human, tech)
-            raise RuntimeError(tech)
-
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               f"В объявлении #{gi+1} отсутствует 'advertiserInfo' и не задан в company",
+                               f"Missing ads[{gi}].advertiserInfo and company.advertiserInfo")
+            raise RuntimeError("missing advertiserInfo")
         if not icon_id:
-            human = f"В объявлении #{gi+1} отсутствует 'logoId' и не задан в company"
-            tech = f"Missing ads[{gi}].logoId and company.logoId"
-            write_result_error(user_id, cabinet_id, human, tech)
-            raise RuntimeError(tech)
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               f"В объявлении #{gi+1} отсутствует 'logoId' и не задан в company",
+                               f"Missing ads[{gi}].logoId and company.logoId")
+            raise RuntimeError("missing logoId")
 
         try:
             banner = make_banner_for_ad(company_name, ad_object_id, ad, gi + 1, adv_info, int(icon_id))
             banners_by_group.append(banner)
             log.info("Собран баннер #%d из ads[%d]", gi+1, gi)
         except Exception as e:
-            write_result_error(user_id, cabinet_id, "Ошибка сборки баннера", repr(e))
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "Ошибка сборки баннера", repr(e))
             raise
 
     results = []
@@ -586,6 +620,13 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         ad_groups = payload_try.get("ad_groups", [])
         for gi, g in enumerate(ad_groups):
             g["banners"] = [banners_by_group[gi]]
+
+        # sanity-лог
+        for gi, g in enumerate(ad_groups, start=1):
+            c = (g.get("banners") or [{}])[0].get("content") or {}
+            vid = ((c.get("video_portrait_9_16_30s") or {}).get("id"))
+            ico = ((c.get("icon_256x256") or {}).get("id"))
+            log.info("Group %d will send icon_id=%s, video_id=%s", gi, ico, vid)
 
         # DEBUG: сохранить payload (если включено)
         save_debug_payload(user_id, cabinet_id, f"ad_plan_{i}", payload_try)
@@ -610,19 +651,25 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             except Exception:
                 log.debug("VK response (raw): %s", str(resp)[:800])
         except Exception as e:
-            write_result_error(user_id, cabinet_id, "Ошибка создания кампании в VK Ads", repr(e))
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "Ошибка создания кампании в VK Ads", repr(e))
             raise
 
-    # Успех: вытаскиваем id кампаний
+    # Собираем id кампаний со всех успешных ответов
     try:
-        last = results[-1]["response"] if results else {}
-        campaigns = (last.get("response") or {}).get("campaigns") or []
-        campaign_ids = [int(x.get("id")) for x in campaigns if isinstance(x, dict) and "id" in x]
+        all_ids: List[int] = []
+        for r in results:
+            resp = r.get("response") or {}
+            ids = extract_campaign_ids_from_resp(resp)
+            if ids:
+                all_ids.extend(ids)
+        id_company = list(dict.fromkeys(all_ids))
     except Exception as e:
-        write_result_error(user_id, cabinet_id, "Не удалось распарсить ответ VK Ads", repr(e))
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "Не удалось распарсить ответ VK Ads", repr(e))
         raise
 
-    write_result_success(user_id, cabinet_id, campaign_ids)
+    write_result_success(user_id, cabinet_id, preset_id, preset_name, trigger_time, id_company)
     return results
 
 
@@ -653,30 +700,36 @@ def process_queue_once() -> None:
         try:
             user_id = str(item["user_id"])
             cabinet_id = str(item["cabinet_id"])
-            preset_id = item["preset_id"]
+            preset_id = str(item["preset_id"])
             tokens = item.get("tokens") or []      # имена VK_TOKEN_* или сырые токены
             trigger_time = item.get("trigger_time") or item.get("time") or ""
             count_repeats = int(item.get("count_repeats") or 1)
-
+            
             match, info = check_trigger(trigger_time, now_local)
             if not match:
-                log.info("[WAIT] %s/%s preset=%s | trigger=%s | target=%s | now(+%sh)=%s | delta=%ss (window=%ss)",
-                     user_id, cabinet_id, preset_id,
-                     info.get("TRIGGER"), info.get("TARGET_LOCAL"),
-                     SERVER_SHIFT_HOURS, info.get("ADJUSTED_NOW"), info.get("DELTA_SEC"), info.get("WINDOW_SEC"))
+                log.info("[WAIT] %s/%s preset=%s | trigger=%s | target(shifted)=%s | now(+%sh)=%s | delta=%ss (window=%ss)",
+                         user_id, cabinet_id, preset_id,
+                         info.get("TRIGGER"), info.get("TARGET_SHIFTED"),
+                         SERVER_SHIFT_HOURS, info.get("ADJUSTED_NOW"),
+                         info.get("DELTA_SEC"), info.get("WINDOW_SEC"))
                 continue
-
+            
             preset_path = USERS_ROOT / user_id / "presets" / str(cabinet_id) / f"{preset_id}.json"
             if not preset_path.exists():
                 log.error("Preset not found: %s", preset_path)
-                write_result_error(user_id, cabinet_id, "Не найден пресет", f"missing preset file: {preset_path}")
+                write_result_error(user_id, cabinet_id, preset_id, "", trigger_time,
+                                   "Не найден пресет", f"missing preset file: {preset_path}")
                 continue
-
+            
             preset = load_json(preset_path)
+            preset_name = str((preset.get("company") or {}).get("presetName") or "")
             log.info("Processing %s/%s preset=%s repeats=%s", user_id, cabinet_id, preset_id, count_repeats)
-
+            
             try:
-                _ = create_ad_plan(preset, tokens, count_repeats, user_id, cabinet_id)
+                _ = create_ad_plan(
+                    preset, tokens, count_repeats, user_id, cabinet_id,
+                    preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time
+                )
             except Exception:
                 # ошибка уже записана write_result_error внутри create_ad_plan
                 continue
