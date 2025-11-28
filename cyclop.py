@@ -368,7 +368,10 @@ def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
         raise ValueError("Отсутствует logoId в company (для icon_256x256.id).")
     if not video_id:
         raise ValueError(f"У объявления ads[{idx-1}] отсутствует videoIds[0].")
-
+    log.info(
+        "Banner #%d media: icon_id=%s, video_id=%s, title='%s'",
+        idx, int(icon_id), int(video_id), title
+    )
     return {
         "name": f"Объявление {idx}",
         "urls": {"primary": {"id": ad_object_id}},
