@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.8"
+VersionCyclop = "0.9"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -402,11 +402,14 @@ def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
     Строго 2 креатива:
       - icon_256x256.id ← icon_id (из ad.logoId или company.logoId)
       - video_portrait_9_16_30s.id ← ТОЛЬКО из ad.videoIds[0]
+    Имя объявления ← ad.adName (фолбек: 'Объявление {idx}')
+    CTA ← ad.button (фолбек: 'visitSite')
     """
     title = (ad.get("title") or "").strip()
     short = (ad.get("shortDescription") or "").strip()
+    ad_name = (ad.get("adName") or f"Объявление {idx}").strip()
+    cta_text = (ad.get("button") or "visitSite").strip()
 
-    # Жёстко: video только из ad.videoIds[0]
     vids = ad.get("videoIds")
     if not isinstance(vids, list) or not vids:
         raise ValueError(f"У объявления ads[{idx-1}] отсутствует videoIds[0].")
@@ -420,11 +423,11 @@ def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
     if not icon_id:
         raise ValueError("Отсутствует logoId (icon_256x256.id).")
 
-    log.info("Banner #%d media from ads[%d]: icon_id=%s, video_id=%s, title='%s'",
-             idx, idx-1, int(icon_id), video_id, title)
+    log.info("Banner #%d media from ads[%d]: icon_id=%s, video_id=%s, adName='%s', title='%s', cta='%s'",
+             idx, idx-1, int(icon_id), video_id, ad_name, title, cta_text)
 
     return {
-        "name": f"Объявление {idx}",
+        "name": ad_name,
         "urls": {"primary": {"id": ad_object_id}},
         "content": {
             "icon_256x256": {"id": int(icon_id)},
@@ -432,7 +435,7 @@ def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
         },
         "textblocks": {
             "about_company_115": {"text": advertiser_info, "title": ""},
-            "cta_community_vk": {"text": "visitSite", "title": ""},
+            "cta_community_vk": {"text": cta_text, "title": ""},  # ← кнопка из preset.ads[*].button
             "text_2000": {"text": short, "title": ""},
             "title_40_vkads": {"text": title, "title": ""},
         }
@@ -453,11 +456,17 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     ad_groups_payload = []
 
     for g_idx, g in enumerate(groups, start=1):
-        group_name = f"Группа {g_idx}"
+        # ← имя группы из groupName (фолбек: "Группа {n}")
+        group_name = (g.get("groupName") or f"Группа {g_idx}").strip()
+
+        # регионы теперь приходят списком чисел/отрицательных — as_int_list поддерживает и list, и csv
         regions = as_int_list(g.get("regions"))
         genders = split_gender(g.get("gender", ""))
         segments = as_int_list(g.get("audienceIds"))
-        # interests — УДАЛЕНЫ
+
+        # интересы (list[int] с возможными отрицательными)
+        interests_list = as_int_list(g.get("interests"))
+
         age_list = build_age_list(g.get("age", ""))
 
         targetings: Dict[str, Any] = {"geo": {"regions": regions}}
@@ -465,6 +474,8 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             targetings["sex"] = genders
         if segments:
             targetings["segments"] = segments
+        if interests_list:
+            targetings["interests"] = interests_list  # ← вернули interests
         if age_list:
             targetings["age"] = {"age_list": age_list}
 
@@ -475,14 +486,13 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         budget_day = int(g.get("budget") or 0)
         utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
-        # баннер заполним позже (в create_ad_plan)
+        # заглушка баннера — реальный подставим в create_ad_plan()
         banners_payload = [{"name": f"Объявление {g_idx}", "urls": {"primary": {"id": ad_object_id}}}]
 
         ad_groups_payload.append({
             "name": group_name,
             "targetings": targetings,
             "max_price": 0,
-            # ГРУППА: как просили
             "autobidding_mode": "max_goals",
             "budget_limit": None,
             "budget_limit_day": budget_day,
@@ -494,7 +504,6 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             "banners": banners_payload,
         })
 
-    # КОМПАНИЯ: три поля — строго null
     payload = {
         "name": f"{company_name}",
         "status": "active",
