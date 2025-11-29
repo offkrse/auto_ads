@@ -313,7 +313,7 @@ def audiences_path(user_id: str, cabinet_id: str) -> Path:
 # -------------------------------------
 #   HISTORY
 # -------------------------------------
-
+@app.get("/api/history/get")
 @app.get("/auto_ads/api/history/get")
 def history_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
   items = read_history_file(user_id, cabinet_id)
