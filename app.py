@@ -50,7 +50,7 @@ load_dotenv("/opt/auto_ads/.env")
 #   HELPERS
 # -------------------------------------
 def read_history_file(user_id: str, cabinet_id: str):
-  p = BASE_DIR / user_id / "created_company" / cabinet_id / "created.json"
+  p = USERS_DIR / user_id / "created_company" / cabinet_id / "created.json"
   if not p.exists():
     return []
   try:
