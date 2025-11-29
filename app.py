@@ -17,7 +17,7 @@ import errno
 
 app = FastAPI()
 
-VersionApp = "0.2 unstable"
+VersionApp = "0.3"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -94,6 +94,37 @@ def atomic_write_json(dst: Path, obj: dict | list):
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, dst)  # атомарная замена
+
+def remove_from_global_queue(user_id: str, cabinet_id: str, preset_id: str):
+    """
+    Удаляет запись(и) по ключу (user_id, cabinet_id, preset_id) из /opt/auto_ads/data/global_queue.json
+    с файловой блокировкой и атомарной записью.
+    """
+    GLOBAL_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = GLOBAL_QUEUE_FILE.with_suffix(".lock")
+    with file_lock(lock_path):
+        # читаем текущее содержимое
+        if GLOBAL_QUEUE_FILE.exists():
+            try:
+                with open(GLOBAL_QUEUE_FILE, "r", encoding="utf-8") as fh:
+                    data = json.load(fh) or []
+            except Exception as e:
+                log_error(f"remove_from_global_queue: broken json, reset. err={repr(e)}")
+                data = []
+        else:
+            data = []
+        # фильтруем
+        uid, cid, pid = str(user_id), str(cabinet_id), str(preset_id)
+        data = [
+            it for it in (data if isinstance(data, list) else [])
+            if not (
+                str(it.get("user_id","")) == uid and
+                str(it.get("cabinet_id","")) == cid and
+                str(it.get("preset_id","")) == pid
+            )
+        ]
+        # атомарно пишем
+        atomic_write_json(GLOBAL_QUEUE_FILE, data)
 
 def upsert_global_queue(item: dict):
     """
@@ -370,9 +401,12 @@ def delete_preset(
     f = preset_path(user_id, cabinet_id, preset_id)
     if f.exists():
         f.unlink()
-        return {"status": "deleted"}
-    # если файла нет — отвечаем 200, чтобы фронт не падал
-    return {"status": "not_found_but_ok"}
+    try:
+        remove_from_global_queue(user_id, cabinet_id, preset_id)
+    except Exception as e:
+        log_error(f"delete_preset: remove_from_global_queue failed: {repr(e)}")
+    return {"status": "deleted"}
+
 
 
 # -------------------------------------
@@ -546,6 +580,31 @@ def get_logo(user_id: str, cabinet_id: str):
     except Exception as e:
         log_error(f"logo/get[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+# -------------------------------------
+#   Interests and regions
+# -------------------------------------
+
+@app.get("/api/interests")
+def get_interests():
+    path = DATA_DIR / "interests.json"
+    if not path.exists():
+        return {"interests": []}
+    with open(path, "r", encoding="utf-8") as fh:
+        j = json.load(fh)
+    # формат файла такой, как у тебя; отдаём как есть (ключ "interests")
+    return j
+
+@app.get("/api/regions")
+def get_regions():
+    path = DATA_DIR / "regions.json"
+    if not path.exists():
+        return {"count": 0, "items": []}
+    with open(path, "r", encoding="utf-8") as fh:
+        j = json.load(fh)
+    return j
+
+
 # -------------------------------------
 #   AUDIENCES
 # -------------------------------------
