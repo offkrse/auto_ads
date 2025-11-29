@@ -36,6 +36,9 @@ GLOBAL_QUEUE_FILE = DATA_DIR / "global_queue.json"
 STORAGE_DIR = Path("/mnt/data/auto_ads_storage/video")
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
+INTERESTS_FILE = DATA_DIR / "interests.json"
+REGIONS_FILE   = DATA_DIR / "regions.json"
+
 FRONTEND_DIR = BASE_DIR / "frontend"
 
 # === env ===
@@ -587,22 +590,33 @@ def get_logo(user_id: str, cabinet_id: str):
 
 @app.get("/api/interests")
 def get_interests():
-    path = DATA_DIR / "interests.json"
-    if not path.exists():
-        return {"interests": []}
-    with open(path, "r", encoding="utf-8") as fh:
-        j = json.load(fh)
-    # формат файла такой, как у тебя; отдаём как есть (ключ "interests")
-    return j
+    try:
+        if not INTERESTS_FILE.exists():
+            return {"interests": []}
+        with open(INTERESTS_FILE, "r", encoding="utf-8") as fh:
+            j = json.load(fh)
+        # допускаем оба формата: {"interests":[...]} или просто [...]
+        if isinstance(j, dict) and "interests" in j:
+            return {"interests": j["interests"]}
+        return {"interests": j}
+    except Exception as e:
+        log_error(f"/api/interests error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 @app.get("/api/regions")
 def get_regions():
-    path = DATA_DIR / "regions.json"
-    if not path.exists():
-        return {"count": 0, "items": []}
-    with open(path, "r", encoding="utf-8") as fh:
-        j = json.load(fh)
-    return j
+    try:
+        if not REGIONS_FILE.exists():
+            return {"items": []}
+        with open(REGIONS_FILE, "r", encoding="utf-8") as fh:
+            j = json.load(fh)
+        # допускаем оба формата: {"items":[...]} или просто [...]
+        if isinstance(j, dict) and "items" in j:
+            return {"items": j["items"]}
+        return {"items": j}
+    except Exception as e:
+        log_error(f"/api/regions error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 
 # -------------------------------------
