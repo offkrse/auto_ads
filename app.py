@@ -17,7 +17,7 @@ import errno
 
 app = FastAPI()
 
-VersionApp = "0.3"
+VersionApp = "0.4"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,6 +49,24 @@ load_dotenv("/opt/auto_ads/.env")
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
+def read_history_file(user_id: str, cabinet_id: str):
+  p = BASE_DIR / user_id / "created_company" / cabinet_id / "created.json"
+  if not p.exists():
+    return []
+  try:
+    raw = p.read_text(encoding="utf-8").strip()
+    if not raw:
+      return []
+    data = json.loads(raw)
+    if isinstance(data, dict) and "items" in data and isinstance(data["items"], list):
+      return data["items"]
+    if isinstance(data, list):
+      return data
+    return []
+  except Exception as e:
+    # можно логировать e
+    return []
+
 def logo_storage(cabinet_id: str) -> Path:
     p = LOGO_STORAGE_DIR / str(cabinet_id)
     p.mkdir(parents=True, exist_ok=True)
@@ -292,6 +310,15 @@ def creatives_path(user_id: str, cabinet_id: str) -> Path:
 def audiences_path(user_id: str, cabinet_id: str) -> Path:
     return USERS_DIR / user_id / "audiences" / cabinet_id / "audiences.json"
 
+# -------------------------------------
+#   HISTORY
+# -------------------------------------
+
+@app.get("/auto_ads/api/history/get")
+def history_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
+  items = read_history_file(user_id, cabinet_id)
+  return JSONResponse({"items": items})
+    
 # -------------------------------------
 #   PRESETS (each in separate file)
 # -------------------------------------
