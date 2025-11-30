@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.91"
+VersionCyclop = "0.95 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -93,6 +93,72 @@ def package_id_for_objective(obj: str) -> int:
 PADS_FOR_PACKAGE: Dict[int, List[int]] = {
     3127: [102641, 1254386, 111756, 1265106, 1010345, 2243453],
 }
+
+# ======= ШАБЛОНЫ ДЛЯ НАЗВАНИЙ =======
+
+TARGET_CODES = {
+    "socialengagement": ("СБ", "СообщениеБот"),
+    "site_conversions": ("ПС", "ПереходСайт"),
+    "leadads": ("ЛФ", "ЛидФорма"),
+}
+
+def _target_code(objective: str, long: bool = False) -> str:
+    short, longv = TARGET_CODES.get(str(objective or "").strip(), ("", ""))
+    return longv if long else short
+
+def _gender_code(gender: str) -> str:
+    g = (gender or "").replace(" ", "").lower()
+    if g in ("male,female", "female,male"):
+        return "МЖ"
+    if g == "male":
+        return "М"
+    if g == "female":
+        return "Ж"
+    return ""
+
+def render_name_tokens(
+    template: str,
+    *,
+    today_date,          # date
+    objective: str = "",
+    age: str = "",
+    gender: str = "",
+    n: Optional[int] = None,      # {%N%}   — счётчик в пределах ГРУППЫ
+    n_g: Optional[int] = None,    # {%N-G%} — счётчик в пределах КОМПАНИИ
+) -> str:
+    """
+    Поддерживает плейсхолдеры:
+      {%DAY%}       -> DD.MM (например, 30.11)
+      {%N%}         -> локальная нумерация в группе
+      {%N-G%}       -> глобальная нумерация в компании
+      {%TARGET%}    -> СБ/ПС/ЛФ
+      {%TARGET-L%}  -> СообщениеБот/ПереходСайт/ЛидФорма
+      {%AGE%}       -> исходная строка age (например, "21-55")
+      {%GENDER%}    -> МЖ/М/Ж
+    """
+    if not template:
+        return ""
+
+    s = str(template)
+
+    # день
+    s = s.replace("{%DAY%}", today_date.strftime("%d.%m"))
+
+    # таргет
+    s = s.replace("{%TARGET-L%}", _target_code(objective, long=True))
+    s = s.replace("{%TARGET%}", _target_code(objective, long=False))
+
+    # возраст/пол
+    s = s.replace("{%AGE%}", str(age or ""))
+    s = s.replace("{%GENDER%}", _gender_code(gender))
+
+    # счётчики
+    if "{%N%}" in s:
+        s = s.replace("{%N%}", str(n if n is not None else 1))
+    if "{%N-G%}" in s:
+        s = s.replace("{%N-G%}", str(n_g if n_g is not None else 1))
+
+    return s.strip()
 
 # ============================ Утилиты ============================
 def compute_day_number(now_ref: datetime) -> int:
@@ -397,18 +463,16 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
 # ============================ Баннер (строго 2 креатива) ============================
 
 def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
-                       idx: int, advertiser_info: str, icon_id: Optional[int]) -> Dict[str, Any]:
+                       idx: int, advertiser_info: str, icon_id: Optional[int],
+                       banner_name: str, cta_text: str) -> Dict[str, Any]:
     """
-    Строго 2 креатива:
-      - icon_256x256.id ← icon_id (из ad.logoId или company.logoId)
+    Медиа:
+      - icon_256x256.id  ← icon_id
       - video_portrait_9_16_30s.id ← ТОЛЬКО из ad.videoIds[0]
-    Имя объявления ← ad.adName (фолбек: 'Объявление {idx}')
-    CTA ← ad.button (фолбек: 'visitSite')
+    Имя объявления и кнопка приходят параметрами (уже отрендерены).
     """
     title = (ad.get("title") or "").strip()
     short = (ad.get("shortDescription") or "").strip()
-    ad_name = (ad.get("adName") or f"Объявление {idx}").strip()
-    cta_text = (ad.get("button") or "visitSite").strip()
 
     vids = ad.get("videoIds")
     if not isinstance(vids, list) or not vids:
@@ -423,11 +487,11 @@ def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
     if not icon_id:
         raise ValueError("Отсутствует logoId (icon_256x256.id).")
 
-    log.info("Banner #%d media from ads[%d]: icon_id=%s, video_id=%s, adName='%s', title='%s', cta='%s'",
-             idx, idx-1, int(icon_id), video_id, ad_name, title, cta_text)
+    log.info("Banner #%d: icon_id=%s, video_id=%s, name='%s', cta='%s'",
+             idx, int(icon_id), video_id, banner_name, cta_text)
 
     return {
-        "name": ad_name,
+        "name": banner_name,
         "urls": {"primary": {"id": ad_object_id}},
         "content": {
             "icon_256x256": {"id": int(icon_id)},
@@ -435,7 +499,7 @@ def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
         },
         "textblocks": {
             "about_company_115": {"text": advertiser_info, "title": ""},
-            "cta_community_vk": {"text": cta_text, "title": ""},  # ← кнопка из preset.ads[*].button
+            "cta_community_vk": {"text": (cta_text or "visitSite"), "title": ""},
             "text_2000": {"text": short, "title": ""},
             "title_40_vkads": {"text": title, "title": ""},
         }
@@ -446,28 +510,33 @@ def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
 def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index: int) -> Dict[str, Any]:
     company = preset["company"]
     groups = preset.get("groups", [])
-    company_name = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
     objective = company.get("targetAction", "socialengagement")
-    package_id = package_id_for_objective(objective)
 
-    now_local = datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)
-    start_date_str = now_local.date().isoformat()
+    # дата «сегодня» со сдвигом +4ч (как и во всех остальных местах)
+    today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
+
+    # companyName с шаблонами
+    company_name_tpl = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
+    company_name = render_name_tokens(company_name_tpl, today_date=today, objective=objective, n=1, n_g=1)
+
+    package_id = package_id_for_objective(objective)
+    start_date_str = today.isoformat()  # дата старта = сегодняшняя (с учётом +4ч)
 
     ad_groups_payload = []
 
     for g_idx, g in enumerate(groups, start=1):
-        # ← имя группы из groupName (фолбек: "Группа {n}")
-        group_name = (g.get("groupName") or f"Группа {g_idx}").strip()
+        group_name_tpl = (g.get("groupName") or f"Группа {g_idx}").strip()
+        age_str = g.get("age", "")
+        gender_str = g.get("gender", "")
+        group_name = render_name_tokens(
+            group_name_tpl, today_date=today, objective=objective, age=age_str, gender=gender_str, n=1, n_g=1
+        )
 
-        # регионы теперь приходят списком чисел/отрицательных — as_int_list поддерживает и list, и csv
         regions = as_int_list(g.get("regions"))
-        genders = split_gender(g.get("gender", ""))
+        genders = split_gender(gender_str)
         segments = as_int_list(g.get("audienceIds"))
-
-        # интересы (list[int] с возможными отрицательными)
         interests_list = as_int_list(g.get("interests"))
-
-        age_list = build_age_list(g.get("age", ""))
+        age_list = build_age_list(age_str)
 
         targetings: Dict[str, Any] = {"geo": {"regions": regions}}
         if genders:
@@ -475,7 +544,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         if segments:
             targetings["segments"] = segments
         if interests_list:
-            targetings["interests"] = interests_list  # ← вернули interests
+            targetings["interests"] = interests_list
         if age_list:
             targetings["age"] = {"age_list": age_list}
 
@@ -486,7 +555,6 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         budget_day = int(g.get("budget") or 0)
         utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
-        # заглушка баннера — реальный подставим в create_ad_plan()
         banners_payload = [{"name": f"Объявление {g_idx}", "urls": {"primary": {"id": ad_object_id}}}]
 
         ad_groups_payload.append({
@@ -505,7 +573,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         })
 
     payload = {
-        "name": f"{company_name}",
+        "name": company_name,
         "status": "active",
         "date_start": start_date_str,
         "date_end": None,
@@ -580,13 +648,20 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
     # 2) Диагностика объявлений
     for i, ad in enumerate(ads):
-        log.info("ads[%d] summary: title=%r, videoIds=%r, logoId=%r, advertiserInfo=%r",
-                 i, ad.get("title"), ad.get("videoIds"),
+        log.info("ads[%d] summary: adName=%r, button=%r, title=%r, videoIds=%r, logoId=%r, advertiserInfo=%r",
+                 i, ad.get("adName"), ad.get("button"), ad.get("title"), ad.get("videoIds"),
                  ad.get("logoId") or company.get("logoId"),
                  ad.get("advertiserInfo") or company.get("advertiserInfo"))
 
     # 3) Баннеры 1:1 с группами (каждой группе — свой баннер из ads[i])
     banners_by_group: List[Dict[str, Any]] = []
+    # счётчики для {%N%} и {%N-G%}
+    company_counter = 0
+    group_counters = [0 for _ in groups]
+
+    today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
+    objective = (preset.get("company") or {}).get("targetAction", "socialengagement")
+
     for gi in range(len(groups)):
         ad = ads[gi] if gi < len(ads) else None
         if not ad:
@@ -609,15 +684,40 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                                f"Missing ads[{gi}].logoId and company.logoId")
             raise RuntimeError("missing logoId")
 
+        # счётчики
+        group_counters[gi] += 1
+        company_counter += 1
+
+        g = groups[gi]
+        age_str = g.get("age", "")
+        gender_str = g.get("gender", "")
+
+        # adName с плейсхолдерами
+        ad_name_tpl = (ad.get("adName") or f"Объявление {gi+1}").strip()
+        banner_name = render_name_tokens(
+            ad_name_tpl,
+            today_date=today,
+            objective=objective,
+            age=age_str,
+            gender=gender_str,
+            n=group_counters[gi],
+            n_g=company_counter
+        )
+
+        cta_text = (ad.get("button") or "visitSite").strip()
+
         try:
-            banner = make_banner_for_ad(company_name, ad_object_id, ad, gi + 1, adv_info, int(icon_id))
+            banner = make_banner_for_ad(
+                company_name, ad_object_id, ad, gi + 1, adv_info, int(icon_id),
+                banner_name=banner_name,
+                cta_text=cta_text
+            )
             banners_by_group.append(banner)
-            log.info("Собран баннер #%d из ads[%d]", gi+1, gi)
+            log.info("Собран баннер #%d для группы '%s' (name='%s')", gi+1, g.get("groupName"), banner_name)
         except Exception as e:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                                "Ошибка сборки баннера", repr(e))
             raise
-
     results = []
     endpoint = f"{API_BASE}/api/v2/ad_plans.json"
 
