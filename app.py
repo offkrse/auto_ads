@@ -17,7 +17,7 @@ import errno
 
 app = FastAPI()
 
-VersionApp = "0.4"
+VersionApp = "0.5"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -198,6 +198,73 @@ def upsert_global_queue(item: dict):
             os.replace(tmp_path, GLOBAL_QUEUE_FILE)
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+def read_global_queue() -> list[dict]:
+    """Безопасно читает список из GLOBAL_QUEUE_FILE."""
+    try:
+        if not GLOBAL_QUEUE_FILE.exists():
+            return []
+        with open(GLOBAL_QUEUE_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        log_error(f"read_global_queue failed: {repr(e)}")
+        return []
+
+def update_status_in_global_queue(user_id: str, cabinet_id: str, preset_id: str, status: str):
+    """
+    Меняет только поле status у записи (user_id, cabinet_id, preset_id).
+    Если записи нет — создаёт минимальную с этим статусом.
+    """
+    status = "active" if status != "deactive" else "deactive"
+
+    # Блокировка тем же способом, как в upsert_global_queue
+    with open(GLOBAL_QUEUE_FILE, "a+", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.seek(0)
+            raw = f.read()
+            try:
+                data = json.loads(raw) if raw.strip() else []
+            except Exception:
+                data = []
+
+            if not isinstance(data, list):
+                data = []
+
+            uid, cid, pid = str(user_id), str(cabinet_id), str(preset_id)
+
+            idx = -1
+            for i, it in enumerate(data):
+                if (str(it.get("user_id","")) == uid and
+                    str(it.get("cabinet_id","")) == cid and
+                    str(it.get("preset_id","")) == pid):
+                    idx = i
+                    break
+
+            if idx >= 0:
+                # обновляем только статус
+                it = dict(data[idx])
+                it["status"] = status
+                data[idx] = it
+            else:
+                # создаём минимальную запись, чтобы статус сохранился
+                data.append({
+                    "user_id": uid,
+                    "cabinet_id": cid,
+                    "preset_id": pid,
+                    "status": status,
+                    "date_time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                })
+
+            tmp_path = GLOBAL_QUEUE_FILE.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as tf:
+                json.dump(data, tf, ensure_ascii=False, indent=2)
+                tf.flush()
+                os.fsync(tf.fileno())
+            os.replace(tmp_path, GLOBAL_QUEUE_FILE)
+        finally:
+            fcntl.flock(f.fileno(), f.LOCK_UN)
 
 def abstract_audiences_path(user_id: str, cabinet_id: str) -> Path:
     p = USERS_DIR / user_id / "audiences" / str(cabinet_id)
@@ -388,7 +455,8 @@ async def save_preset(payload: dict):
         "tokens": token_names,
         "date_time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "count_repeats": count_repeats,
-        "trigger_time": trigger_time
+        "trigger_time": trigger_time,
+        "status": "active"
     }
     
     upsert_global_queue(queue_item)
@@ -507,7 +575,48 @@ def serve_file(cabinet_id: str, filename: str):
     if not path.exists():
         raise HTTPException(404, "File not found")
     return FileResponse(path)
-    
+
+
+# -------- Queue status (per preset) --------
+@app.get("/api/queue/status/get")
+def queue_status_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """
+    Возвращает статусы пресетов для пары (user_id, cabinet_id).
+    Формат ответа: {"items":[{"preset_id": "...", "status":"active|deactive"}, ...]}
+    """
+    items = []
+    for it in read_global_queue():
+        if str(it.get("user_id","")) == str(user_id) and str(it.get("cabinet_id","")) == str(cabinet_id):
+            pid = str(it.get("preset_id",""))
+            if not pid:
+                continue
+            st = it.get("status") or "active"
+            st = "deactive" if st == "deactive" else "active"
+            items.append({"preset_id": pid, "status": st})
+    return {"items": items}
+
+@app.post("/api/queue/status/set")
+async def queue_status_set(payload: dict):
+    """
+    Тело: { "userId": "...", "cabinetId": "...", "presetId": "...", "status": "active|deactive" }
+    """
+    user_id   = payload.get("userId")
+    cabinet_id= payload.get("cabinetId")
+    preset_id = payload.get("presetId")
+    status    = payload.get("status")
+    if not user_id or cabinet_id is None or not preset_id:
+        raise HTTPException(400, "Missing userId/cabinetId/presetId")
+    if status not in ("active","deactive"):
+        raise HTTPException(400, "Invalid status")
+
+    try:
+        update_status_in_global_queue(str(user_id), str(cabinet_id), str(preset_id), status)
+        return {"status":"ok"}
+    except Exception as e:
+        log_error(f"queue/status/set error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error":"Internal Server Error"})
+
+
 # -------------------------------------
 #   LOGO SETS
 # -------------------------------------
