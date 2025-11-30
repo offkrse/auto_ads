@@ -413,12 +413,13 @@ def audiences_path(user_id: str, cabinet_id: str) -> Path:
     return USERS_DIR / user_id / "audiences" / cabinet_id / "audiences.json"
 
 # ----------------------------------- API --------------------------------------------
-secure = APIRouter(prefix="/auto_ads/api", dependencies=[Depends(require_tg_user)])
+secure_api = APIRouter(prefix="/api", dependencies=[Depends(require_tg_user)])
+secure_auto = APIRouter(prefix="/auto_ads/api", dependencies=[Depends(require_tg_user)])
 # -------------------------------------
 #   HISTORY
 # -------------------------------------
-@app.get("/api/history/get")
-@app.get("/auto_ads/api/history/get")
+@secure_api.get("/history/get")
+@secure_auto.get("/auto_ads/api/history/get")
 def history_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
   items = read_history_file(user_id, cabinet_id)
   return JSONResponse({"items": items})
@@ -426,7 +427,7 @@ def history_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
 # -------------------------------------
 #   PRESETS (each in separate file)
 # -------------------------------------
-@app.post("/api/preset/save")
+@secure_api.post("/preset/save")
 async def save_preset(payload: dict):
     user_id = payload.get("userId")
     cabinet_id = payload.get("cabinetId")
@@ -501,7 +502,7 @@ async def save_preset(payload: dict):
     return {"status": "ok", "preset_id": preset_id}
 
 
-@app.get("/api/preset/list")
+@secure_api.get("/preset/list")
 def list_presets(user_id: str, cabinet_id: str):
     ensure_user_structure(user_id)
     pdir = USERS_DIR / user_id / "presets" / cabinet_id
@@ -526,7 +527,7 @@ def list_presets(user_id: str, cabinet_id: str):
     return {"presets": presets}
 
 
-@app.delete("/api/preset/delete")
+@secure_api.delete("/preset/delete")
 def delete_preset(
     user_id: str = Query(...),
     cabinet_id: str = Query(...),
@@ -547,7 +548,7 @@ def delete_preset(
 # -------------------------------------
 #   CREATIVE SETS
 # -------------------------------------
-@app.post("/api/creatives/save")
+@secure_api.post("/creatives/save")
 async def save_creatives(payload: dict):
     user_id = payload.get("userId")
     cabinet_id = payload.get("cabinetId")
@@ -571,7 +572,7 @@ async def save_creatives(payload: dict):
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 
-@app.get("/api/creatives/get")
+@secure_api.get("/creatives/get")
 def get_creatives(user_id: str, cabinet_id: str):
     try:
         ensure_user_structure(user_id)
@@ -615,8 +616,8 @@ def serve_file(cabinet_id: str, filename: str):
 
 
 # -------- Queue status (per preset) --------
-@app.get("/api/queue/status/get")
-@app.get("/auto_ads/api/queue/status/get")
+@secure_api.get("/queue/status/get")
+@secure_auto.get("/auto_ads/api/queue/status/get")
 def queue_status_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
     """
     Возвращает статусы пресетов для пары (user_id, cabinet_id).
@@ -633,8 +634,8 @@ def queue_status_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
             items.append({"preset_id": pid, "status": st})
     return {"items": items}
 
-@app.post("/api/queue/status/set")
-@app.post("/auto_ads/api/queue/status/set")
+@secure_api.post("/queue/status/set")
+@secure_auto.post("/auto_ads/api/queue/status/set")
 async def queue_status_set(payload: dict):
     """
     Тело: { "userId": "...", "cabinetId": "...", "presetId": "...", "status": "active|deactive" }
@@ -667,7 +668,7 @@ def serve_logo(cabinet_id: str, filename: str):
         raise HTTPException(404, "Logo not found")
     return FileResponse(path)
 
-@app.post("/api/logo/upload")
+@secure_api.post("/logo/upload")
 async def upload_logo(
     user_id: str,
     cabinet_id: str,
@@ -746,7 +747,7 @@ async def upload_logo(
         except Exception:
             pass
 
-@app.get("/api/logo/get")
+@secure_api.get("/logo/get")
 def get_logo(user_id: str, cabinet_id: str):
     try:
         ensure_user_structure(user_id)
@@ -763,7 +764,7 @@ def get_logo(user_id: str, cabinet_id: str):
 #   Interests and regions
 # -------------------------------------
 
-@app.get("/api/interests")
+@secure_api.get("/interests")
 def get_interests():
     try:
         if not INTERESTS_FILE.exists():
@@ -778,7 +779,7 @@ def get_interests():
         log_error(f"/api/interests error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
-@app.get("/api/regions")
+@secure_api.get("/regions")
 def get_regions():
     try:
         if not REGIONS_FILE.exists():
@@ -797,7 +798,7 @@ def get_regions():
 # -------------------------------------
 #   AUDIENCES
 # -------------------------------------
-@app.post("/api/audiences/save")
+@secure_api.post("/audiences/save")
 async def save_audiences(payload: dict):
     user_id = payload.get("userId")
     cabinet_id = payload.get("cabinetId")
@@ -812,7 +813,7 @@ async def save_audiences(payload: dict):
     return {"status": "ok"}
 
 
-@app.get("/api/vk/audiences/fetch")
+@secure_api.get("/vk/audiences/fetch")
 def fetch_vk_audiences(user_id: str, cabinet_id: str):
     data = ensure_user_structure(user_id)
 
@@ -862,7 +863,7 @@ def fetch_vk_audiences(user_id: str, cabinet_id: str):
     return {"audiences": out}
 
 
-@app.get("/api/abstract_audiences/get")
+@secure_api.get("/abstract_audiences/get")
 def get_abstract_audiences(user_id: str, cabinet_id: str):
     """
     Возвращает абстрактные аудитории ДЛЯ КОНКРЕТНОГО кабинета.
@@ -881,7 +882,7 @@ def get_abstract_audiences(user_id: str, cabinet_id: str):
         return {"audiences": json.load(fh)}
 
 
-@app.post("/api/abstract_audiences/save")
+@secure_api.post("/abstract_audiences/save")
 def save_abstract_audiences(payload: dict):
     user_id = payload.get("userId")
     cabinet_id = payload.get("cabinetId")
@@ -896,7 +897,7 @@ def save_abstract_audiences(payload: dict):
     return {"status": "ok"}
 
 
-@app.get("/api/audiences/get")
+@secure_api.get("/audiences/get")
 def get_audiences(user_id: str, cabinet_id: str):
     ensure_user_structure(user_id)
 
@@ -907,7 +908,7 @@ def get_audiences(user_id: str, cabinet_id: str):
     with open(f, "r") as file:
         return {"audiences": json.load(file)}
 
-@app.get("/api/vk/audiences/search")
+@secure_api.get("/vk/audiences/search")
 def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
     """
     Возвращает последние (до 50) аудиторий VK, у которых имя начинается с q.
@@ -998,7 +999,7 @@ def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
 # -------------------------------------
 #   SETTINGS (theme, language, any future)
 # -------------------------------------
-@app.post("/api/settings/save")
+@secure_api.post("/settings/save")
 async def save_settings(payload: dict):
     user_id = payload.get("userId")
     settings = payload.get("settings")
@@ -1020,7 +1021,7 @@ async def save_settings(payload: dict):
     return {"status": "ok"}
 
 
-@app.get("/api/settings/get")
+@secure_api.get("/settings/get")
 def get_settings(user_id: str):
     try:
         data = ensure_user_structure(user_id)
@@ -1030,7 +1031,7 @@ def get_settings(user_id: str):
         return JSONResponse(status_code=500, content={"error":"Internal Server Error"})
 # --------------  TEXT  -----------------
 
-@app.post("/api/textsets/save")
+@secure_api.post("/textsets/save")
 def save_textsets(payload: dict):
     user_id = payload.get("userId")
     cabinet_id = payload.get("cabinetId")
@@ -1053,7 +1054,7 @@ def save_textsets(payload: dict):
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 
-@app.get("/api/textsets/get")
+@secure_api.get("/textsets/get")
 def get_textsets(user_id: str, cabinet_id: str):
     try:
         ensure_user_structure(user_id)
@@ -1088,7 +1089,7 @@ def get_textsets(user_id: str, cabinet_id: str):
 # -------------------------------------
 #   FILE STORAGE (videos/images)
 # -------------------------------------
-@app.post("/api/upload")
+@secure_api.post("/upload")
 async def upload_creative(
     user_id: str,
     cabinet_id: str,
@@ -1195,7 +1196,10 @@ async def upload_creative(
 # -------------------------------------
 #   FRONTEND BUILD
 # -------------------------------------
-@app.get("/api/status")
+app.include_router(secure_api)
+app.include_router(secure_auto)
+
+@secure_api.get("/status")
 def status():
     return {"status": "running"}
     
