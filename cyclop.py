@@ -17,13 +17,13 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.95 unstable"
+VersionCyclop = "0.96 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
 ENV_FILE = Path("/opt/auto_ads/.env")
 LOGS_DIR = Path("/opt/auto_ads/logs")
-LOG_FILE = LOGS_DIR / "auto_ads_worker.log"
+LOG_FILE = LOGS_DIR / "cyclop.log"
 
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 
@@ -50,6 +50,8 @@ BASE_NUMBER = 53
 def setup_logger() -> logging.Logger:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("auto_ads")
+
+    # Если уже настроен — ничего не делаем
     if logger.handlers:
         return logger
 
@@ -62,17 +64,12 @@ def setup_logger() -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    file_handler = TimedRotatingFileHandler(
-        filename=str(LOG_FILE),
-        when="midnight",
-        interval=1,
-        backupCount=14,
-        encoding="utf-8",
-        utc=False,
-    )
+    # Пишем ВСЕГДА в один файл без ротации
+    file_handler = logging.FileHandler(str(LOG_FILE), encoding="utf-8")
     file_handler.setFormatter(fmt)
     file_handler.setLevel(level)
 
+    # И дублируем в консоль (по желанию можно убрать)
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(fmt)
     stream_handler.setLevel(level)
