@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.9"
+VersionCyclop = "0.91"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -707,13 +707,21 @@ def process_queue_once() -> None:
     now_local = datetime.now(LOCAL_TZ)
     for item in queue:
         try:
+            # статус пресета в очереди (по умолчанию считаем active)
+            status = str(item.get("status", "active")).strip().lower()
+            if status != "active":
+                log.info("[SKIP] %s/%s preset=%s | status=%s",
+                         item.get("user_id"), item.get("cabinet_id"),
+                         item.get("preset_id"), status)
+                continue
+
             user_id = str(item["user_id"])
             cabinet_id = str(item["cabinet_id"])
             preset_id = str(item["preset_id"])
             tokens = item.get("tokens") or []      # имена VK_TOKEN_* или сырые токены
             trigger_time = item.get("trigger_time") or item.get("time") or ""
             count_repeats = int(item.get("count_repeats") or 1)
-            
+
             match, info = check_trigger(trigger_time, now_local)
             if not match:
                 log.info("[WAIT] %s/%s preset=%s | trigger=%s | target(shifted)=%s | now(+%sh)=%s | delta=%ss (window=%ss)",
@@ -722,18 +730,18 @@ def process_queue_once() -> None:
                          SERVER_SHIFT_HOURS, info.get("ADJUSTED_NOW"),
                          info.get("DELTA_SEC"), info.get("WINDOW_SEC"))
                 continue
-            
+
             preset_path = USERS_ROOT / user_id / "presets" / str(cabinet_id) / f"{preset_id}.json"
             if not preset_path.exists():
                 log.error("Preset not found: %s", preset_path)
                 write_result_error(user_id, cabinet_id, preset_id, "", trigger_time,
                                    "Не найден пресет", f"missing preset file: {preset_path}")
                 continue
-            
+
             preset = load_json(preset_path)
             preset_name = str((preset.get("company") or {}).get("presetName") or "")
             log.info("Processing %s/%s preset=%s repeats=%s", user_id, cabinet_id, preset_id, count_repeats)
-            
+
             try:
                 _ = create_ad_plan(
                     preset, tokens, count_repeats, user_id, cabinet_id,
