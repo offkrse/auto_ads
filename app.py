@@ -217,7 +217,8 @@ def update_status_in_global_queue(user_id: str, cabinet_id: str, preset_id: str,
     Если записи нет — создаёт минимальную с этим статусом.
     """
     status = "active" if status != "deactive" else "deactive"
-
+  
+    GLOBAL_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
     # Блокировка тем же способом, как в upsert_global_queue
     with open(GLOBAL_QUEUE_FILE, "a+", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -264,7 +265,7 @@ def update_status_in_global_queue(user_id: str, cabinet_id: str, preset_id: str,
                 os.fsync(tf.fileno())
             os.replace(tmp_path, GLOBAL_QUEUE_FILE)
         finally:
-            fcntl.flock(f.fileno(), f.LOCK_UN)
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 def abstract_audiences_path(user_id: str, cabinet_id: str) -> Path:
     p = USERS_DIR / user_id / "audiences" / str(cabinet_id)
