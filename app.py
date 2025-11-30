@@ -19,7 +19,7 @@ import errno
 
 app = FastAPI()
 
-VersionApp = "0.57"
+VersionApp = "0.6"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -51,6 +51,13 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
+def _safe_unlink(p: Path):
+    try:
+        if p.exists():
+            p.unlink()
+    except Exception as e:
+        log_error(f"safe_unlink failed for {p}: {repr(e)}")
+
 def check_telegram_init_data(init_data: str) -> dict:
     """
     Возвращает dict с данными, если подпись валидна. Иначе бросает HTTPException(401).
@@ -619,7 +626,91 @@ def serve_file(cabinet_id: str, filename: str):
         raise HTTPException(404, "File not found")
     return FileResponse(path)
 
+@secure_api.post("/creative/delete")
+async def creative_delete(payload: dict):
+    """
+    Тело:
+    {
+      "userId": "...",
+      "cabinetId": "...",                    # выбранный в UI; для urls по кабинетам он не критичен
+      "item": {
+        "type": "video" | "image",
+        "url": "/auto_ads/video/<cab>/<file>",      # если файл один
+        "urls": { "<cab>": "/auto_ads/video/<cab>/<file>", ... },  # если загрузка была с 'all'
+        "thumbUrl": "/auto_ads/video/<cab>/<file>.jpg"             # опционально (видео)
+      }
+    }
+    Удаляет соответствующие файлы в /mnt/data/auto_ads_storage/video/<cab>/...
+    """
+    try:
+        user_id = payload.get("userId")
+        cabinet_id = str(payload.get("cabinetId", ""))  # не обязателен, если есть item.urls
+        item = payload.get("item") or {}
+        it_type = str(item.get("type", ""))
+        if not user_id:
+            raise HTTPException(400, "Missing userId")
+        if not isinstance(item, dict):
+            raise HTTPException(400, "Missing item")
 
+        to_delete: list[tuple[str, str]] = []  # (cabinet_id, filename)
+
+        def add_by_url(url: str):
+            if not url:
+                return
+            # берем только basename чтобы избежать traversal
+            name = Path(url).name
+            # вытащим cabinet из url (/auto_ads/video/<cab>/<file>) — на фронте ты так формируешь
+            try:
+                parts = url.strip("/").split("/")
+                # [..., 'video', '<cab>', '<file>']
+                idx = parts.index("video")
+                cab = parts[idx + 1]
+            except Exception:
+                cab = cabinet_id or "all"
+            to_delete.append((cab, name))
+
+        # 1) множественный вариант (когда загружали в 'all')
+        if isinstance(item.get("urls"), dict) and item["urls"]:
+            for cab, url in item["urls"].items():
+                if isinstance(url, str):
+                    name = Path(url).name
+                    to_delete.append((str(cab), name))
+        # 2) одиночный вариант
+        elif isinstance(item.get("url"), str):
+            add_by_url(item["url"])
+
+        # (опционально) если пришёл thumbUrl — удалим его явно
+        thumb_url = item.get("thumbUrl")
+        if isinstance(thumb_url, str) and thumb_url:
+            try:
+                parts = thumb_url.strip("/").split("/")
+                idx = parts.index("video")
+                cab_t = parts[idx + 1]
+                name_t = Path(thumb_url).name
+                to_delete.append((str(cab_t), name_t))
+            except Exception:
+                pass
+
+        deleted: list[str] = []
+        for cab, fname in to_delete:
+            storage = cabinet_storage(cab)
+            file_path = storage / fname
+            _safe_unlink(file_path)
+            deleted.append(str(file_path))
+
+            # если это видео и превью генерировалось по паттерну "<final_name>.jpg" — тоже уберём
+            if it_type == "video":
+                jpg1 = storage / (fname + ".jpg")
+                _safe_unlink(jpg1)
+                # иногда превью уже прислал фронт в thumbUrl, он выше добавлен
+
+        return {"status": "ok", "deleted": deleted}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"/creative/delete error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+        
 # -------- Queue status (per preset) --------
 @secure_api.get("/queue/status/get")
 @secure_auto.get("/queue/status/get")
