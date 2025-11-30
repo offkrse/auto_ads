@@ -19,7 +19,7 @@ import errno
 
 app = FastAPI()
 
-VersionApp = "0.55"
+VersionApp = "0.57"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -611,8 +611,8 @@ def get_creatives(user_id: str, cabinet_id: str):
         log_error(f"creatives/get[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
-
 @app.get("/video/{cabinet_id}/{filename}")
+@app.get("/auto_ads/video/{cabinet_id}/{filename}")
 def serve_file(cabinet_id: str, filename: str):
     path = cabinet_storage(cabinet_id) / filename
     if not path.exists():
@@ -665,7 +665,7 @@ async def queue_status_set(payload: dict):
 # -------------------------------------
 #   LOGO SETS
 # -------------------------------------
-
+@app.get("/auto_ads/logo/{cabinet_id}/{filename}")
 @app.get("/logo/{cabinet_id}/{filename}")
 def serve_logo(cabinet_id: str, filename: str):
     path = logo_storage(cabinet_id) / filename
@@ -1098,130 +1098,134 @@ def get_textsets(user_id: str, cabinet_id: str):
 async def upload_creative(
     user_id: str,
     cabinet_id: str,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
 ):
-    content_type = file.content_type
-    is_image = content_type.startswith("image")
-    is_video = content_type.startswith("video")
+    content_type = (file.content_type or "").lower()
+    filename_lower = (file.filename or "").lower()
+
+    is_image = content_type.startswith("image/")
+    is_video = content_type.startswith("video/") or filename_lower.endswith(
+        (".mov", ".mp4", ".m4v", ".webm", ".avi", ".mkv")
+    )
 
     if not (is_image or is_video):
         raise HTTPException(400, "Only image or video allowed")
 
-    # подготовка для анализа размеров
-    import tempfile
+    # сохраним загрузку во временный файл
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         shutil.copyfileobj(file.file, tmp)
-        tmp_path = tmp.name
+        tmp_path = Path(tmp.name)
 
-    # определяем ширину и высоту
-    if is_image:
-        img = Image.open(tmp_path)
-        width, height = img.size
-    else:
-        width, height = (720, 1280)
+    try:
+        # определяем размеры
+        if is_image:
+            img = Image.open(tmp_path)
+            width, height = img.size
+        else:
+            # можно позже улучшить детекцию через ffprobe
+            width, height = (720, 1280)
 
-    # берём токены
-    data = ensure_user_structure(user_id)
+        # грузим структуру пользователя
+        data = ensure_user_structure(user_id)
 
-    # если cabinet_id == "all", выбираем все кабинеты, кроме all
-    if cabinet_id == "all":
-        target_cabinets = [
-            c for c in data["cabinets"]
-            if c["id"] != "all" and c.get("token")
-        ]
-    else:
-        target_cabinets = [
-            c for c in data["cabinets"]
-            if str(c["id"]) == str(cabinet_id)
-        ]
+        # если cabinet_id == "all" — все реальные кабинеты с токенами
+        if cabinet_id == "all":
+            target_cabinets = [
+                c for c in data["cabinets"]
+                if str(c.get("id")) != "all" and c.get("token")
+            ]
+        else:
+            target_cabinets = [
+                c for c in data["cabinets"]
+                if str(c.get("id")) == str(cabinet_id)
+            ]
 
-    if not target_cabinets:
-        raise HTTPException(400, "No valid cabinets found")
+        if not target_cabinets:
+            raise HTTPException(400, "No valid cabinets found")
 
-    results = []
+        results = []
 
-    # перебираем все кабинеты
-    for cabinet in target_cabinets:
-        final_path = storage / final_name
-        shutil.copy(tmp_path, final_path)
-        # ---- thumbnail (для видео .mov/.mp4 и пр.) ----
-        thumb_url = None
-        if is_video:
-            try:
-                thumb_name = f"{final_name}.jpg"
-                thumb_path = storage / thumb_name
-                subprocess.run(
-                    [
-                        "ffmpeg", "-y",
-                        "-ss", "1",
-                        "-i", str(final_path),
-                        "-vframes", "1",
-                        "-vf", "scale=360:-1",
-                        str(thumb_path)
-                    ],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                thumb_url = f"/auto_ads/video/{cabinet['id']}/{thumb_name}"
-            except Exception:
-                thumb_url = None
-        # -----------------------------------------------
-        token_name = cabinet.get("token")
-        if not token_name:
-            continue
+        for cabinet in target_cabinets:
+            token_name = cabinet.get("token")
+            if not token_name:
+                # пропустим кабинет без токена
+                continue
 
-        real_token = os.getenv(token_name)
-        if not real_token:
-            raise HTTPException(500, f"Token {token_name} not found in environment")
+            real_token = os.getenv(token_name)
+            if not real_token:
+                raise HTTPException(500, f"Token {token_name} not found in environment")
 
-        vk_url = (
-            "https://ads.vk.com/api/v2/content/static.json"
-            if is_image else
-            "https://ads.vk.com/api/v2/content/video.json"
-        )
+            vk_url = (
+                "https://ads.vk.com/api/v2/content/static.json"
+                if is_image else
+                "https://ads.vk.com/api/v2/content/video.json"
+            )
+            headers = {"Authorization": f"Bearer {real_token}"}
+            with open(tmp_path, "rb") as fh:
+                files = {
+                    "file": (file.filename, fh, content_type or "application/octet-stream"),
+                    "data": (None, json.dumps({"width": width, "height": height}), "application/json"),
+                }
+                resp = requests.post(vk_url, headers=headers, files=files, timeout=60)
 
-        headers = {
-            "Authorization": f"Bearer {real_token}"
-        }
+            if resp.status_code != 200:
+                return {
+                    "status": "error",
+                    "cabinet_id": cabinet["id"],
+                    "vk_error": resp.text,
+                }
 
-        files = {
-            "file": (file.filename, open(tmp_path, "rb"), content_type),
-            "data": (None, json.dumps({"width": width, "height": height}), "application/json")
-        }
+            resp_json = resp.json()
+            vk_id = resp_json.get("id")
+            if not vk_id:
+                raise HTTPException(500, f"No id returned for cabinet {cabinet['id']}")
 
-        # отправляем файл в VK ADS
-        resp = requests.post(vk_url, headers=headers, files=files)
+            # кладём локальную копию под vk_id
+            storage = cabinet_storage(cabinet["id"])
+            final_name = f"{vk_id}_{file.filename}"
+            final_path = storage / final_name
+            shutil.copy(tmp_path, final_path)
 
-        if resp.status_code != 200:
-            return {
-                "status": "error",
+            # генерим превью для видео
+            thumb_url = None
+            if is_video:
+                try:
+                    thumb_name = f"{final_name}.jpg"
+                    thumb_path = storage / thumb_name
+                    proc = subprocess.run(
+                        [
+                            "ffmpeg", "-y",
+                            "-ss", "1",
+                            "-i", str(final_path),
+                            "-vframes", "1",
+                            "-vf", "scale=360:-1",
+                            str(thumb_path),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    if proc.returncode == 0 and thumb_path.exists():
+                        thumb_url = f"/auto_ads/video/{cabinet['id']}/{thumb_name}"
+                    else:
+                        log_error(f"ffmpeg failed for {final_path}: {proc.stderr[:400]}")
+                except Exception as e:
+                    log_error(f"thumb exception for {final_path}: {repr(e)}")
+
+            results.append({
                 "cabinet_id": cabinet["id"],
-                "vk_error": resp.text
-            }
+                "vk_id": vk_id,
+                "url": f"/auto_ads/video/{cabinet['id']}/{final_name}",
+                **({"thumb_url": thumb_url} if thumb_url else {}),
+            })
 
-        resp_json = resp.json()
-        vk_id = resp_json.get("id")
-        if not vk_id:
-            raise HTTPException(500, f"No id returned for cabinet {cabinet['id']}")
+        return {"status": "ok", "results": results}
 
-        # сохраняем локально
-        storage = cabinet_storage(cabinet["id"])
-        final_name = f"{vk_id}_{file.filename}"
-        final_path = storage / final_name
-        shutil.copy(tmp_path, final_path)
-
-        results.append({
-            "cabinet_id": cabinet["id"],
-            "vk_id": vk_id,
-            "url": f"/auto_ads/video/{cabinet['id']}/{final_name}"
-            **({"thumb_url": thumb_url} if thumb_url else {})
-        })
-
-    return {
-        "status": "ok",
-        "results": results
-    }
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 # -------------------------------------
