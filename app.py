@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, APIRouter
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
@@ -76,12 +76,16 @@ def check_telegram_init_data(init_data: str) -> dict:
     # Можно ещё проверить свежесть auth_date (например ±1 день)
     return data  # тут, например, есть user, auth_date и пр.
 
-def require_tg_user(init_data: str = Query(None), request: Request = None):
-    # можно разрешить init_data либо в query, либо в заголовке
-    if init_data is None:
-        init_data = request.headers.get("x-telegram-init", None)
+def require_tg_user(
+    init_data: str = Query(None, alias="init_data"),
+    request: Request = None
+):
+    # допускаем и query (?init_data=...), и заголовок, который шлёт фронт
+    if init_data is None and request is not None:
+        # Starlette приводит имена к lower-case
+        init_data = request.headers.get("x-tg-init-data") or request.headers.get("x-telegram-init")
     data = check_telegram_init_data(init_data)
-    return data  # вернёт dict с полями от Telegram
+    return data
 
 def read_history_file(user_id: str, cabinet_id: str):
   p = USERS_DIR / user_id / "created_company" / cabinet_id / "created.json"
@@ -419,7 +423,7 @@ secure_auto = APIRouter(prefix="/auto_ads/api", dependencies=[Depends(require_tg
 #   HISTORY
 # -------------------------------------
 @secure_api.get("/history/get")
-@secure_auto.get("/auto_ads/api/history/get")
+@secure_auto.get("/history/get")
 def history_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
   items = read_history_file(user_id, cabinet_id)
   return JSONResponse({"items": items})
@@ -617,7 +621,7 @@ def serve_file(cabinet_id: str, filename: str):
 
 # -------- Queue status (per preset) --------
 @secure_api.get("/queue/status/get")
-@secure_auto.get("/auto_ads/api/queue/status/get")
+@secure_auto.get("/queue/status/get")
 def queue_status_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
     """
     Возвращает статусы пресетов для пары (user_id, cabinet_id).
@@ -635,7 +639,7 @@ def queue_status_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
     return {"items": items}
 
 @secure_api.post("/queue/status/set")
-@secure_auto.post("/auto_ads/api/queue/status/set")
+@secure_auto.post("/queue/status/set")
 async def queue_status_set(payload: dict):
     """
     Тело: { "userId": "...", "cabinetId": "...", "presetId": "...", "status": "active|deactive" }
