@@ -17,7 +17,7 @@ import errno
 
 app = FastAPI()
 
-VersionApp = "0.5"
+VersionApp = "0.51"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -579,6 +579,7 @@ def serve_file(cabinet_id: str, filename: str):
 
 # -------- Queue status (per preset) --------
 @app.get("/api/queue/status/get")
+@app.get("/auto_ads/api/queue/status/get")
 def queue_status_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
     """
     Возвращает статусы пресетов для пары (user_id, cabinet_id).
@@ -596,6 +597,7 @@ def queue_status_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
     return {"items": items}
 
 @app.post("/api/queue/status/set")
+@app.post("/auto_ads/api/queue/status/set")
 async def queue_status_set(payload: dict):
     """
     Тело: { "userId": "...", "cabinetId": "...", "presetId": "...", "status": "active|deactive" }
