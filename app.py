@@ -2,12 +2,13 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, AP
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
-import hmac, hashlib
 from urllib.parse import quote, parse_qsl
 from pathlib import Path
 from io import BytesIO
-import requests
 from PIL import Image
+import hmac, hashlib
+import requests
+import subprocess
 import tempfile
 import json
 import shutil
@@ -18,7 +19,7 @@ import errno
 
 app = FastAPI()
 
-VersionApp = "0.51"
+VersionApp = "0.55"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1141,6 +1142,31 @@ async def upload_creative(
 
     # перебираем все кабинеты
     for cabinet in target_cabinets:
+        final_path = storage / final_name
+        shutil.copy(tmp_path, final_path)
+        # ---- thumbnail (для видео .mov/.mp4 и пр.) ----
+        thumb_url = None
+        if is_video:
+            try:
+                thumb_name = f"{final_name}.jpg"
+                thumb_path = storage / thumb_name
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-ss", "1",
+                        "-i", str(final_path),
+                        "-vframes", "1",
+                        "-vf", "scale=360:-1",
+                        str(thumb_path)
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                thumb_url = f"/auto_ads/video/{cabinet['id']}/{thumb_name}"
+            except Exception:
+                thumb_url = None
+        # -----------------------------------------------
         token_name = cabinet.get("token")
         if not token_name:
             continue
@@ -1189,6 +1215,7 @@ async def upload_creative(
             "cabinet_id": cabinet["id"],
             "vk_id": vk_id,
             "url": f"/auto_ads/video/{cabinet['id']}/{final_name}"
+            **({"thumb_url": thumb_url} if thumb_url else {})
         })
 
     return {
