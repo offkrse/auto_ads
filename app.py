@@ -1,8 +1,9 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, APIRouter
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
-from urllib.parse import quote
+import hmac, hashlib
+from urllib.parse import quote, parse_qsl
 from pathlib import Path
 from io import BytesIO
 import requests
@@ -45,10 +46,43 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 from dotenv import load_dotenv
 load_dotenv("/opt/auto_ads/.env")
 
-
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 # -------------------------------------
 #   HELPERS
 # -------------------------------------
+def check_telegram_init_data(init_data: str) -> dict:
+    """
+    Возвращает dict с данными, если подпись валидна. Иначе бросает HTTPException(401).
+    """
+    if not init_data or not BOT_TOKEN:
+        raise HTTPException(401, "Missing Telegram auth")
+
+    # Раскладываем initData в пары
+    data = dict(parse_qsl(init_data, keep_blank_values=True))
+    hash_recv = data.pop("hash", None)
+    if not hash_recv:
+        raise HTTPException(401, "Bad Telegram auth")
+
+    # Строим data_check_string
+    pairs = [f"{k}={v}" for k, v in sorted(data.items())]
+    data_check_string = "\n".join(pairs)
+
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+    hash_calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(hash_calc, hash_recv):
+        raise HTTPException(401, "Invalid Telegram signature")
+
+    # Можно ещё проверить свежесть auth_date (например ±1 день)
+    return data  # тут, например, есть user, auth_date и пр.
+
+def require_tg_user(init_data: str = Query(None), request: Request = None):
+    # можно разрешить init_data либо в query, либо в заголовке
+    if init_data is None:
+        init_data = request.headers.get("x-telegram-init", None)
+    data = check_telegram_init_data(init_data)
+    return data  # вернёт dict с полями от Telegram
+
 def read_history_file(user_id: str, cabinet_id: str):
   p = USERS_DIR / user_id / "created_company" / cabinet_id / "created.json"
   if not p.exists():
@@ -378,6 +412,8 @@ def creatives_path(user_id: str, cabinet_id: str) -> Path:
 def audiences_path(user_id: str, cabinet_id: str) -> Path:
     return USERS_DIR / user_id / "audiences" / cabinet_id / "audiences.json"
 
+# ----------------------------------- API --------------------------------------------
+secure = APIRouter(prefix="/auto_ads/api", dependencies=[Depends(require_tg_user)])
 # -------------------------------------
 #   HISTORY
 # -------------------------------------
