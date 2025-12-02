@@ -16,10 +16,11 @@ import uvicorn
 import os
 import fcntl
 import errno
+import uuid
 
 app = FastAPI()
 
-VersionApp = "0.6"
+VersionApp = "0.61"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -453,7 +454,7 @@ async def save_preset(payload: dict):
 
     # создаём новый id
     if not preset_id:
-        preset_id = f"preset_{len(os.listdir(USERS_DIR / user_id / 'presets' / cabinet_id)) + 1}"
+        preset_id = f"preset_{uuid.uuid4().hex[:8]}"
 
     # файл пресета
     fpath = preset_path(user_id, cabinet_id, preset_id)
