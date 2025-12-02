@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.61"
+VersionApp = "0.62"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -58,6 +58,35 @@ def _safe_unlink(p: Path):
             p.unlink()
     except Exception as e:
         log_error(f"safe_unlink failed for {p}: {repr(e)}")
+
+def next_display_name(storage: Path, original: str) -> str:
+    """
+    Возвращает имя для отображения (с автонумерацией " (2)", " (3)", ...)
+    на основании файлов, уже лежащих в storage. Смотрим на оригинальные
+    имена (часть после первого "vk_id_"), чтобы избежать дублей в UI.
+    """
+    base, ext = os.path.splitext(original)
+    # Собираем все использованные display-имена в этой папке
+    used: set[str] = set()
+    for f in storage.glob("*"):
+        if not f.is_file():
+            continue
+        name = f.name
+        # У нас файлы имеют вид "<vkid>_Оригинал.ext" или "<vkid>_Оригинал (n).ext"
+        if "_" in name:
+            disp = name.split("_", 1)[1]
+            used.add(disp)
+    # Если такого имени ещё нет — возвращаем как есть
+    candidate = f"{base}{ext}"
+    if candidate not in used:
+        return candidate
+    # Иначе подбираем с суффиксом (2), (3), ...
+    n = 2
+    while True:
+        candidate = f"{base} ({n}){ext}"
+        if candidate not in used:
+            return candidate
+        n += 1
 
 def check_telegram_init_data(init_data: str) -> dict:
     """
@@ -1303,11 +1332,21 @@ async def upload_creative(
                         log_error(f"ffmpeg failed for {final_path}: {proc.stderr[:400]}")
                 except Exception as e:
                     log_error(f"thumb exception for {final_path}: {repr(e)}")
-
+                    
+            storage = cabinet_storage(cabinet["id"])
+            
+            # подбираем отображаемое имя (для UI) с учётом уже лежащих файлов
+            display_name = next_display_name(storage, file.filename)
+            
+            final_name = f"{vk_id}_{display_name}"  # <- сохраняем с display-именем после vk_id
+            final_path = storage / final_name
+            shutil.copy(tmp_path, final_path)
+            
             results.append({
                 "cabinet_id": cabinet["id"],
                 "vk_id": vk_id,
                 "url": f"/auto_ads/video/{cabinet['id']}/{final_name}",
+                "display_name": display_name,
                 **({"thumb_url": thumb_url} if thumb_url else {}),
             })
 
