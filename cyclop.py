@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.96 unstable"
+VersionCyclop = "0.97 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -158,6 +158,29 @@ def render_name_tokens(
     return s.strip()
 
 # ============================ Утилиты ============================
+def _dump_vk_validation(err_json: Dict[str, Any]) -> None:
+    try:
+        e = (err_json or {}).get("error") or {}
+        fields = e.get("fields") or {}
+        camps = (fields.get("campaigns") or {}).get("items") or []
+        for ci, camp in enumerate(camps, start=1):
+            cb = (camp.get("fields") or {}).get("banners") or {}
+            b_items = cb.get("items") or []
+            for bi, b in enumerate(b_items, start=1):
+                bf = (b.get("fields") or {})
+                # Важнейшие места: content/textblocks/targetings
+                for key in ("content", "textblocks", "targetings", "name"):
+                    if key in bf:
+                        node = bf.get(key)
+                        log.error("VALIDATION: campaign[%d].banner[%d].%s -> %s",
+                                  ci, bi, key, json.dumps(node, ensure_ascii=False))
+                # Общий код/сообщение баннера
+                if b.get("code") or b.get("message"):
+                    log.error("VALIDATION: campaign[%d].banner[%d] code=%s msg=%s",
+                              ci, bi, b.get("code"), b.get("message"))
+    except Exception as ex:
+        log.error("VALIDATION: dump failed: %s", ex)
+
 def compute_day_number(now_ref: datetime) -> int:
     """
     {день} = BASE_NUMBER + (сегодня - BASE_DATE).days
@@ -752,11 +775,13 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             resp = with_retries("POST", endpoint, tokens, data=body_bytes)
             results.append({"request": payload_try, "response": resp})
             log.info("POST OK (%d/%d).", i, repeats)
+        except RuntimeError as e:
+            msg = str(e)
             try:
-                log.debug("VK response:\n%s", json.dumps(resp, ensure_ascii=False, indent=2))
+                err_json = json.loads(msg.split(":", 1)[1].strip())
+                _dump_vk_validation(err_json)
             except Exception:
-                log.debug("VK response (raw): %s", str(resp)[:800])
-        except Exception as e:
+                pass
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                                "Ошибка создания кампании в VK Ads", repr(e))
             raise
