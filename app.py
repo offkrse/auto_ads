@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.62"
+VersionApp = "0.63"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -471,6 +471,7 @@ def history_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
 # -------------------------------------
 @secure_api.post("/preset/save")
 async def save_preset(payload: dict):
+    fast_preset_flag = "true" if bool(preset.get("fastPreset")) else "false"
     user_id = payload.get("userId")
     cabinet_id = payload.get("cabinetId")
     preset = payload.get("preset")
@@ -536,6 +537,7 @@ async def save_preset(payload: dict):
         "date_time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "count_repeats": count_repeats,
         "trigger_time": trigger_time,
+        "fast_preset": fast_preset_flag,
         "status": "active"
     }
     
