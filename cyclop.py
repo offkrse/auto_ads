@@ -425,7 +425,19 @@ def compute_day_number(now_ref: datetime) -> int:
     # now_ref уже приходит как now_local
     adjusted = now_ref + timedelta(hours=SERVER_SHIFT_HOURS)
     return BASE_NUMBER + (adjusted.date() - BASE_DATE.date()).days
-
+    
+def expand_abstract_names(abs_names: List[str], day_number: int) -> List[str]:
+    """Возвращает человеко-читаемые названия аудиторий из abstractAudiences,
+    подставляя {день} -> day_number. Без запросов к API.
+    """
+    out: List[str] = []
+    for raw in abs_names or []:
+        name = str(raw).replace("{день}", str(day_number))
+        if name:
+            out.append(name)
+    # уникализируем, сохраняя порядок
+    return list(dict.fromkeys(out))
+    
 def resolve_abstract_audiences(tokens: List[str], names: List[str], day_number: int) -> List[int]:
     """
     Для каждого имени в names подставляем {день} -> day_number,
