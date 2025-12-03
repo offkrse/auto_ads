@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.99 unstable"
+VersionCyclop = "1.0 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -753,41 +753,60 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
 
 # ============================ Баннер (строго 2 креатива) ============================
 
-def make_banner_for_ad(company_name: str, ad_object_id: int, ad: Dict[str, Any],
-                       idx: int, advertiser_info: str, icon_id: Optional[int],
-                       banner_name: str, cta_text: str) -> Dict[str, Any]:
+def pick_creative(ad: Dict[str, Any]) -> Tuple[str, int]:
     """
-    Медиа:
-      - icon_256x256.id  ← icon_id
-      - video_portrait_9_16_30s.id ← ТОЛЬКО из ad.videoIds[0]
-    Имя объявления и кнопка приходят параметрами (уже отрендерены).
+    Возвращает (media_kind, media_id).
+    Приоритет: если есть imageIds → ('image_600x600', image_id)
+               иначе если есть videoIds → ('video_portrait_9_16_30s', video_id)
+               иначе ошибка.
+    Используется в Обычном режиме (один баннер на группу).
+    """
+    imgs = ad.get("imageIds") or []
+    vids = ad.get("videoIds") or []
+    if isinstance(imgs, list) and imgs:
+        try:
+            return "image_600x600", int(imgs[0])
+        except Exception:
+            raise ValueError(f"imageIds[0] не число: {imgs[0]!r}")
+    if isinstance(vids, list) and vids:
+        try:
+            return "video_portrait_9_16_30s", int(vids[0])
+        except Exception:
+            raise ValueError(f"videoIds[0] не число: {vids[0]!r}")
+    raise ValueError("Нет подходящего креатива: пустые imageIds и videoIds")
+
+def make_banner_for_creative(ad_object_id: int,
+                             ad: Dict[str, Any],
+                             *,
+                             idx: int,
+                             advertiser_info: str,
+                             icon_id: int,
+                             banner_name: str,
+                             cta_text: str,
+                             media_kind: str,
+                             media_id: int) -> Dict[str, Any]:
+    """
+    Собирает баннер с переданным media_kind ('image_600x600' или 'video_portrait_9_16_30s')
+    и media_id. Остальные поля — как раньше.
     """
     title = (ad.get("title") or "").strip()
     short = (ad.get("shortDescription") or "").strip()
-
-    vids = ad.get("videoIds")
-    if not isinstance(vids, list) or not vids:
-        raise ValueError(f"У объявления ads[{idx-1}] отсутствует videoIds[0].")
-    try:
-        video_id = int(vids[0])
-    except Exception:
-        raise ValueError(f"У объявления ads[{idx-1}] videoIds[0] не число: {vids[0]!r}")
 
     if not advertiser_info:
         raise ValueError("Отсутствует advertiserInfo (about_company_115).")
     if not icon_id:
         raise ValueError("Отсутствует logoId (icon_256x256.id).")
 
-    log.info("Banner #%d: icon_id=%s, video_id=%s, name='%s', cta='%s'",
-             idx, int(icon_id), video_id, banner_name, cta_text)
+    content = {"icon_256x256": {"id": int(icon_id)}}
+    content[media_kind] = {"id": int(media_id)}
+
+    log.info("Banner #%d: icon_id=%s, %s=%s, name='%s', cta='%s'",
+             idx, int(icon_id), media_kind, media_id, banner_name, cta_text)
 
     return {
         "name": banner_name,
         "urls": {"primary": {"id": ad_object_id}},
-        "content": {
-            "icon_256x256": {"id": int(icon_id)},
-            "video_portrait_9_16_30s": {"id": video_id},
-        },
+        "content": content,
         "textblocks": {
             "about_company_115": {"text": advertiser_info, "title": ""},
             "cta_community_vk": {"text": (cta_text or "visitSite"), "title": ""},
@@ -816,7 +835,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     ad_groups_payload = []
 
     for g_idx, g in enumerate(groups, start=1):
-        group_name = g.get("groupName") or f"Группа {g_idx}"
+        group_name_tpl = (g.get("groupName") or f"Группа {g_idx}").strip()
         age_str = g.get("age", "")
         gender_str = g.get("gender", "")
         group_name = render_name_tokens(
@@ -1024,10 +1043,13 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         cta_text = (ad.get("button") or "visitSite").strip()
 
         try:
-            banner = make_banner_for_ad(
-                (company.get("companyName") or ""),  # не влияет на текст
-                ad_object_id, ad, gi + 1, adv_info, int(icon_id),
-                banner_name=banner_name, cta_text=cta_text
+            media_kind, media_id = pick_creative(ad)
+            
+            banner = make_banner_for_creative(
+                ad_object_id, ad, idx=gi + 1,
+                advertiser_info=adv_info, icon_id=int(icon_id),
+                banner_name=banner_name, cta_text=cta_text,
+                media_kind=media_kind, media_id=media_id
             )
             banners_by_group.append(banner)
             log.info("Собран баннер #%d для группы '%s' (name='%s')",
@@ -1051,9 +1073,13 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         # sanity-лог
         for gi, g in enumerate(ad_groups, start=1):
             c = (g.get("banners") or [{}])[0].get("content") or {}
-            vid = ((c.get("video_portrait_9_16_30s") or {}).get("id"))
             ico = ((c.get("icon_256x256") or {}).get("id"))
-            log.info("Group %d will send icon_id=%s, video_id=%s", gi, ico, vid)
+            vid = ((c.get("video_portrait_9_16_30s") or {}).get("id"))
+            img = ((c.get("image_600x600") or {}).get("id"))
+            if img:
+                log.info("Group %d will send icon_id=%s, image_id=%s", gi, ico, img)
+            else:
+                log.info("Group %d will send icon_id=%s, video_id=%s", gi, ico, vid)
 
         # DEBUG: сохранить payload (если включено)
         save_debug_payload(user_id, cabinet_id, f"ad_plan_{i}", payload_try)
@@ -1107,7 +1133,243 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     write_result_success(user_id, cabinet_id, preset_id, preset_name, trigger_time, id_company)
     return results
 
+# ============================ FAST ПЛАН ============================
+def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
+                        user_id: str, cabinet_id: str,
+                        preset_id: str, preset_name: str, trigger_time: str) -> List[Dict[str, Any]]:
+    """
+    FAST: на каждый контейнер → отдельная группа; в каждой группе создаём баннер
+    под КАЖДЫЙ креатив из ads[*].videoIds и ads[*].imageIds.
+    Если контейнеров нет — используем аудитории самой группы.
+    """
+    company = preset["company"]
+    url = company.get("url")
+    if not url:
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "Отсутствует URL компании (company.url)", "Missing company.url")
+        raise RuntimeError("Missing company.url")
 
+    company_adv = (company.get("advertiserInfo") or "").strip()
+    company_logo = company.get("logoId")
+    objective = company.get("targetAction", "socialengagement")
+
+    try:
+        ad_object_id = resolve_url_id(url, tokens)
+    except Exception as e:
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "Не удалось получить ad_object_id по URL", repr(e))
+        raise
+
+    preset_mut = json.loads(json.dumps(preset, ensure_ascii=False))
+    groups = preset_mut.get("groups", []) or []
+    ads = preset_mut.get("ads", []) or []
+    if not groups:
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "В пресете отсутствуют группы", "groups is empty")
+        raise RuntimeError("groups is empty")
+    if not ads:
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "В пресете отсутствуют объявления", "ads is empty")
+        raise RuntimeError("ads is empty")
+
+    today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
+
+    base_payload = build_ad_plan_payload(preset_mut, ad_object_id, 1)
+    payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
+    payload_try["ad_groups"] = []  # перезапишем полностью
+
+    pkg_id = package_id_for_objective(objective)
+    pads_vals = PADS_FOR_PACKAGE.get(pkg_id)
+
+    # по каждой группе fast-пресета
+    for g_idx, g in enumerate(groups, start=1):
+        group_tpl = (g.get("groupName") or f"Группа {g_idx}").strip()
+        regions = as_int_list(g.get("regions"))
+        genders = split_gender(g.get("gender", ""))
+        age_str = g.get("age", "")
+        age_list = build_age_list(age_str)
+
+        base_segments = as_int_list(g.get("audienceIds"))
+        base_abstract = g.get("abstractAudiences") or []
+        containers = g.get("containers") or []
+        group_aud_names = g.get("audienceNames") or []
+
+        # если контейнеров нет — один виртуальный контейнер из самой группы
+        if not containers:
+            containers = [{
+                "id": "virt",
+                "name": "Контейнер",
+                "audienceIds": base_segments,
+                "audienceNames": group_aud_names,
+                "abstractAudiences": base_abstract,
+            }]
+
+        # каждый контейнер → отдельная группа
+        for ci, cont in enumerate(containers, start=1):
+            seg_ids = as_int_list(base_segments) + as_int_list(cont.get("audienceIds"))
+            abs_names = (base_abstract or []) + (cont.get("abstractAudiences") or [])
+            if abs_names:
+                try:
+                    day_number = compute_day_number(datetime.now(LOCAL_TZ))
+                    seg_ids += resolve_abstract_audiences(tokens, abs_names, day_number)
+                except Exception as e:
+                    log.warning("FAST: resolve_abstract_audiences failed: %s", e)
+            seg_ids = list(dict.fromkeys(int(x) for x in seg_ids))
+
+            aud_names = (group_aud_names or []) + (cont.get("audienceNames") or [])
+            g_name = render_with_tokens(
+                group_tpl, today_date=today, objective=objective,
+                age=age_str, gender=",".join(genders) if genders else "",
+                n=len(payload_try["ad_groups"]) + 1, n_g=len(payload_try["ad_groups"]) + 1,
+                audience_names=aud_names,
+                company_src=(company.get("companyName") or ""),
+                group_src=group_tpl, banner_src=""
+            )
+
+            targetings: Dict[str, Any] = {"geo": {"regions": regions}}
+            if genders:
+                targetings["sex"] = genders
+            if seg_ids:
+                targetings["segments"] = seg_ids
+            if age_list:
+                targetings["age"] = {"age_list": age_list}
+            if pads_vals:
+                targetings["pads"] = pads_vals
+
+            budget_day = int(g.get("budget") or 0)
+            utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
+
+            # все креативы из всех ads[*]
+            banners: List[Dict[str, Any]] = []
+            local_counter = 0
+            for ai, ad in enumerate(ads):
+                adv_info = (ad.get("advertiserInfo") or company_adv or "").strip()
+                icon_id = ad.get("logoId") or company_logo
+                if not adv_info or not icon_id:
+                    write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                                       f"FAST: у ads[{ai}] нет advertiserInfo/logoId",
+                                       f"fast missing fields in ads[{ai}]")
+                    raise RuntimeError("fast missing fields")
+
+                # видео
+                for vid in (ad.get("videoIds") or []):
+                    try:
+                        media_id = int(vid)
+                    except Exception:
+                        continue
+                    local_counter += 1
+                    ad_tpl = (ad.get("adName") or f"Объявление {ai+1}").strip()
+                    banner_name = render_with_tokens(
+                        ad_tpl, today_date=today, objective=objective,
+                        age=age_str, gender=",".join(genders) if genders else "",
+                        n=local_counter, n_g=local_counter, creo="Видео",
+                        audience_names=aud_names,
+                        company_src=(company.get("companyName") or ""),
+                        group_src=g_name, banner_src=ad_tpl
+                    )
+                    banners.append(
+                        make_banner_for_creative(
+                            ad_object_id, ad, idx=local_counter,
+                            advertiser_info=adv_info, icon_id=int(icon_id),
+                            banner_name=banner_name, cta_text=(ad.get("button") or "visitSite").strip(),
+                            media_kind="video_portrait_9_16_30s", media_id=media_id
+                        )
+                    )
+
+                # картинки
+                for img in (ad.get("imageIds") or []):
+                    try:
+                        media_id = int(img)
+                    except Exception:
+                        continue
+                    local_counter += 1
+                    ad_tpl = (ad.get("adName") or f"Объявление {ai+1}").strip()
+                    banner_name = render_with_tokens(
+                        ad_tpl, today_date=today, objective=objective,
+                        age=age_str, gender=",".join(genders) if genders else "",
+                        n=local_counter, n_g=local_counter, creo="Статика",
+                        audience_names=aud_names,
+                        company_src=(company.get("companyName") or ""),
+                        group_src=g_name, banner_src=ad_tpl
+                    )
+                    banners.append(
+                        make_banner_for_creative(
+                            ad_object_id, ad, idx=local_counter,
+                            advertiser_info=adv_info, icon_id=int(icon_id),
+                            banner_name=banner_name, cta_text=(ad.get("button") or "visitSite").strip(),
+                            media_kind="image_600x600", media_id=media_id
+                        )
+                    )
+
+            if not banners:
+                write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                                   "FAST: не собран ни один баннер (нет креативов)", "fast no creatives")
+                raise RuntimeError("fast no creatives")
+
+            payload_try["ad_groups"].append({
+                "name": g_name,
+                "targetings": targetings,
+                "max_price": 0,
+                "autobidding_mode": "max_goals",
+                "budget_limit": None,
+                "budget_limit_day": budget_day,
+                "date_start": today.isoformat(),
+                "date_end": None,
+                "age_restrictions": "18+",
+                "package_id": pkg_id,
+                "utm": utm,
+                "banners": banners,
+            })
+
+    results = []
+    endpoint = f"{API_BASE}/api/v2/ad_plans.json"
+    for i in range(1, repeats + 1):
+        save_debug_payload(user_id, cabinet_id, f"ad_plan_fast_{i}", payload_try)
+        if DEBUG_DRY_RUN:
+            log.warning("[DRY RUN] Skipping POST /api/v2/ad_plans.json (no request sent).")
+            results.append({"request": payload_try, "response": {"response": {"campaigns": []}}})
+            continue
+
+        body_bytes = json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
+        log.info(
+            "FAST POST (%d/%d): groups=%d, total_banners=%d",
+            i, repeats,
+            len(payload_try.get("ad_groups", [])),
+            sum(len(g.get("banners", [])) for g in payload_try.get("ad_groups", []))
+        )
+
+        try:
+            resp = with_retries("POST", endpoint, tokens, data=body_bytes)
+            results.append({"request": payload_try, "response": resp})
+            log.info("FAST POST OK (%d/%d).", i, repeats)
+        except ApiHTTPError as e:
+            err_path = save_text_blob(user_id, cabinet_id, "vk_error_ad_plan_post_fast", e.body)
+            log.error("FAST VK HTTP error %s on %s. Full body saved to: %s (len=%d)",
+                      e.status, e.url, err_path, len(e.body or ""))
+            try:
+                err_json = json.loads(e.body)
+                _dump_vk_validation(err_json)
+            except Exception as ex:
+                log.error("FAST VALIDATION: non-JSON or parse failed: %s", ex)
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "Ошибка создания кампании (FAST)", f"HTTP {e.status} {e.url}")
+            raise
+
+    try:
+        all_ids: List[int] = []
+        for r in results:
+            resp = r.get("response") or {}
+            ids = extract_campaign_ids_from_resp(resp)
+            if ids:
+                all_ids.extend(ids)
+        id_company = list(dict.fromkeys(all_ids))
+    except Exception as e:
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "Не удалось распарсить ответ VK Ads (FAST)", repr(e))
+        raise
+
+    write_result_success(user_id, cabinet_id, preset_id, preset_name, trigger_time, id_company)
+    return results
 # ============================ Основной цикл ============================
 
 def process_queue_once() -> None:
@@ -1147,6 +1409,7 @@ def process_queue_once() -> None:
             tokens = item.get("tokens") or []      # имена VK_TOKEN_* или сырые токены
             trigger_time = item.get("trigger_time") or item.get("time") or ""
             count_repeats = int(item.get("count_repeats") or 1)
+            fast_flag = str(item.get("fast_preset", "")).strip().lower() == "true"
 
             match, info = check_trigger(trigger_time, now_local)
             if not match:
@@ -1169,10 +1432,16 @@ def process_queue_once() -> None:
             log.info("Processing %s/%s preset=%s repeats=%s", user_id, cabinet_id, preset_id, count_repeats)
 
             try:
-                _ = create_ad_plan(
-                    preset, tokens, count_repeats, user_id, cabinet_id,
-                    preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time
-                )
+                if fast_flag:
+                    _ = create_ad_plan_fast(
+                        preset, tokens, count_repeats, user_id, cabinet_id,
+                        preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time
+                    )
+                else:
+                    _ = create_ad_plan(
+                        preset, tokens, count_repeats, user_id, cabinet_id,
+                        preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time
+                    )
             except Exception:
                 # ошибка уже записана write_result_error внутри create_ad_plan
                 continue
