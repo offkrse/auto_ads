@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.98 unstable"
+VersionCyclop = "0.99 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -92,6 +92,7 @@ PADS_FOR_PACKAGE: Dict[int, List[int]] = {
 }
 
 # ======= ШАБЛОНЫ ДЛЯ НАЗВАНИЙ =======
+AUD_TOKEN_RE = re.compile(r"\{\%([A-Z]+)((?:-[A-Z]+(?:\([^\)]*\))?)*)\%\}")
 
 TARGET_CODES = {
     "socialengagement": ("СБ", "СообщениеБот"),
@@ -112,6 +113,222 @@ def _gender_code(gender: str) -> str:
     if g == "female":
         return "Ж"
     return ""
+
+def _split_filter_spec(spec: str) -> List[Tuple[str, Optional[str]]]:
+    # spec вроде "-CUT(2,10)-WS-IX(1)"; вернём [("CUT","2,10"),("WS",None),("IX","1")]
+    out = []
+    if not spec:
+        return out
+    parts = [p for p in spec.split("-") if p]
+    for p in parts:
+        if "(" in p and p.endswith(")"):
+            name, args = p.split("(", 1)
+            out.append((name.upper(), args[:-1]))
+        else:
+            out.append((p.upper(), None))
+    return out
+
+def _cut_1based(s: str, args: Optional[str]) -> str:
+    if not s:
+        return s
+    if not args:
+        return s
+    try:
+        if "," in args:
+            i, j = args.split(",", 1)
+            i = max(1, int(i.strip()))
+            j = max(1, int(j.strip()))
+            if i > j:
+                i, j = j, i
+            # 1-based inclusive → Python slice
+            return s[i-1:j]
+        else:
+            n = max(0, int(args.strip()))
+            return s[:n]
+    except Exception:
+        return s
+
+def _apply_string_filters(s: str, filters: List[Tuple[str, Optional[str]]], *, wreg_words: Optional[List[str]] = None) -> str:
+    out = s or ""
+    for name, arg in filters:
+        if name == "CUT":
+            out = _cut_1based(out, arg)
+        elif name == "WS":
+            out = out.replace(" ", "")
+        elif name == "WREG":
+            out = _clean_wreg(out, wreg_words=wreg_words)
+        # игнор остальных для строк
+    return out.strip()
+
+def _apply_list_filters(items: List[str], filters: List[Tuple[str, Optional[str]]]) -> List[str]:
+    if not items:
+        return []
+    lst = [str(x or "") for x in items]
+
+    # Прогоним CUT/WS ПОЭЛЕМЕНТНО (до IX)
+    pre: List[str] = []
+    for x in lst:
+        x2 = x
+        for name, arg in filters:
+            if name == "CUT":
+                x2 = _cut_1based(x2, arg)
+            elif name == "WS":
+                x2 = x2.replace(" ", "")
+        pre.append(x2)
+
+    # IX — компактируем «БАЗА + _число + (скобки)»
+    do_ix = any(name == "IX" for name, _ in filters)
+    if not do_ix:
+        return pre
+
+    # парсим IX(...) — пока значение (уровень) не используем, просто факт включения
+    # сгруппируем по (base, paren_payload)
+    pat = re.compile(r"^(.*?)(?:_?(\d+))?(?:\s*\(([^\)]*)\))?$")
+    groups: Dict[str, Dict[str, Any]] = {}
+    # key_base → {"nums": set(), "parens": set(), "base_text": "...", "examples": [...]}
+    for x in pre:
+        m = pat.match(x)
+        if not m:
+            # не распознали — оставим как есть отдельной группой
+            k = ("__raw__", x)
+            groups.setdefault(k, {"raw": []})["raw"].append(x)
+            continue
+        base = (m.group(1) or "").strip()
+        num = m.group(2)
+        par = (m.group(3) or "").strip()
+        key = base  # группируем по «чистому» base
+        g = groups.setdefault(key, {"nums": [], "parens": [], "base": base, "raw": []})
+        if num and num.isdigit():
+            if num not in g["nums"]:
+                g["nums"].append(num)
+        else:
+            # нет номера — сохраняем «как есть» в raw для этой базы
+            g["raw"].append(x)
+        if par:
+            if par not in g["parens"]:
+                g["parens"].append(par)
+
+    # собираем
+    out: List[str] = []
+    for key, g in groups.items():
+        if key == ("__raw__",):
+            out.extend(g["raw"])
+            continue
+        base = g.get("base", "")
+        nums = g.get("nums", [])
+        parens = g.get("parens", [])
+        raws = g.get("raw", [])
+
+        if nums:
+            name = f"{base}{' ' if base and base[-1].isalnum() else ''}{','.join(nums)}"
+        else:
+            name = base.strip()
+        if parens:
+            name = f"{name} ({','.join(parens)})" if name else f"({','.join(parens)})"
+        # добавим «сырые» элементы этой базы (если были без номера)
+        acc = [name] if name else []
+        acc.extend(raws)
+        out.extend([x for x in acc if x])
+
+    return out
+
+def _clean_wreg(s: str, *, wreg_words: Optional[List[str]] = None) -> str:
+    """
+    Убираем «регулярные» служебные части:
+    - короткие/длинные TARGET-коды в начале/конце;
+    - фигурные маркеры вида {...} (на случай если кто-то оставил);
+    - повисшие разделители ("-", "—", "_").
+    Можно расширять через wreg_words — слова, которые надо вырезать.
+    """
+    out = s or ""
+    # уберём развёрнутые маркеры {...}
+    out = re.sub(r"\{[^\}]*\}", " ", out)
+
+    # списки кодов
+    short_codes = [v[0] for v in TARGET_CODES.values()]  # СБ/ПС/ЛФ
+    long_codes  = [v[1] for v in TARGET_CODES.values()]  # СообщениеБот/...
+
+    tokens = set(short_codes + long_codes + (wreg_words or []))
+    # удалим токены как отдельные слова
+    for t in sorted(tokens, key=len, reverse=True):
+        out = re.sub(rf"(^|\s){re.escape(t)}(\s|$)", " ", out)
+
+    # подчистим разделители, двойные пробелы
+    out = re.sub(r"[\-–—_]{2,}", " ", out)
+    out = re.sub(r"(^[\-–—_]+|[\-–—_]+$)", " ", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    return out.strip()
+
+def render_with_tokens(template: str,
+                       *,
+                       today_date,
+                       objective: str = "",
+                       age: str = "",
+                       gender: str = "",
+                       n: Optional[int] = None,
+                       n_g: Optional[int] = None,
+                       # контекст для «сложных» токенов
+                       creo: str = "",
+                       audience_names: Optional[List[str]] = None,
+                       company_src: str = "",
+                       group_src: str = "",
+                       banner_src: str = "") -> str:
+    """
+    Универсальный рендер с поддержкой:
+      {%DAY%}, {%N%}, {%N-G%}, {%TARGET%}, {%TARGET-L%}, {%AGE%}, {%GENDER%},
+      {%CREO%},
+      {%AUD%}[ -CUT(...) -WS -IX(...) ],
+      {%COMPANY%}|{%GROUP%}|{%BANNER%} [ -CUT(...) -WS -WREG ].
+    """
+    if not template:
+        return ""
+
+    s = str(template)
+
+    # простые подстановки (как раньше)
+    s = s.replace("{%DAY%}", today_date.strftime("%d.%m"))
+    s = s.replace("{%TARGET-L%}", _target_code(objective, long=True))
+    s = s.replace("{%TARGET%}", _target_code(objective, long=False))
+    s = s.replace("{%AGE%}", str(age or ""))
+    s = s.replace("{%GENDER%}", _gender_code(gender))
+    if "{%N%}" in s:
+        s = s.replace("{%N%}", str(n if n is not None else 1))
+    if "{%N-G%}" in s:
+        s = s.replace("{%N-G%}", str(n_g if n_g is not None else 1))
+    if "{%CREO%}" in s:
+        s = s.replace("{%CREO%}", creo or "")
+
+    # сложные токены с фильтрами
+    def _repl(m: re.Match) -> str:
+        name = (m.group(1) or "").upper()
+        filt_raw = m.group(2) or ""
+        filters = _split_filter_spec(filt_raw)
+
+        if name == "AUD":
+            items = list(audience_names or [])
+            if not items:
+                return ""
+            items2 = _apply_list_filters(items, filters)
+            return ", ".join([x for x in items2 if x])
+
+        if name in ("COMPANY", "GROUP", "BANNER"):
+            base = company_src if name == "COMPANY" else group_src if name == "GROUP" else banner_src
+            # WREG должен знать слова для вырезания (например, текущие TARGET-коды)
+            wreg_words = [_target_code(objective, long=False), _target_code(objective, long=True)]
+            return _apply_string_filters(base, filters, wreg_words=wreg_words)
+
+        # оставим нерешённые токены как есть (чтобы не ломать)
+        return m.group(0)
+
+    # прогоняем замену несколько раз, пока есть токены с фильтрами
+    prev = None
+    for _ in range(3):
+        if s == prev:
+            break
+        prev = s
+        s = AUD_TOKEN_RE.sub(_repl, s)
+
+    return s.strip()
 
 def render_name_tokens(
     template: str,
@@ -599,7 +816,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     ad_groups_payload = []
 
     for g_idx, g in enumerate(groups, start=1):
-        group_name_tpl = (g.get("groupName") or f"Группа {g_idx}").strip()
+        group_name = g.get("groupName") or f"Группа {g_idx}"
         age_str = g.get("age", "")
         gender_str = g.get("gender", "")
         group_name = render_name_tokens(
@@ -727,16 +944,37 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                  ad.get("logoId") or company.get("logoId"),
                  ad.get("advertiserInfo") or company.get("advertiserInfo"))
 
-    # 3) Баннеры 1:1 с группами (каждой группе — свой баннер из ads[i])
+    # 3) Баннеры 1:1 с группами + рендер имён с плейсхолдерами
     banners_by_group: List[Dict[str, Any]] = []
-    # счётчики для {%N%} и {%N-G%}
-    company_counter = 0
-    group_counters = [0 for _ in groups]
-
+    company_counter = 0  # для {%N-G%} на баннерах
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
     objective = (preset.get("company") or {}).get("targetAction", "socialengagement")
 
+    # заранее подготовим «рендеренные» имена групп, чтобы {%N%}/{%N-G%} работали в GROUP
+    rendered_group_names: List[str] = []
+    for gi, g in enumerate(groups):
+        age_str = g.get("age", "")
+        gender_str = g.get("gender", "")
+        aud_names = g.get("audienceNames") or []
+        group_tpl = (g.get("groupName") or f"Группа {gi+1}").strip()
+
+        g_name = render_with_tokens(
+            group_tpl,
+            today_date=today,
+            objective=objective,
+            age=age_str,
+            gender=gender_str,
+            n=gi+1,           # номер группы в компании
+            n_g=gi+1,         # тот же номер, по требованию
+            audience_names=aud_names,
+            company_src=(company.get("companyName") or ""),
+            group_src=group_tpl,
+            banner_src=""     # на уровне группы баннера нет
+        )
+        rendered_group_names.append(g_name)
+
     for gi in range(len(groups)):
+        g = groups[gi]
         ad = ads[gi] if gi < len(ads) else None
         if not ad:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
@@ -744,7 +982,6 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                                f"ads[{gi}] is missing")
             raise RuntimeError(f"ads[{gi}] is missing")
 
-        # приоритет: ad.* → company.*
         adv_info = (ad.get("advertiserInfo") or company_adv or "").strip()
         icon_id = ad.get("logoId") or company_logo
         if not adv_info:
@@ -759,35 +996,42 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             raise RuntimeError("missing logoId")
 
         # счётчики
-        group_counters[gi] += 1
         company_counter += 1
 
-        g = groups[gi]
+        # контексты
         age_str = g.get("age", "")
         gender_str = g.get("gender", "")
+        aud_names = g.get("audienceNames") or []
+        group_tpl = (g.get("groupName") or f"Группа {gi+1}").strip()
+        ad_tpl = (ad.get("adName") or f"Объявление {gi+1}").strip()
+        creo = "Видео" if (ad.get("videoIds") or []) else "Статика"
 
-        # adName с плейсхолдерами
-        ad_name_tpl = (ad.get("adName") or f"Объявление {gi+1}").strip()
-        banner_name = render_name_tokens(
-            ad_name_tpl,
+        banner_name = render_with_tokens(
+            ad_tpl,
             today_date=today,
             objective=objective,
             age=age_str,
             gender=gender_str,
-            n=group_counters[gi],
-            n_g=company_counter
+            n=1 + 0,          # счётчик в рамках группы (если будет несколько баннеров в группе — увеличивай)
+            n_g=company_counter,
+            creo=creo,
+            audience_names=aud_names,
+            company_src=(company.get("companyName") or ""),
+            group_src=rendered_group_names[gi],
+            banner_src=ad_tpl
         )
 
         cta_text = (ad.get("button") or "visitSite").strip()
 
         try:
             banner = make_banner_for_ad(
-                company_name, ad_object_id, ad, gi + 1, adv_info, int(icon_id),
-                banner_name=banner_name,
-                cta_text=cta_text
+                (company.get("companyName") or ""),  # не влияет на текст
+                ad_object_id, ad, gi + 1, adv_info, int(icon_id),
+                banner_name=banner_name, cta_text=cta_text
             )
             banners_by_group.append(banner)
-            log.info("Собран баннер #%d для группы '%s' (name='%s')", gi+1, g.get("groupName"), banner_name)
+            log.info("Собран баннер #%d для группы '%s' (name='%s')",
+                     gi+1, rendered_group_names[gi], banner_name)
         except Exception as e:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                                "Ошибка сборки баннера", repr(e))
