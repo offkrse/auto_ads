@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.1 unstable"
+VersionCyclop = "1.11 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1353,7 +1353,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "age_restrictions": "18+",
                         "package_id": pkg_id,
                         "utm": utm,
-                        "banners": [banner],            # ← один баннер в группе
+                        "banners": [banner],
                     })
                     made_any = True
             
@@ -1361,21 +1361,6 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                                    "FAST: не собран ни один баннер (нет креативов)", "fast no creatives")
                 raise RuntimeError("fast no creatives")
-
-            payload_try["ad_groups"].append({
-                "name": g_name,
-                "targetings": targetings,
-                "max_price": 0,
-                "autobidding_mode": "max_goals",
-                "budget_limit": None,
-                "budget_limit_day": budget_day,
-                "date_start": today.isoformat(),
-                "date_end": None,
-                "age_restrictions": "18+",
-                "package_id": pkg_id,
-                "utm": utm,
-                "banners": banners,
-            })
 
     results = []
     endpoint = f"{API_BASE}/api/v2/ad_plans.json"
