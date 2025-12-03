@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.63"
+VersionApp = "0.64"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -469,9 +469,9 @@ def history_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
 # -------------------------------------
 #   PRESETS (each in separate file)
 # -------------------------------------
+@secure_auto.post("/preset/save")
 @secure_api.post("/preset/save")
 async def save_preset(payload: dict):
-    fast_preset_flag = "true" if bool(preset.get("fastPreset")) else "false"
     user_id = payload.get("userId")
     cabinet_id = payload.get("cabinetId")
     preset = payload.get("preset")
@@ -479,7 +479,8 @@ async def save_preset(payload: dict):
 
     if not user_id or not cabinet_id or not preset:
         raise HTTPException(400, "userId, cabinetId and preset required")
-
+        
+    fast_preset_flag = "true" if bool(preset.get("fastPreset")) else "false"
     data = ensure_user_structure(user_id)
 
     # создаём новый id
@@ -547,6 +548,7 @@ async def save_preset(payload: dict):
 
 
 @secure_api.get("/preset/list")
+@secure_auto.get("/preset/list")
 def list_presets(user_id: str, cabinet_id: str):
     ensure_user_structure(user_id)
     pdir = USERS_DIR / user_id / "presets" / cabinet_id
@@ -570,7 +572,7 @@ def list_presets(user_id: str, cabinet_id: str):
 
     return {"presets": presets}
 
-
+@secure_auto.delete("/preset/delete")
 @secure_api.delete("/preset/delete")
 def delete_preset(
     user_id: str = Query(...),
