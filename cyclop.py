@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "0.97 unstable"
+VersionCyclop = "0.98 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -158,6 +158,24 @@ def render_name_tokens(
     return s.strip()
 
 # ============================ Утилиты ============================
+class ApiHTTPError(Exception):
+    def __init__(self, status: int, body: str, headers: Dict[str, str], url: str):
+        super().__init__(f"HTTP {status} for {url}")
+        self.status = status
+        self.body = body
+        self.headers = dict(headers or {})
+        self.url = url
+
+def save_text_blob(user_id: str, cabinet_id: str, name: str, text: str) -> Path:
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    out_dir = USERS_ROOT / str(user_id) / "created_company" / str(cabinet_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{name}_{ts}.txt"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text if text is not None else "")
+    log.info("Saved text blob to %s (%d bytes)", path, len(text or ""))
+    return path
+
 def _dump_vk_validation(err_json: Dict[str, Any]) -> None:
     try:
         e = (err_json or {}).get("error") or {}
@@ -436,38 +454,74 @@ def with_retries(method: str, url: str, tokens: List[str], **kwargs) -> Dict[str
             base_sleep = RETRY_BACKOFF_BASE ** attempt
             jitter = random.uniform(0, 0.4 * base_sleep)
             sleep = min(60.0, base_sleep + jitter)
-            log.warning("RequestException (attempt %s/%s): %s; sleep=%.2fs", attempt, RETRY_MAX, e, sleep)
+            log.warning("RequestException (attempt %s/%s): %s; sleep=%.2fs",
+                        attempt, RETRY_MAX, e, sleep)
             time.sleep(sleep)
             continue
 
-        if resp.status_code == 429 or 500 <= resp.status_code < 600:
-            last_error = f"{resp.status_code}: {resp.text[:200]}"
+        # 429 — уважаем Retry-After
+        if resp.status_code == 429:
+            ra = resp.headers.get("Retry-After")
+            try:
+                sleep = float(ra)
+            except Exception:
+                base_sleep = RETRY_BACKOFF_BASE ** attempt
+                jitter = random.uniform(0, 0.4 * base_sleep)
+                sleep = min(60.0, base_sleep + jitter)
+            body = resp.text or ""
+            log.warning("HTTP 429 (attempt %s/%s). Retry-After=%.2fs | body_len=%d | body=%s",
+                        attempt, RETRY_MAX, sleep, len(body), body)
+            time.sleep(sleep)
+            last_error = f"429: {body}"
+            continue
+
+        # 5xx — бэкофф
+        if 500 <= resp.status_code < 600:
+            body = resp.text or ""
             base_sleep = RETRY_BACKOFF_BASE ** attempt
             jitter = random.uniform(0, 0.4 * base_sleep)
             sleep = min(60.0, base_sleep + jitter)
-            log.warning("API %s (attempt %s/%s). Backoff %.2fs. Body: %s", resp.status_code, attempt, RETRY_MAX, sleep, resp.text[:300])
+            log.warning("HTTP %s (attempt %s/%s). Backoff %.2fs | body_len=%d | body=%s",
+                        resp.status_code, attempt, RETRY_MAX, sleep, len(body), body)
             time.sleep(sleep)
+            last_error = f"{resp.status_code}: {body}"
             continue
 
-        if not (200 <= resp.status_code < 300):
-            last_error = f"{resp.status_code}: {resp.text[:500]}"
+        # 4xx — без обрезок; validation/bad_request — кидаем сразу
+        if 400 <= resp.status_code < 500:
+            body = resp.text or ""
+            # пробуем понять код ошибки
+            try:
+                err = resp.json()
+                code = str(((err or {}).get("error") or {}).get("code") or "")
+            except ValueError:
+                err = None
+                code = ""
+            log.warning("HTTP %s 4xx on %s | body_len=%d | body=%s",
+                        resp.status_code, url, len(body), body)
+            if code in {"validation_failed", "bad_request"}:
+                # НЕМЕДЛЕННО — никакого ретрая
+                raise ApiHTTPError(resp.status_code, body, resp.headers, url)
+            # иные 4xx — можно подретраить чуть-чуть
             base_sleep = RETRY_BACKOFF_BASE ** attempt
             jitter = random.uniform(0, 0.3 * base_sleep)
             sleep = min(30.0, base_sleep + jitter)
-            log.warning("Non-2xx %s (attempt %s/%s). Backoff %.2fs. Body: %s", resp.status_code, attempt, RETRY_MAX, sleep, resp.text[:300])
             time.sleep(sleep)
+            last_error = f"{resp.status_code}: {body}"
             continue
 
+        # 2xx — пробуем JSON; если не JSON — вернём raw
         try:
             j = resp.json()
             log.debug("API OK %s %s", resp.status_code, url)
             return j
         except ValueError:
             raw = {"raw": resp.text}
-            log.debug("API OK (raw response) %s %s", resp.status_code, url)
+            log.debug("API OK (raw) %s %s | body_len=%d", resp.status_code, url, len(resp.text or ""))
             return raw
 
-    raise RuntimeError(f"API failed after retries: {last_error}")
+    # исчерпали попытки — кидаем с последним телом (без обрезки)
+    raise ApiHTTPError(-1, last_error or "", {}, url)
 
 def resolve_url_id(url_str: str, tokens: List[str]) -> int:
     from urllib.parse import quote
@@ -775,15 +829,21 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             resp = with_retries("POST", endpoint, tokens, data=body_bytes)
             results.append({"request": payload_try, "response": resp})
             log.info("POST OK (%d/%d).", i, repeats)
-        except RuntimeError as e:
-            msg = str(e)
+        except ApiHTTPError as e:
+            # сохраняем полный ответ в файл
+            err_path = save_text_blob(user_id, cabinet_id, "vk_error_ad_plan_post", e.body)
+            log.error("VK HTTP error %s on %s. Full body saved to: %s (len=%d)",
+                      e.status, e.url, err_path, len(e.body or ""))
+        
+            # пробуем распарсить как JSON и красиво развернуть валидацию
             try:
-                err_json = json.loads(msg.split(":", 1)[1].strip())
+                err_json = json.loads(e.body)
                 _dump_vk_validation(err_json)
-            except Exception:
-                pass
+            except Exception as ex:
+                log.error("VALIDATION: non-JSON or parse failed: %s", ex)
+        
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                               "Ошибка создания кампании в VK Ads", repr(e))
+                               "Ошибка создания кампании в VK Ads", f"HTTP {e.status} {e.url}")
             raise
 
     # Собираем id кампаний со всех успешных ответов
