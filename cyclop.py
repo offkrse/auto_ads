@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.11 unstable"
+VersionCyclop = "1.12 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1290,9 +1290,17 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         banner_name=banner_name, cta_text=btn,
                         media_kind="video_portrait_9_16_30s", media_id=media_id
                     )
-            
+                    
+                    safe_g_name = (g_name or "").strip()
+                    if not safe_g_name:
+                        safe_g_name = f"Группа {len(payload_try['ad_groups']) + 1}"
+                    
+                    if not isinstance(banner, dict):
+                        log.error("FAST: banner is not a dict, skip group. ad_index=%s", ai)
+                        continue
+                        
                     payload_try["ad_groups"].append({
-                        "name": g_name,
+                        "name": safe_g_name,
                         "targetings": targetings,
                         "max_price": 0,
                         "autobidding_mode": "max_goals",
@@ -1340,9 +1348,17 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         banner_name=banner_name, cta_text=btn,
                         media_kind="image_600x600", media_id=media_id
                     )
-            
+                    
+                    safe_g_name = (g_name or "").strip()
+                    if not safe_g_name:
+                        safe_g_name = f"Группа {len(payload_try['ad_groups']) + 1}"
+                    
+                    if not isinstance(banner, dict):
+                        log.error("FAST: banner is not a dict, skip group. ad_index=%s", ai)
+                        continue
+                        
                     payload_try["ad_groups"].append({
-                        "name": g_name,
+                        "name": safe_g_name,
                         "targetings": targetings,
                         "max_price": 0,
                         "autobidding_mode": "max_goals",
