@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.0 unstable"
+VersionCyclop = "1.1 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1239,9 +1239,9 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
             budget_day = int(g.get("budget") or 0)
             utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
-            # все креативы из всех ads[*]
-            banners: List[Dict[str, Any]] = []
-            local_counter = 0
+            # КАЖДЫЙ креатив → отдельная группа с ОДНИМ баннером
+            made_any = False
+            
             for ai, ad in enumerate(ads):
                 adv_info = (ad.get("advertiserInfo") or company_adv or "").strip()
                 icon_id = ad.get("logoId") or company_logo
@@ -1250,58 +1250,114 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                                        f"FAST: у ads[{ai}] нет advertiserInfo/logoId",
                                        f"fast missing fields in ads[{ai}]")
                     raise RuntimeError("fast missing fields")
-
-                # видео
+            
+                ad_tpl = (ad.get("adName") or f"Объявление {ai+1}").strip()
+                btn = (ad.get("button") or "visitSite").strip()
+            
+                # --- сначала ВИДЕО ---
                 for vid in (ad.get("videoIds") or []):
                     try:
                         media_id = int(vid)
                     except Exception:
                         continue
-                    local_counter += 1
-                    ad_tpl = (ad.get("adName") or f"Объявление {ai+1}").strip()
+                    
+                    # глобальный порядковый номер группы (для {%N%}/{%N-G%} в GROUP)
+                    group_seq = len(payload_try["ad_groups"]) + 1
+            
+                    # имя группы (можно использовать {%AUD%}, {%N%}/{%N-G%}, и т.д.)
+                    g_name = render_with_tokens(
+                        group_tpl, today_date=today, objective=objective,
+                        age=age_str, gender=",".join(genders) if genders else "",
+                        n=group_seq, n_g=group_seq,                   # нумерация для группы
+                        audience_names=aud_names,
+                        company_src=(company.get("companyName") or ""),
+                        group_src=group_tpl, banner_src=""
+                    )
+            
+                    # имя баннера: в группе он один → {%N%}=1; глобально можно дать group_seq
                     banner_name = render_with_tokens(
                         ad_tpl, today_date=today, objective=objective,
                         age=age_str, gender=",".join(genders) if genders else "",
-                        n=local_counter, n_g=local_counter, creo="Видео",
+                        n=1, n_g=group_seq, creo="Видео",
                         audience_names=aud_names,
                         company_src=(company.get("companyName") or ""),
                         group_src=g_name, banner_src=ad_tpl
                     )
-                    banners.append(
-                        make_banner_for_creative(
-                            ad_object_id, ad, idx=local_counter,
-                            advertiser_info=adv_info, icon_id=int(icon_id),
-                            banner_name=banner_name, cta_text=(ad.get("button") or "visitSite").strip(),
-                            media_kind="video_portrait_9_16_30s", media_id=media_id
-                        )
+            
+                    banner = make_banner_for_creative(
+                        ad_object_id, ad, idx=1,
+                        advertiser_info=adv_info, icon_id=int(icon_id),
+                        banner_name=banner_name, cta_text=btn,
+                        media_kind="video_portrait_9_16_30s", media_id=media_id
                     )
-
-                # картинки
+            
+                    payload_try["ad_groups"].append({
+                        "name": g_name,
+                        "targetings": targetings,
+                        "max_price": 0,
+                        "autobidding_mode": "max_goals",
+                        "budget_limit": None,
+                        "budget_limit_day": budget_day,
+                        "date_start": today.isoformat(),
+                        "date_end": None,
+                        "age_restrictions": "18+",
+                        "package_id": pkg_id,
+                        "utm": utm,
+                        "banners": [banner],            # ← один баннер в группе
+                    })
+                    made_any = True
+            
+                # --- затем КАРТИНКИ ---
                 for img in (ad.get("imageIds") or []):
                     try:
                         media_id = int(img)
                     except Exception:
                         continue
-                    local_counter += 1
-                    ad_tpl = (ad.get("adName") or f"Объявление {ai+1}").strip()
+                    
+                    group_seq = len(payload_try["ad_groups"]) + 1
+            
+                    g_name = render_with_tokens(
+                        group_tpl, today_date=today, objective=objective,
+                        age=age_str, gender=",".join(genders) if genders else "",
+                        n=group_seq, n_g=group_seq,
+                        audience_names=aud_names,
+                        company_src=(company.get("companyName") or ""),
+                        group_src=group_tpl, banner_src=""
+                    )
+            
                     banner_name = render_with_tokens(
                         ad_tpl, today_date=today, objective=objective,
                         age=age_str, gender=",".join(genders) if genders else "",
-                        n=local_counter, n_g=local_counter, creo="Статика",
+                        n=1, n_g=group_seq, creo="Статика",
                         audience_names=aud_names,
                         company_src=(company.get("companyName") or ""),
                         group_src=g_name, banner_src=ad_tpl
                     )
-                    banners.append(
-                        make_banner_for_creative(
-                            ad_object_id, ad, idx=local_counter,
-                            advertiser_info=adv_info, icon_id=int(icon_id),
-                            banner_name=banner_name, cta_text=(ad.get("button") or "visitSite").strip(),
-                            media_kind="image_600x600", media_id=media_id
-                        )
+            
+                    banner = make_banner_for_creative(
+                        ad_object_id, ad, idx=1,
+                        advertiser_info=adv_info, icon_id=int(icon_id),
+                        banner_name=banner_name, cta_text=btn,
+                        media_kind="image_600x600", media_id=media_id
                     )
-
-            if not banners:
+            
+                    payload_try["ad_groups"].append({
+                        "name": g_name,
+                        "targetings": targetings,
+                        "max_price": 0,
+                        "autobidding_mode": "max_goals",
+                        "budget_limit": None,
+                        "budget_limit_day": budget_day,
+                        "date_start": today.isoformat(),
+                        "date_end": None,
+                        "age_restrictions": "18+",
+                        "package_id": pkg_id,
+                        "utm": utm,
+                        "banners": [banner],            # ← один баннер в группе
+                    })
+                    made_any = True
+            
+            if not made_any:
                 write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                                    "FAST: не собран ни один баннер (нет креативов)", "fast no creatives")
                 raise RuntimeError("fast no creatives")
