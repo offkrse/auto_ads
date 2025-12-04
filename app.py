@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.67"
+VersionApp = "0.68"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -740,12 +740,20 @@ async def creative_delete(payload: dict):
             file_path = storage / fname
             _safe_unlink(file_path)
             deleted.append(str(file_path))
-
-            # если это видео и превью генерировалось по паттерну "<final_name>.jpg" — тоже уберём
+        
+            base_no_ext, ext = os.path.splitext(fname)
+        
+            # 1) metadata sidecar
+            meta_path = storage / f"{base_no_ext}.json"
+            _safe_unlink(meta_path)
+        
+            # 2) thumbnails (видео)
+            # приоритет: если тип видео — удаляем возможные превью по нескольким паттернам
             if it_type == "video":
-                jpg1 = storage / (fname + ".jpg")
-                _safe_unlink(jpg1)
-                # иногда превью уже прислал фронт в thumbUrl, он выше добавлен
+                # a) <final_fullname>.jpg (если генерили как "<final_name>.jpg")
+                _safe_unlink(storage / (fname + ".jpg"))
+                # b) <final_stem>.jpg (если отрезали расширение исходника)
+                _safe_unlink(storage / f"{base_no_ext}.jpg")
 
         return {"status": "ok", "deleted": deleted}
     except HTTPException:
@@ -1317,11 +1325,16 @@ async def upload_creative(
 
             # кладём локальную копию под vk_id
             storage = cabinet_storage(cabinet["id"])
-            final_name = f"{vk_id}_{file.filename}"
+            
+            # подбираем отображаемое имя заранее
+            display_name = next_display_name(storage, file.filename)
+            final_name = f"{vk_id}_{display_name}"
             final_path = storage / final_name
+            
+            # копируем ОДИН раз
             shutil.copy(tmp_path, final_path)
-
-            # генерим превью для видео
+            
+            # генерим превью (только для видео) уже от конечного файла
             thumb_url = None
             if is_video:
                 try:
@@ -1346,15 +1359,6 @@ async def upload_creative(
                         log_error(f"ffmpeg failed for {final_path}: {proc.stderr[:400]}")
                 except Exception as e:
                     log_error(f"thumb exception for {final_path}: {repr(e)}")
-                    
-            storage = cabinet_storage(cabinet["id"])
-            
-            # подбираем отображаемое имя (для UI) с учётом уже лежащих файлов
-            display_name = next_display_name(storage, file.filename)
-            
-            final_name = f"{vk_id}_{display_name}"  # <- сохраняем с display-именем после vk_id
-            final_path = storage / final_name
-            shutil.copy(tmp_path, final_path)
 
             try:
                 base_no_ext, _ = os.path.splitext(final_name)
@@ -1373,7 +1377,7 @@ async def upload_creative(
                     "type": "image" if is_image else "video",
                 }
                 # атомарно, как и по проекту
-                atomic_write_json(meta_path, meta)
+                atomic_write_json(storage / f"{os.path.splitext(final_name)[0]}.json", meta)
             except Exception as e:
                 log_error(f"upload meta write failed for {final_path}: {repr(e)}")
             
