@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.14 unstable"
+VersionCyclop = "1.15 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -382,6 +382,21 @@ class ApiHTTPError(Exception):
         self.body = body
         self.headers = dict(headers or {})
         self.url = url
+
+def _default_patterns_for(media_kind: str) -> List[int]:
+    """
+    Возвращает список pattern id, из которых хотя бы один наверняка есть в большинстве пресетов пакета 3127.
+    Подбираем по типу креатива.
+    """
+    mk = (media_kind or "").lower()
+    # Квадратные изображения
+    if mk.startswith("image"):
+        return [530, 338, 339]   # 530 — 1:1 image; 338/339 — альтернативные квадратные слоты
+    # Вертикальное видео (9:16)
+    if "9_16" in mk or "portrait" in mk or "video" in mk:
+        return [527, 525, 486]   # 527/525 — верт. видео, 486 — родственный формат
+    # запасной вариант
+    return [530]
 
 def _swap_image_600_to_1080(payload: Dict[str, Any]) -> int:
     """
@@ -847,6 +862,8 @@ def make_banner_for_creative(ad_object_id: int,
 
     content = {"icon_256x256": {"id": int(icon_id)}}
     content[media_kind] = {"id": int(media_id)}
+                                 
+    patterns = _default_patterns_for(media_kind)
 
     log.info("Banner #%d: icon_id=%s, %s=%s, name='%s', cta='%s'",
              idx, int(icon_id), media_kind, media_id, banner_name, cta_text)
@@ -855,6 +872,7 @@ def make_banner_for_creative(ad_object_id: int,
         "name": banner_name,
         "urls": {"primary": {"id": ad_object_id}},
         "content": content,
+        "patterns": patterns,
         "textblocks": {
             "about_company_115": {"text": advertiser_info, "title": ""},
             "cta_community_vk": {"text": (cta_text or "visitSite"), "title": ""},
