@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.13 unstable"
+VersionCyclop = "1.14 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -383,6 +383,26 @@ class ApiHTTPError(Exception):
         self.headers = dict(headers or {})
         self.url = url
 
+def _swap_image_600_to_1080(payload: Dict[str, Any]) -> int:
+    """
+    Во всех баннерах заменяет content.image_600x600 -> content.image_1080x1080, id переносим.
+    Возвращает количество замен.
+    """
+    changed = 0
+    try:
+        for g in payload.get("ad_groups", []) or []:
+            for b in g.get("banners", []) or []:
+                content = (b.get("content") or {})
+                if "image_600x600" in content and isinstance(content["image_600x600"], dict):
+                    img_id = content["image_600x600"].get("id")
+                    if img_id:
+                        content.pop("image_600x600", None)
+                        content["image_1080x1080"] = {"id": int(img_id)}
+                        changed += 1
+    except Exception:
+        pass
+    return changed
+
 def save_text_blob(user_id: str, cabinet_id: str, name: str, text: str) -> Path:
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     out_dir = USERS_ROOT / str(user_id) / "created_company" / str(cabinet_id)
@@ -397,19 +417,23 @@ def _dump_vk_validation(err_json: Dict[str, Any]) -> None:
     try:
         e = (err_json or {}).get("error") or {}
         fields = e.get("fields") or {}
+        # campaigns → items (могут быть None)
         camps = (fields.get("campaigns") or {}).get("items") or []
         for ci, camp in enumerate(camps, start=1):
+            if not isinstance(camp, dict):
+                continue
             cb = (camp.get("fields") or {}).get("banners") or {}
             b_items = cb.get("items") or []
             for bi, b in enumerate(b_items, start=1):
+                if not isinstance(b, dict):
+                    log.error("VALIDATION: campaign[%d].banner[%d] is null/invalid", ci, bi)
+                    continue
                 bf = (b.get("fields") or {})
-                # Важнейшие места: content/textblocks/targetings
                 for key in ("content", "textblocks", "targetings", "name"):
                     if key in bf:
                         node = bf.get(key)
                         log.error("VALIDATION: campaign[%d].banner[%d].%s -> %s",
                                   ci, bi, key, json.dumps(node, ensure_ascii=False))
-                # Общий код/сообщение баннера
                 if b.get("code") or b.get("message"):
                     log.error("VALIDATION: campaign[%d].banner[%d] code=%s msg=%s",
                               ci, bi, b.get("code"), b.get("message"))
@@ -1446,11 +1470,51 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
             results.append({"request": payload_try, "response": resp})
             log.info("FAST POST OK (%d/%d).", i, repeats)
         except ApiHTTPError as e:
-            err_path = save_text_blob(user_id, cabinet_id, "vk_error_ad_plan_post_fast", e.body)
-            log.error("FAST VK HTTP error %s on %s. Full body saved to: %s (len=%d)",
-                      e.status, e.url, err_path, len(e.body or ""))
+            # пробуем понять — это именно bad_width на image_600x600?
+            body_text = e.body or ""
             try:
-                err_json = json.loads(e.body)
+                err_json = json.loads(body_text)
+            except Exception:
+                err_json = None
+
+            need_swap = False
+            if isinstance(err_json, dict):
+                # грубая проверка наличия подсказок про image_600x600/bad_width
+                txt = json.dumps(err_json, ensure_ascii=False)
+                need_swap = ("image_600x600" in txt) and ("bad_width" in txt)
+
+            if need_swap:
+                swaps = _swap_image_600_to_1080(payload_try)
+                if swaps > 0:
+                    save_debug_payload(user_id, cabinet_id, "ad_plan_fast_retry_1080", payload_try)
+                    log.warning("FAST: detected bad_width for image_600x600, swapped to image_1080x1080 in %d banner(s). Retrying once...", swaps)
+                    try:
+                        body_bytes_retry = json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
+                        resp2 = with_retries("POST", endpoint, tokens, data=body_bytes_retry)
+                        results.append({"request": payload_try, "response": resp2})
+                        log.info("FAST POST OK on retry with image_1080x1080.")
+                        continue  # к следующему repeats (если есть)
+                    except ApiHTTPError as e2:
+                        # провал ретрая — оформим стандартно
+                        err_path = save_text_blob(user_id, cabinet_id, "vk_error_ad_plan_post_fast_retry", e2.body)
+                        log.error("FAST retry failed: HTTP %s on %s. Saved to: %s (len=%d)",
+                                  e2.status, e2.url, err_path, len(e2.body or ""))
+                        try:
+                            err_json2 = json.loads(e2.body)
+                            _dump_vk_validation(err_json2)
+                        except Exception as ex2:
+                            log.error("FAST VALIDATION (retry): non-JSON or parse failed: %s", ex2)
+                        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                                           "Ошибка создания кампании (FAST, retry 1080)",
+                                           f"HTTP {e2.status} {e2.url}")
+                        raise
+
+            # стандартная обработка первоначальной ошибки
+            err_path = save_text_blob(user_id, cabinet_id, "vk_error_ad_plan_post_fast", body_text)
+            log.error("FAST VK HTTP error %s on %s. Full body saved to: %s (len=%d)",
+                      e.status, e.url, err_path, len(body_text))
+            try:
+                err_json = json.loads(body_text)
                 _dump_vk_validation(err_json)
             except Exception as ex:
                 log.error("FAST VALIDATION: non-JSON or parse failed: %s", ex)
