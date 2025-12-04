@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.66"
+VersionApp = "0.67"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1355,6 +1355,27 @@ async def upload_creative(
             final_name = f"{vk_id}_{display_name}"  # <- сохраняем с display-именем после vk_id
             final_path = storage / final_name
             shutil.copy(tmp_path, final_path)
+
+            try:
+                base_no_ext, _ = os.path.splitext(final_name)
+                meta_path = storage / f"{base_no_ext}.json"
+                meta = {
+                    "vk_response": resp_json,
+                    "cabinet_id": str(cabinet["id"]),
+                    "vk_id": vk_id,
+                    "display_name": display_name,
+                    "stored_file": f"/auto_ads/video/{cabinet['id']}/{final_name}",
+                    "thumb_url": thumb_url,
+                    "content_type": content_type or "",
+                    "width": width,
+                    "height": height,
+                    "uploaded_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "type": "image" if is_image else "video",
+                }
+                # атомарно, как и по проекту
+                atomic_write_json(meta_path, meta)
+            except Exception as e:
+                log_error(f"upload meta write failed for {final_path}: {repr(e)}")
             
             results.append({
                 "cabinet_id": cabinet["id"],
