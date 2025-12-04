@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.12 unstable"
+VersionCyclop = "1.13 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -437,7 +437,19 @@ def expand_abstract_names(abs_names: List[str], day_number: int) -> List[str]:
             out.append(name)
     # уникализируем, сохраняя порядок
     return list(dict.fromkeys(out))
-    
+
+def expand_abstract_names(abs_names: List[str], day_number: int) -> List[str]:
+    """Возвращает человеко-читаемые названия аудиторий из abstractAudiences,
+    подставляя {день} -> day_number. Без запросов к API.
+    """
+    out: List[str] = []
+    for raw in abs_names or []:
+        name = str(raw).replace("{день}", str(day_number))
+        if name:
+            out.append(name)
+    # уникализируем, сохраняя порядок
+    return list(dict.fromkeys(out))
+
 def resolve_abstract_audiences(tokens: List[str], names: List[str], day_number: int) -> List[int]:
     """
     Для каждого имени в names подставляем {день} -> day_number,
@@ -983,12 +995,21 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
     # заранее подготовим «рендеренные» имена групп, чтобы {%N%}/{%N-G%} работали в GROUP
     rendered_group_names: List[str] = []
+    day_number_for_names = compute_day_number(datetime.now(LOCAL_TZ))
     for gi, g in enumerate(groups):
         age_str = g.get("age", "")
         gender_str = g.get("gender", "")
-        aud_names = g.get("audienceNames") or []
         group_tpl = (g.get("groupName") or f"Группа {gi+1}").strip()
-
+    
+        # БАЗОВЫЕ списки
+        aud_names = list(g.get("audienceNames") or [])
+        aud_ids   = as_int_list(g.get("audienceIds"))
+        abs_names = list(g.get("abstractAudiences") or [])
+    
+        # ЕСЛИ и IDs и Names пустые → берём названия из abstractAudiences
+        if not aud_ids and not aud_names and abs_names:
+            aud_names = expand_abstract_names(abs_names, day_number_for_names)
+    
         g_name = render_with_tokens(
             group_tpl,
             today_date=today,
@@ -996,11 +1017,11 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             age=age_str,
             gender=gender_str,
             n=gi+1,           # номер группы в компании
-            n_g=gi+1,         # тот же номер, по требованию
-            audience_names=aud_names,
+            n_g=gi+1,         # тот же номер
+            audience_names=aud_names,               # <-- используем актуальный список имён
             company_src=(company.get("companyName") or ""),
             group_src=group_tpl,
-            banner_src=""     # на уровне группы баннера нет
+            banner_src=""
         )
         rendered_group_names.append(g_name)
 
@@ -1036,6 +1057,10 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         group_tpl = (g.get("groupName") or f"Группа {gi+1}").strip()
         ad_tpl = (ad.get("adName") or f"Объявление {gi+1}").strip()
         creo = "Видео" if (ad.get("videoIds") or []) else "Статика"
+        aud_ids   = as_int_list(g.get("audienceIds"))
+        abs_names = list(g.get("abstractAudiences") or [])
+        if not aud_ids and not aud_names and abs_names:
+            aud_names = expand_abstract_names(abs_names, day_number_for_names)
 
         banner_name = render_with_tokens(
             ad_tpl,
@@ -1228,7 +1253,16 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     log.warning("FAST: resolve_abstract_audiences failed: %s", e)
             seg_ids = list(dict.fromkeys(int(x) for x in seg_ids))
 
-            aud_names = (group_aud_names or []) + (cont.get("audienceNames") or [])
+            aud_names = list(group_aud_names or []) + list(cont.get("audienceNames") or [])
+            # ЕСЛИ нет ни audienceIds, ни audienceNames → берём NAMES из abstractAudiences
+            if not seg_ids and not aud_names and abs_names:
+                # используем тот же day_number, что и для сегментов (если он уже есть)
+                try:
+                    day_number_for_names = day_number
+                except NameError:
+                    day_number_for_names = compute_day_number(datetime.now(LOCAL_TZ))
+                aud_names = expand_abstract_names(abs_names, day_number_for_names)
+                
             g_name = render_with_tokens(
                 group_tpl, today_date=today, objective=objective,
                 age=age_str, gender=",".join(genders) if genders else "",
