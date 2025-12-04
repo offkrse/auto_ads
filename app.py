@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.65"
+VersionApp = "0.66"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -472,9 +472,10 @@ def history_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
 @secure_auto.post("/preset/save")
 @secure_api.post("/preset/save")
 async def save_preset(payload: dict):
+    preset = payload.get("preset")
+    fast_preset_flag = "true" if bool(preset.get("fastPreset")) else "false"
     user_id = payload.get("userId")
     cabinet_id = payload.get("cabinetId")
-    preset = payload.get("preset")
     preset_id = payload.get("presetId")
 
     if not user_id or not cabinet_id or not preset:
@@ -566,7 +567,15 @@ def list_presets(user_id: str, cabinet_id: str):
                 data["groups"] = []
             if "ads" not in data or not isinstance(data["ads"], list):
                 data["ads"] = []
-            presets.append({"preset_id": file.stem, "data": data})
+
+            mtime = file.stat().st_mtime
+            created_at = datetime.utcfromtimestamp(mtime).isoformat(timespec="seconds") + "Z"
+
+            presets.append({
+                "preset_id": file.stem,
+                "created_at": created_at,
+                "data": data
+            })
         except Exception as e:
             log_error(f"Skip invalid preset file: {file} | {repr(e)}")
 
