@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.64"
+VersionApp = "0.65"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -877,6 +877,7 @@ async def upload_logo(
         except Exception:
             pass
 
+@secure_auto.get("/logo/get")
 @secure_api.get("/logo/get")
 def get_logo(user_id: str, cabinet_id: str):
     try:
@@ -942,7 +943,7 @@ async def save_audiences(payload: dict):
 
     return {"status": "ok"}
 
-
+@secure_auto.get("/vk/audiences/fetch")
 @secure_api.get("/vk/audiences/fetch")
 def fetch_vk_audiences(user_id: str, cabinet_id: str):
     data = ensure_user_structure(user_id)
@@ -992,7 +993,7 @@ def fetch_vk_audiences(user_id: str, cabinet_id: str):
 
     return {"audiences": out}
 
-
+@secure_auto.get("/abstract_audiences/get")
 @secure_api.get("/abstract_audiences/get")
 def get_abstract_audiences(user_id: str, cabinet_id: str):
     """
@@ -1026,7 +1027,7 @@ def save_abstract_audiences(payload: dict):
         json.dump(items, fh, ensure_ascii=False, indent=2)
     return {"status": "ok"}
 
-
+@secure_auto.get("/audiences/get")
 @secure_api.get("/audiences/get")
 def get_audiences(user_id: str, cabinet_id: str):
     ensure_user_structure(user_id)
@@ -1150,7 +1151,7 @@ async def save_settings(payload: dict):
 
     return {"status": "ok"}
 
-
+@secure_auto.get("/settings/get")
 @secure_api.get("/settings/get")
 def get_settings(user_id: str):
     try:
@@ -1183,7 +1184,7 @@ def save_textsets(payload: dict):
         log_error(f"textsets/save[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
-
+@secure_auto.get("/textsets/get")
 @secure_api.get("/textsets/get")
 def get_textsets(user_id: str, cabinet_id: str):
     try:
