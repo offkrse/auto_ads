@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.16 unstable"
+VersionCyclop = "1.2 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -39,6 +39,7 @@ RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.7"))
 VK_HTTP_TIMEOUT = float(os.getenv("VK_HTTP_TIMEOUT", "60"))            # GET/прочее
 VK_HTTP_TIMEOUT_POST = float(os.getenv("VK_HTTP_TIMEOUT_POST", "150")) # POST
 
+CREO_STORAGE_ROOT = Path("/mnt/data/auto_ads_storage/video")
 # Если сервер в UTC — дефолт уже UTC
 LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "UTC"))
 UTC_TZ = tz.gettz("UTC")
@@ -383,20 +384,77 @@ class ApiHTTPError(Exception):
         self.headers = dict(headers or {})
         self.url = url
 
-def _default_patterns_for(media_kind: str) -> List[int]:
+def _find_creative_meta(cabinet_id: str, media_id: int) -> Optional[Dict[str, Any]]:
     """
-    Возвращает список pattern id, из которых хотя бы один наверняка есть в большинстве пресетов пакета 3127.
-    Подбираем по типу креатива.
+    Ищем файл вида:
+      /mnt/data/auto_ads_storage/video/<cabinet_id>/<media_id>_*.json
+    Возвращаем распарсенный JSON или None.
     """
-    mk = (media_kind or "").lower()
-    # Квадратные изображения
-    if mk.startswith("image"):
-        return [530, 338, 339]   # 530 — 1:1 image; 338/339 — альтернативные квадратные слоты
-    # Вертикальное видео (9:16)
-    if "9_16" in mk or "portrait" in mk or "video" in mk:
-        return [527, 525, 486]   # 527/525 — верт. видео, 486 — родственный формат
-    # запасной вариант
-    return [530]
+    base_dir = CREO_STORAGE_ROOT / str(cabinet_id)
+    if not base_dir.exists():
+        return None
+
+    prefix = f"{media_id}_"
+    try:
+        for p in base_dir.iterdir():
+            if not p.is_file():
+                continue
+            if not p.name.startswith(prefix):
+                continue
+            if p.suffix != ".json":
+                continue
+            try:
+                meta = load_json(p)
+                log.info("Loaded creative meta for id=%s from %s", media_id, p)
+                return meta
+            except Exception as e:
+                log.warning("Failed to read creative meta %s: %s", p, e)
+                return None
+    except Exception as e:
+        log.warning("Iterdir failed for %s: %s", base_dir, e)
+
+    return None
+
+
+def detect_image_media_kind(media_id: int, cabinet_id: Optional[str]) -> str:
+    """
+    По media_id и cabinet_id ищем JSON вида '92374059_6 (2).json'
+    и по полям width/height определяем ключ content:
+      image_<width>x<height>, например image_1080x1350.
+
+    Если не нашли/не смогли — возвращаем стандартный image_600x600.
+    """
+    if not cabinet_id:
+        return "image_600x600"
+
+    meta = _find_creative_meta(str(cabinet_id), media_id)
+    if not isinstance(meta, dict):
+        return "image_600x600"
+
+    width = meta.get("width")
+    height = meta.get("height")
+
+    # если вдруг наверху нет — пробуем брать из vk_response.variants.original
+    if width is None or height is None:
+        try:
+            orig = (meta.get("vk_response") or {}).get("variants", {}).get("original") or {}
+            width = width or orig.get("width")
+            height = height or orig.get("height")
+        except Exception:
+            pass
+
+    try:
+        width = int(width)
+        height = int(height)
+    except Exception:
+        return "image_600x600"
+
+    if width <= 0 or height <= 0:
+        return "image_600x600"
+
+    media_kind = f"image_{width}x{height}"
+    log.info("Detected media_kind=%s for media_id=%s, cabinet_id=%s", media_kind, media_id, cabinet_id)
+    return media_kind
 
 def _swap_image_600_to_1080(payload: Dict[str, Any]) -> int:
     """
@@ -816,26 +874,35 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
 
 # ============================ Баннер (строго 2 креатива) ============================
 
-def pick_creative(ad: Dict[str, Any]) -> Tuple[str, int]:
+def pick_creative(ad: Dict[str, Any], cabinet_id: Optional[str] = None) -> Tuple[str, int]:
     """
     Возвращает (media_kind, media_id).
-    Приоритет: если есть imageIds → ('image_600x600', image_id)
-               иначе если есть videoIds → ('video_portrait_9_16_30s', video_id)
-               иначе ошибка.
-    Используется в Обычном режиме (один баннер на группу).
+
+    Приоритет:
+      * если есть imageIds → ('image_<width>x<height>', image_id),
+        где размер читаем из /mnt/data/auto_ads_storage/video/<cabinet_id>/<id>_*.json;
+        если не нашли — fallback на 'image_600x600';
+      * иначе если есть videoIds → ('video_portrait_9_16_30s', video_id)
+      * иначе ошибка.
     """
     imgs = ad.get("imageIds") or []
     vids = ad.get("videoIds") or []
+
     if isinstance(imgs, list) and imgs:
         try:
-            return "image_600x600", int(imgs[0])
+            img_id = int(imgs[0])
         except Exception:
             raise ValueError(f"imageIds[0] не число: {imgs[0]!r}")
+
+        media_kind = detect_image_media_kind(img_id, cabinet_id)
+        return media_kind, img_id
+
     if isinstance(vids, list) and vids:
         try:
             return "video_portrait_9_16_30s", int(vids[0])
         except Exception:
             raise ValueError(f"videoIds[0] не число: {vids[0]!r}")
+
     raise ValueError("Нет подходящего креатива: пустые imageIds и videoIds")
 
 def make_banner_for_creative(ad_object_id: int,
@@ -862,8 +929,6 @@ def make_banner_for_creative(ad_object_id: int,
 
     content = {"icon_256x256": {"id": int(icon_id)}}
     content[media_kind] = {"id": int(media_id)}
-                                 
-    patterns = _default_patterns_for(media_kind)
 
     log.info("Banner #%d: icon_id=%s, %s=%s, name='%s', cta='%s'",
              idx, int(icon_id), media_kind, media_id, banner_name, cta_text)
@@ -1121,7 +1186,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         cta_text = (ad.get("button") or "visitSite").strip()
 
         try:
-            media_kind, media_id = pick_creative(ad)
+            media_kind, media_id = pick_creative(ad, cabinet_id=str(cabinet_id))
             
             banner = make_banner_for_creative(
                 ad_object_id, ad, idx=gi + 1,
@@ -1408,9 +1473,12 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         media_id = int(img)
                     except Exception:
                         continue
-                    
+
+                    # определяем media_kind по JSON в /mnt/data/auto_ads_storage/video/<cabinet_id>/
+                    media_kind = detect_image_media_kind(media_id, cabinet_id)
+
                     group_seq = len(payload_try["ad_groups"]) + 1
-            
+
                     g_name = render_with_tokens(
                         group_tpl, today_date=today, objective=objective,
                         age=age_str, gender=",".join(genders) if genders else "",
@@ -1419,7 +1487,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         company_src=(company.get("companyName") or ""),
                         group_src=group_tpl, banner_src=""
                     )
-            
+
                     banner_name = render_with_tokens(
                         ad_tpl, today_date=today, objective=objective,
                         age=age_str, gender=",".join(genders) if genders else "",
@@ -1428,22 +1496,22 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         company_src=(company.get("companyName") or ""),
                         group_src=g_name, banner_src=ad_tpl
                     )
-            
+
                     banner = make_banner_for_creative(
                         ad_object_id, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
-                        media_kind="image_600x600", media_id=media_id
+                        media_kind=media_kind, media_id=media_id
                     )
-                    
+
                     safe_g_name = (g_name or "").strip()
                     if not safe_g_name:
                         safe_g_name = f"Группа {len(payload_try['ad_groups']) + 1}"
-                    
+
                     if not isinstance(banner, dict):
                         log.error("FAST: banner is not a dict, skip group. ad_index=%s", ai)
                         continue
-                        
+
                     payload_try["ad_groups"].append({
                         "name": safe_g_name,
                         "targetings": targetings,
