@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.15 unstable"
+VersionCyclop = "1.16 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -872,7 +872,6 @@ def make_banner_for_creative(ad_object_id: int,
         "name": banner_name,
         "urls": {"primary": {"id": ad_object_id}},
         "content": content,
-        "patterns": patterns,
         "textblocks": {
             "about_company_115": {"text": advertiser_info, "title": ""},
             "cta_community_vk": {"text": (cta_text or "visitSite"), "title": ""},
