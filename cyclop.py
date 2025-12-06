@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.23"
+VersionCyclop = "1.24"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -460,7 +460,7 @@ def detect_image_media_kind(media_id: int, cabinet_id: Optional[str]) -> str:
     if width == 600 and height == 600:
         media_kind = "image_600x600"
     elif width == 607 and height == 1080:
-    media_kind = "image_607x1080"
+        media_kind = "image_607x1080"
     # любое 4:5 (в том числе 1080x1350, 600x750 и т.п.)
     elif width * 5 == height * 4:
         media_kind = "image_4_5"
