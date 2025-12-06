@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.24"
+VersionCyclop = "1.25"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1130,8 +1130,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         aud_ids   = as_int_list(g.get("audienceIds"))
         abs_names = list(g.get("abstractAudiences") or [])
     
-        # ЕСЛИ и IDs и Names пустые → берём названия из abstractAudiences
-        if not aud_ids and not aud_names and abs_names:
+        # ЕСЛИ нет имён, но есть abstractAudiences → берём названия из abstractAudiences
+        if not aud_names and abs_names:
             aud_names = expand_abstract_names(abs_names, day_number_for_names)
     
         g_name = render_with_tokens(
@@ -1183,7 +1183,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         creo = "Видео" if (ad.get("videoIds") or []) else "Статика"
         aud_ids   = as_int_list(g.get("audienceIds"))
         abs_names = list(g.get("abstractAudiences") or [])
-        if not aud_ids and not aud_names and abs_names:
+        if not aud_names and abs_names:
             aud_names = expand_abstract_names(abs_names, day_number_for_names)
 
         banner_name = render_with_tokens(
@@ -1390,8 +1390,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
             aud_names = list(group_aud_names or []) + list(cont.get("audienceNames") or [])
             # ЕСЛИ нет ни audienceIds, ни audienceNames → берём NAMES из abstractAudiences
-            if not seg_ids and not aud_names and abs_names:
-                # используем тот же day_number, что и для сегментов (если он уже есть)
+            if not aud_names and abs_names:
                 try:
                     day_number_for_names = day_number
                 except NameError:
