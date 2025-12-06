@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.76"
+VersionApp = "0.77"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1793,6 +1793,7 @@ def create_segments_from_users_lists(payload: dict):
         body = {
             "name": base_name,
             "relations": make_relations(list_ids),
+            "pass_condition": 1,
         }
         resp = requests.post(vk_url, headers=headers, data=json.dumps(body), timeout=20)
         if resp.status_code != 200:
@@ -1814,6 +1815,7 @@ def create_segments_from_users_lists(payload: dict):
         body = {
             "name": seg_name,
             "relations": make_relations([lid]),
+            "pass_condition": 1,
         }
         try:
             resp = requests.post(
