@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.74"
+VersionApp = "0.75"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1648,6 +1648,186 @@ def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
     ]
 
     return {"audiences": out}
+
+# ====== USERS LISTS (remarketing/users_lists) ======
+
+@secure_auto.get("/vk/users_lists/page")
+@secure_api.get("/vk/users_lists/page")
+def vk_users_lists_page(
+    user_id: str,
+    cabinet_id: str,
+    offset: int = Query(-1, description="offset VK; -1 = последняя страница"),
+    limit: int = Query(200, le=200),
+):
+    """
+    Возвращает страницу списков из /api/v3/remarketing/users_lists.json.
+
+    Если offset = -1 (по умолчанию) — считаем count и берём последнюю
+    страницу (самые свежие списки).
+    Для пролистывания фронт просто передаёт offset (на 200 меньше, чем
+    предыдущий).
+    """
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return JSONResponse(
+            status_code=400,
+            content={"items": [], "error": "Invalid cabinet or missing token"},
+        )
+
+    token = os.getenv(cab["token"])
+    if not token:
+        return JSONResponse(
+            status_code=500,
+            content={"items": [], "error": f"Token {cab['token']} not found in .env"},
+        )
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # --- 1) узнаём общее count, чтобы уметь брать "хвост" ---
+    try:
+        r0 = requests.get(
+            "https://ads.vk.com/api/v3/remarketing/users_lists.json?limit=1",
+            headers=headers,
+            timeout=10,
+        )
+        j0 = r0.json()
+        count = int(j0.get("count", 0))
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content={"items": [], "error": f"VK users_lists count error: {str(e)}"},
+        )
+
+    if count == 0:
+        return {"items": [], "count": 0, "limit": limit, "offset": 0}
+
+    if offset < 0:
+        # последняя страница (самые новые списки)
+        real_offset = max(0, count - limit)
+    else:
+        real_offset = max(0, offset)
+
+    url = (
+        "https://ads.vk.com/api/v3/remarketing/users_lists.json"
+        f"?limit={limit}&offset={real_offset}"
+    )
+
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        j = r.json()
+        items = j.get("items", [])
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content={"items": [], "error": f"VK users_lists list error: {str(e)}"},
+        )
+
+    # Отдаём как есть, чтобы на фронте не дублировать поля
+    return {
+        "items": items,
+        "count": count,
+        "limit": limit,
+        "offset": real_offset,
+    }
+
+@secure_auto.post("/vk/users_lists/create_segments")
+@secure_api.post("/vk/users_lists/create_segments")
+def create_segments_from_users_lists(payload: dict):
+    """
+    Тело:
+    {
+      "userId": "...",
+      "cabinetId": "...",
+      "listIds": [1,2,3],
+      "mode": "merge" | "per_list",
+      "baseName": "Название сегмента"
+    }
+
+    mode = "merge"     -> одна аудитория, relations = все списки
+    mode = "per_list"  -> по отдельной аудитории на каждый список
+                         (имя = baseName (id))
+    """
+    user_id = payload.get("userId")
+    cabinet_id = payload.get("cabinetId")
+    list_ids = payload.get("listIds") or []
+    mode = (payload.get("mode") or "merge").lower()
+    base_name = (payload.get("baseName") or "").strip()
+
+    if not user_id or not cabinet_id or not list_ids:
+        raise HTTPException(400, "Missing userId/cabinetId/listIds")
+
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        raise HTTPException(400, "Invalid cabinet or missing token")
+
+    token = os.getenv(cab["token"])
+    if not token:
+        raise HTTPException(500, f"Token {cab['token']} not found in .env")
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    vk_url = "https://ads.vk.com/api/v2/remarketing/segments.json"
+
+    def make_relations(ids: list[int | str]):
+        return [
+            {
+                "object_type": "remarketing_users_list",
+                "object_id": int(lid),
+            }
+            for lid in ids
+        ]
+
+    if mode == "merge":
+        if not base_name:
+            base_name = "Новый сегмент"
+        body = {
+            "name": base_name,
+            "pass_condition": 1,
+            "relations": make_relations(list_ids),
+        }
+        resp = requests.post(vk_url, headers=headers, data=json.dumps(body), timeout=20)
+        if resp.status_code != 200:
+            return JSONResponse(
+                status_code=502,
+                content={"error": f"VK error: {resp.text[:400]}"},
+            )
+        return {"status": "ok", "mode": "merge", "segment": resp.json()}
+
+    # --- по аудитории на каждый список ---
+    created = []
+    errors = []
+
+    for idx, lid in enumerate(list_ids):
+        seg_name = base_name or f"Список {lid}"
+        # чтобы имена отличались, если списков несколько
+        if base_name and len(list_ids) > 1:
+            seg_name = f"{base_name} ({lid})"
+
+        body = {
+            "name": seg_name,
+            "pass_condition": 1,
+            "relations": make_relations([lid]),
+        }
+        try:
+            resp = requests.post(
+                vk_url, headers=headers, data=json.dumps(body), timeout=20
+            )
+            if resp.status_code == 200:
+                created.append({"list_id": lid, "segment": resp.json()})
+            else:
+                errors.append(
+                    {"list_id": lid, "error": resp.text[:400], "status": resp.status_code}
+                )
+        except Exception as e:
+            errors.append({"list_id": lid, "error": str(e)})
+
+    status = "ok" if not errors else "partial"
+    return {"status": status, "mode": "per_list", "created": created, "errors": errors}
 
 # -------------------------------------
 #   SETTINGS (theme, language, any future)
