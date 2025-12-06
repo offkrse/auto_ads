@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.70"
+VersionApp = "0.71"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -191,6 +191,55 @@ def atomic_write_json(dst: Path, obj: dict | list):
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, dst)  # атомарная замена
+
+def _update_presets_image_ids(user_id: str, mapping: dict[str, str]):
+    """
+    Проходит по ВСЕМ пресетам пользователя и заменяет значения в imageIds
+    согласно mapping {old_vk_id: new_vk_id}.
+    """
+    if not mapping:
+        return
+
+    data = ensure_user_structure(user_id)
+    cabinets = data.get("cabinets", []) or []
+
+    for cab in cabinets:
+        cab_id = str(cab.get("id"))
+        pdir = USERS_DIR / user_id / "presets" / cab_id
+        if not pdir.exists():
+            continue
+
+        for f in pdir.glob("*.json"):
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    preset = json.load(fh)
+            except Exception as e:
+                log_error(f"_update_presets_image_ids: read error {f}: {repr(e)}")
+                continue
+
+            if not isinstance(preset, dict):
+                continue
+
+            ads = preset.get("ads")
+            if not isinstance(ads, list):
+                continue
+
+            changed = False
+            for ad in ads:
+                imgs = ad.get("imageIds")
+                if not isinstance(imgs, list):
+                    continue
+                for i, img_id in enumerate(imgs):
+                    s_id = str(img_id)
+                    if s_id in mapping:
+                        imgs[i] = mapping[s_id]
+                        changed = True
+
+            if changed:
+                try:
+                    atomic_write_json(f, preset)
+                except Exception as e:
+                    log_error(f"_update_presets_image_ids: write error {f}: {repr(e)}")
 
 def _update_presets_video_ids(user_id: str, mapping: dict[str, str]):
     """
@@ -1165,11 +1214,16 @@ async def creative_rehash(payload: dict):
                     log_error(f"/creative/rehash: item {item_id} disappeared on second read")
                     atomic_write_json(f, data)
 
-        # --- Шаг 4: заменяем videoIds во всех пресетах ---
+        # --- Шаг 4: заменяем videoIds и imageIds во всех пресетах ---
         try:
             _update_presets_video_ids(user_id, mapping)
         except Exception as e:
             log_error(f"/creative/rehash _update_presets_video_ids error: {repr(e)}")
+
+        try:
+            _update_presets_image_ids(user_id, mapping)
+        except Exception as e:
+            log_error(f"/creative/rehash _update_presets_image_ids error: {repr(e)}")
 
         return {"status": "ok", "results": rehash_results}
 
