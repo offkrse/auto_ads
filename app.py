@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.72"
+VersionApp = "0.73"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -292,173 +292,195 @@ def _update_presets_video_ids(user_id: str, mapping: dict[str, str]):
 
 VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv")
 
-def _rehash_one_file(user_data: dict, user_id: str, cabinet_id: str, fname: str) -> dict:
+def _rehash_one_file(user_id: str, cabinet_id: str, fname: str) -> dict:
     """
-    Перезаливает один файл для одного cabinet_id:
-    - читает meta,
-    - заливает в VK,
-    - создаёт новый локальный файл и meta,
-    - возвращает словарь с old/new vk_id и url.
+    Пере-заливает один файл (картинка/видео) в VK так, чтобы получился НОВЫЙ id.
+    1) Берём старый файл + мету.
+    2) Делаем "слегка изменённую" копию во временный файл (для image — пересохраняем через PIL).
+    3) Заливаем временный файл в VK.
+    4) Создаём новый локальный файл с new_vk_id_тем_же_отображаемым_именем.
+    5) Удаляем старый файл/мету/превью.
+    6) Возвращаем {old_vk_id, new_vk_id, final_name, meta}.
     """
     storage = cabinet_storage(cabinet_id)
     file_path = storage / fname
     if not file_path.exists():
-        raise HTTPException(404, f"File {fname} not found for cabinet {cabinet_id}")
+        raise HTTPException(404, f"File {fname} not found")
 
     base_no_ext, ext = os.path.splitext(fname)
     meta_path = storage / f"{base_no_ext}.json"
-    meta: dict = {}
 
-    if meta_path.exists():
-        try:
-            with open(meta_path, "r", encoding="utf-8") as fh:
-                meta = json.load(fh) or {}
-        except Exception as e:
-            log_error(f"_rehash_one_file: meta read error {meta_path}: {repr(e)}")
-            meta = {}
+    if not meta_path.exists():
+        raise HTTPException(404, f"Meta for {fname} not found")
 
-    old_vk_id = str(meta.get("vk_id") or fname.split("_", 1)[0])
-
-    # определяем тип
-    ctype = (meta.get("content_type") or "").lower()
-    is_video = (meta.get("type") == "video") or ext.lower() in VIDEO_EXTS or ctype.startswith("video/")
-    is_image = not is_video
-
-    # размеры
-    width = meta.get("width")
-    height = meta.get("height")
     try:
-        width = int(width) if width is not None else None
-        height = int(height) if height is not None else None
-    except Exception:
-        width = height = None
+        with open(meta_path, "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except Exception as e:
+        log_error(f"_rehash_one_file: meta read error {meta_path}: {repr(e)}")
+        raise HTTPException(500, "Broken meta")
 
-    if is_image and (not width or not height):
+    old_vk_id = str(meta.get("vk_id") or meta.get("vk_response", {}).get("id") or "").strip()
+    if not old_vk_id:
+        # запасной вариант — берём из имени файла до первого "_"
+        old_vk_id = fname.split("_", 1)[0]
+
+    is_video = (meta.get("type") == "video") or ext.lower() in (".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv")
+    width  = int(meta.get("width")  or 720)
+    height = int(meta.get("height") or 1280)
+
+    # часть после vk_id_ — "отображаемое имя"
+    display_name = fname.split("_", 1)[1] if "_" in fname else fname
+
+    # === 1. Делаем временный файл с МОДИФИЦИРОВАННЫМ содержимым ===
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        if not is_video:
+            # КАРТИНКА: пересохраняем, чтобы изменились байты
+            try:
+                img = Image.open(file_path)
+                # сохраним в том же формате, если возможно
+                fmt = img.format or ("JPEG" if ext.lower() in (".jpg", ".jpeg") else "PNG")
+                img.save(tmp_path, format=fmt)
+            except Exception as e:
+                log_error(f"_rehash_one_file: image resave failed {file_path} -> {tmp_path}: {repr(e)}")
+                # fall-back — просто копируем (в худшем случае VK всё равно вернёт тот же id)
+                shutil.copy(file_path, tmp_path)
+        else:
+            # ВИДЕО: делаем ремультиплекс/копию через ffmpeg (байты точно поменяются)
+            try:
+                proc = subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-i", str(file_path),
+                        "-c", "copy",
+                        str(tmp_path),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                if proc.returncode != 0:
+                    log_error(f"_rehash_one_file: ffmpeg copy failed {file_path}: {proc.stderr[:400]}")
+                    # fall-back — тупо копируем
+                    shutil.copy(file_path, tmp_path)
+            except Exception as e:
+                log_error(f"_rehash_one_file: ffmpeg exception {file_path}: {repr(e)}")
+                shutil.copy(file_path, tmp_path)
+
+        # === 2. Заливаем ВРЕМЕННЫЙ файл в VK ===
+
+        data = ensure_user_structure(user_id)
+        cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+        if not cab or not cab.get("token"):
+            raise HTTPException(400, "Invalid cabinet or missing token")
+        token_name = cab["token"]
+        real_token = os.getenv(token_name)
+        if not real_token:
+            raise HTTPException(500, f"Token {token_name} not found in environment")
+
+        headers = {"Authorization": f"Bearer {real_token}"}
+        vk_url = "https://ads.vk.com/api/v2/content/video.json" if is_video else "https://ads.vk.com/api/v2/content/static.json"
+
+        with open(tmp_path, "rb") as fh:
+            files = {
+                "file": (display_name, fh, "video/mp4" if is_video else "image/jpeg"),
+                "data": (None, json.dumps({"width": width, "height": height}), "application/json"),
+            }
+            resp = requests.post(vk_url, headers=headers, files=files, timeout=60)
+
+        if resp.status_code != 200:
+            log_error(f"_rehash_one_file: VK error {vk_url} => {resp.status_code} {resp.text[:300]}")
+            raise HTTPException(502, "VK upload error")
+
+        resp_json = resp.json()
+        new_vk_id = str(resp_json.get("id") or "").strip()
+        if not new_vk_id:
+            raise HTTPException(500, "VK did not return id")
+
+        if new_vk_id == old_vk_id:
+            log_error(f"_rehash_one_file: VK returned SAME id ({old_vk_id}) for {file_path}")
+            # формально это уже "плохая" ситуация, можно:
+            # - либо всё равно продолжать (просто обновили meta),
+            # - либо бросать ошибку.
+            # Я предлагаю ПРОДОЛЖАТЬ, чтобы не ломать UX.
+
+        # === 3. Создаём новый локальный файл под new_vk_id_ТотЖеНейм ===
+
+        final_name = f"{new_vk_id}_{display_name}"
+        final_path = storage / final_name
+
         try:
-            img = Image.open(file_path)
-            width, height = img.size
+            shutil.copy(tmp_path, final_path)
         except Exception as e:
-            log_error(f"_rehash_one_file: image size error {file_path}: {repr(e)}")
-            width, height = 720, 1280
-
-    if not width or not height:
-        width, height = (720, 1280)
-
-    # имя для отображения
-    display_name = meta.get("display_name")
-    if not display_name:
-        display_name = fname.split("_", 1)[1] if "_" in fname else fname
-
-    # токен кабинета
-    cab = next((c for c in user_data.get("cabinets", []) if str(c.get("id")) == str(cabinet_id)), None)
-    if not cab or not cab.get("token"):
-        raise HTTPException(400, f"Invalid cabinet {cabinet_id} or missing token")
-
-    token_name = cab["token"]
-    real_token = os.getenv(token_name)
-    if not real_token:
-        raise HTTPException(500, f"Token {token_name} not found in environment")
-
-    vk_url = (
-        "https://ads.vk.com/api/v2/content/video.json"
-        if is_video else
-        "https://ads.vk.com/api/v2/content/static.json"
-    )
-
-    headers = {"Authorization": f"Bearer {real_token}"}
-
-    with open(file_path, "rb") as fh:
-        files = {
-            "file": (display_name, fh, ctype or "application/octet-stream"),
-            "data": (None, json.dumps({"width": width, "height": height}), "application/json"),
-        }
-        resp = requests.post(vk_url, headers=headers, files=files, timeout=60)
-
-    if resp.status_code != 200:
-        raise HTTPException(502, f"VK error: {resp.text}")
-
-    resp_json = resp.json()
-    new_vk_id = resp_json.get("id")
-    if not new_vk_id:
-        raise HTTPException(500, "VK did not return id")
-
-    # новый файл локально: <new_vk_id>_Оригинал.ext
-    final_name = f"{new_vk_id}_{display_name}"
-    final_path = storage / final_name
-
-    # Если VK вернул тот же id и имя совпало — файл уже на месте, копировать нельзя
-    if final_path.resolve() != file_path.resolve():
-        try:
-            shutil.copy(file_path, final_path)
-        except Exception as e:
-            log_error(f"_rehash_one_file: copy error {file_path} -> {final_path}: {repr(e)}")
+            log_error(f"_rehash_one_file: copy tmp -> final error {tmp_path} -> {final_path}: {repr(e)}")
             raise HTTPException(500, "Internal copy error")
 
-        # удаляем старый файл только если действительно создали новый
+        # === 4. Удаляем старый файл и старые превью/мету ===
         _safe_unlink(file_path)
-    else:
-        log_error(f"_rehash_one_file: VK returned same id for {file_path}, skip copy/unlink")
+        _safe_unlink(meta_path)
+        # превью могут быть в двух вариантах
+        _safe_unlink(storage / (fname + ".jpg"))
+        _safe_unlink(storage / f"{base_no_ext}.jpg")
 
-    # meta можно удалить в любом случае — ниже мы её перезапишем
-    _safe_unlink(meta_path)
-    # и старые превью тоже очищаем
-    _safe_unlink(storage / (fname + ".jpg"))
-    _safe_unlink(storage / f"{base_no_ext}.jpg")
+        # === 5. Генерируем новое превью для видео ===
+        thumb_url = None
+        if is_video:
+            try:
+                thumb_name = f"{final_name}.jpg"
+                thumb_path = storage / thumb_name
+                proc = subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-ss", "1",
+                        "-i", str(final_path),
+                        "-vframes", "1",
+                        "-vf", "scale=360:-1",
+                        str(thumb_path),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                if proc.returncode == 0 and thumb_path.exists():
+                    thumb_url = f"/auto_ads/video/{cabinet_id}/{thumb_name}"
+                else:
+                    log_error(f"_rehash_one_file: ffmpeg thumb failed for {final_path}: {proc.stderr[:400]}")
+            except Exception as e:
+                log_error(f"_rehash_one_file: thumb exception for {final_path}: {repr(e)}")
 
-    new_thumb_url = None
-    if is_video:
-        try:
-            thumb_name = f"{final_name}.jpg"
-            thumb_path = storage / thumb_name
-            proc = subprocess.run(
-                [
-                    "ffmpeg", "-y",
-                    "-ss", "1",
-                    "-i", str(final_path),
-                    "-vframes", "1",
-                    "-vf", "scale=360:-1",
-                    str(thumb_path),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            if proc.returncode == 0 and thumb_path.exists():
-                new_thumb_url = f"/auto_ads/video/{cabinet_id}/{thumb_name}"
-            else:
-                log_error(f"_rehash_one_file ffmpeg failed for {final_path}: {proc.stderr[:400]}")
-        except Exception as e:
-            log_error(f"_rehash_one_file thumb exception for {final_path}: {repr(e)}")
-
-    # новая meta
-    base_new, _ = os.path.splitext(final_name)
-    new_meta_path = storage / f"{base_new}.json"
-    new_meta = dict(meta)
-    new_meta.update({
-        "vk_id": str(new_vk_id),
-        "vk_response": resp_json,
-        "cabinet_id": str(cabinet_id),
-        "display_name": display_name,
-        "stored_file": f"/auto_ads/video/{cabinet_id}/{final_name}",
-        "thumb_url": new_thumb_url,
-        "content_type": ctype or (meta.get("content_type") or ""),
-        "width": width,
-        "height": height,
-        "uploaded_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "type": "video" if is_video else "image",
-    })
-    try:
+        # === 6. Пишем новую мету ===
+        new_base, _ = os.path.splitext(final_name)
+        new_meta_path = storage / f"{new_base}.json"
+        new_meta = {
+            "vk_response": resp_json,
+            "cabinet_id": str(cabinet_id),
+            "vk_id": new_vk_id,
+            "display_name": display_name,
+            "stored_file": f"/auto_ads/video/{cabinet_id}/{final_name}",
+            "thumb_url": thumb_url,
+            "content_type": meta.get("content_type") or ("video/mp4" if is_video else "image/jpeg"),
+            "width": width,
+            "height": height,
+            "uploaded_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "type": "video" if is_video else "image",
+        }
         atomic_write_json(new_meta_path, new_meta)
-    except Exception as e:
-        log_error(f"_rehash_one_file: write meta error {new_meta_path}: {repr(e)}")
 
-    return {
-        "cabinet_id": str(cabinet_id),
-        "old_vk_id": old_vk_id,
-        "new_vk_id": str(new_vk_id),
-        "url": f"/auto_ads/video/{cabinet_id}/{final_name}",
-        "thumb_url": new_thumb_url,
-    }
+        return {
+            "old_vk_id": old_vk_id,
+            "new_vk_id": new_vk_id,
+            "final_name": final_name,
+            "meta": new_meta,
+        }
+
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 def remove_from_global_queue(user_id: str, cabinet_id: str, preset_id: str):
     """
