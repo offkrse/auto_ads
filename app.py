@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.73"
+VersionApp = "0.74"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -468,11 +468,16 @@ def _rehash_one_file(user_id: str, cabinet_id: str, fname: str) -> dict:
             "type": "video" if is_video else "image",
         }
         atomic_write_json(new_meta_path, new_meta)
-
+        
+        file_url = f"/auto_ads/video/{cabinet_id}/{final_name}"
+        
         return {
             "old_vk_id": old_vk_id,
             "new_vk_id": new_vk_id,
             "final_name": final_name,
+            "cabinet_id": str(cabinet_id),
+            "url": file_url,
+            "thumb_url": thumb_url,
             "meta": new_meta,
         }
 
@@ -1150,7 +1155,7 @@ async def creative_rehash(payload: dict):
 
         for cab, fname in tasks:
             try:
-                res = _rehash_one_file(user_data, user_id, cab, fname)
+                res = _rehash_one_file(user_id, cab, fname)
                 rehash_results.append(res)
                 ov = res.get("old_vk_id")
                 nv = res.get("new_vk_id")
