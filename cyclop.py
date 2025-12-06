@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.2 unstable"
+VersionCyclop = "1.21 unstable"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1217,12 +1217,23 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         for gi, g in enumerate(ad_groups, start=1):
             c = (g.get("banners") or [{}])[0].get("content") or {}
             ico = ((c.get("icon_256x256") or {}).get("id"))
-            vid = ((c.get("video_portrait_9_16_30s") or {}).get("id"))
-            img = ((c.get("image_600x600") or {}).get("id"))
-            if img:
-                log.info("Group %d will send icon_id=%s, image_id=%s", gi, ico, img)
-            else:
-                log.info("Group %d will send icon_id=%s, video_id=%s", gi, ico, vid)
+
+            media_key = None
+            media_id = None
+
+            # ищем любой ключ вида image_* или video_*
+            for k, v in c.items():
+                if not isinstance(v, dict):
+                    continue
+                if k.startswith("image_") or k.startswith("video_"):
+                    media_key = k
+                    media_id = v.get("id")
+                    break
+
+            log.info(
+                "Group %d will send icon_id=%s, %s=%s",
+                gi, ico, media_key or "media", media_id
+            )
 
         # DEBUG: сохранить payload (если включено)
         save_debug_payload(user_id, cabinet_id, f"ad_plan_{i}", payload_try)
