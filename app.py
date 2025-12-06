@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.75"
+VersionApp = "0.76"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1722,7 +1722,8 @@ def vk_users_lists_page(
             status_code=502,
             content={"items": [], "error": f"VK users_lists list error: {str(e)}"},
         )
-
+        
+    items = list(reversed(items))
     # Отдаём как есть, чтобы на фронте не дублировать поля
     return {
         "items": items,
@@ -1773,11 +1774,15 @@ def create_segments_from_users_lists(payload: dict):
 
     vk_url = "https://ads.vk.com/api/v2/remarketing/segments.json"
 
+    # НОВАЯ СТРУКТУРА relations
     def make_relations(ids: list[int | str]):
         return [
             {
                 "object_type": "remarketing_users_list",
-                "object_id": int(lid),
+                "params": {
+                    "source_id": int(lid),
+                    "type": "positive",
+                },
             }
             for lid in ids
         ]
@@ -1787,7 +1792,6 @@ def create_segments_from_users_lists(payload: dict):
             base_name = "Новый сегмент"
         body = {
             "name": base_name,
-            "pass_condition": 1,
             "relations": make_relations(list_ids),
         }
         resp = requests.post(vk_url, headers=headers, data=json.dumps(body), timeout=20)
@@ -1804,13 +1808,11 @@ def create_segments_from_users_lists(payload: dict):
 
     for idx, lid in enumerate(list_ids):
         seg_name = base_name or f"Список {lid}"
-        # чтобы имена отличались, если списков несколько
         if base_name and len(list_ids) > 1:
             seg_name = f"{base_name} ({lid})"
 
         body = {
             "name": seg_name,
-            "pass_condition": 1,
             "relations": make_relations([lid]),
         }
         try:
