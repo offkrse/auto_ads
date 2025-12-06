@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.77"
+VersionApp = "0.78"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1735,28 +1735,24 @@ def vk_users_lists_page(
 @secure_auto.post("/vk/users_lists/create_segments")
 @secure_api.post("/vk/users_lists/create_segments")
 def create_segments_from_users_lists(payload: dict):
-    """
-    Тело:
-    {
-      "userId": "...",
-      "cabinetId": "...",
-      "listIds": [1,2,3],
-      "mode": "merge" | "per_list",
-      "baseName": "Название сегмента"
-    }
-
-    mode = "merge"     -> одна аудитория, relations = все списки
-    mode = "per_list"  -> по отдельной аудитории на каждый список
-                         (имя = baseName (id))
-    """
-    user_id = payload.get("userId")
-    cabinet_id = payload.get("cabinetId")
-    list_ids = payload.get("listIds") or []
-    mode = (payload.get("mode") or "merge").lower()
+    user_id   = payload.get("userId")
+    cabinet_id= payload.get("cabinetId")
+    # Берём только выбранные чекбоксом id (фронт должен передавать их в listIds)
+    raw_ids   = payload.get("listIds") or []
+    mode      = (payload.get("mode") or "merge").lower()
     base_name = (payload.get("baseName") or "").strip()
 
-    if not user_id or not cabinet_id or not list_ids:
-        raise HTTPException(400, "Missing userId/cabinetId/listIds")
+    if not user_id or not cabinet_id:
+        raise HTTPException(400, "Missing userId/cabinetId")
+
+    # нормализуем список выбранных id: числа/строки -> int, убираем дубли/пустые
+    try:
+        list_ids = sorted({int(x) for x in raw_ids if str(x).strip()})
+    except Exception:
+        raise HTTPException(400, "listIds must be an array of ids")
+
+    if not list_ids:
+        raise HTTPException(400, "No selected lists (listIds is empty)")
 
     data = ensure_user_structure(user_id)
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
@@ -1767,27 +1763,46 @@ def create_segments_from_users_lists(payload: dict):
     if not token:
         raise HTTPException(500, f"Token {cab['token']} not found in .env")
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    vk_url  = "https://ads.vk.com/api/v2/remarketing/segments.json"
 
-    vk_url = "https://ads.vk.com/api/v2/remarketing/segments.json"
-
-    # НОВАЯ СТРУКТУРА relations
-    def make_relations(ids: list[int | str]):
+    def make_relations(ids: list[int]):
         return [
-            {
-                "object_type": "remarketing_users_list",
-                "params": {
-                    "source_id": int(lid),
-                    "type": "positive",
-                },
-            }
+            {"object_type": "remarketing_users_list",
+             "params": {"source_id": int(lid), "type": "positive"}}
             for lid in ids
         ]
 
+    # Хелпер: получить имя списка по id (как в прошлом сообщении)
+    def _fetch_users_list_name(headers: dict, list_id: int) -> str:
+        lid = int(list_id)
+        base = "https://ads.vk.com/api/v3/remarketing/users_lists.json"
+        for url in (f"{base}?limit=1&ids={lid}", f"{base}?limit=1&id={lid}", f"{base}?limit=1&_id__in={lid}"):
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+                items = (r.json().get("items") or [])
+                for it in items:
+                    if int(it.get("id", -1)) == lid:
+                        nm = (it.get("name") or "").strip()
+                        if nm: return nm
+            except Exception as e:
+                log_error(f"users_list_name try1 failed id={lid}: {repr(e)}")
+        try:
+            r0 = requests.get(f"{base}?limit=1", headers=headers, timeout=10)
+            count = int(r0.json().get("count", 0))
+            if count > 0:
+                offset = max(0, count - 200)
+                r1 = requests.get(f"{base}?limit=200&offset={offset}", headers=headers, timeout=15)
+                for it in (r1.json().get("items") or []):
+                    if int(it.get("id", -1)) == lid:
+                        nm = (it.get("name") or "").strip()
+                        if nm: return nm
+        except Exception as e:
+            log_error(f"users_list_name try2 failed id={lid}: {repr(e)}")
+        return f"Список {lid}"
+
     if mode == "merge":
+        # Объединяем только выбранные списки; логическое ИЛИ -> pass_condition = 1
         if not base_name:
             base_name = "Новый сегмент"
         body = {
@@ -1797,41 +1812,40 @@ def create_segments_from_users_lists(payload: dict):
         }
         resp = requests.post(vk_url, headers=headers, data=json.dumps(body), timeout=20)
         if resp.status_code != 200:
-            return JSONResponse(
-                status_code=502,
-                content={"error": f"VK error: {resp.text[:400]}"},
-            )
+            # логируем в global_error
+            try:
+                vk_err = resp.json()
+            except Exception:
+                vk_err = {"raw": resp.text[:400]}
+            log_error(f"VK segments MERGE failed cab={cabinet_id} ids={list_ids} err={vk_err}")
+            return JSONResponse(status_code=502, content={"error": vk_err})
         return {"status": "ok", "mode": "merge", "segment": resp.json()}
 
-    # --- по аудитории на каждый список ---
-    created = []
-    errors = []
-
-    for idx, lid in enumerate(list_ids):
-        seg_name = base_name or f"Список {lid}"
-        if base_name and len(list_ids) > 1:
-            seg_name = f"{base_name} ({lid})"
-
+    # mode == "per_list": по ОТМЕЧЕННОМУ списку -> отдельный сегмент с тем же именем
+    created, errors = [], []
+    for lid in list_ids:
+        seg_name = _fetch_users_list_name(headers, lid)  # точное имя из VK
         body = {
             "name": seg_name,
             "relations": make_relations([lid]),
-            "pass_condition": 1,
+            "pass_condition": 1,  # одно условие
         }
         try:
-            resp = requests.post(
-                vk_url, headers=headers, data=json.dumps(body), timeout=20
-            )
+            resp = requests.post(vk_url, headers=headers, data=json.dumps(body), timeout=20)
             if resp.status_code == 200:
                 created.append({"list_id": lid, "segment": resp.json()})
             else:
-                errors.append(
-                    {"list_id": lid, "error": resp.text[:400], "status": resp.status_code}
-                )
+                try:
+                    vk_err = resp.json()
+                except Exception:
+                    vk_err = {"raw": resp.text[:400]}
+                log_error(f"VK segments PER_LIST failed cab={cabinet_id} list_id={lid} name='{seg_name}' err={vk_err}")
+                errors.append({"list_id": lid, "error": vk_err, "status": resp.status_code})
         except Exception as e:
+            log_error(f"VK segments PER_LIST exception cab={cabinet_id} list_id={lid} name='{seg_name}' err={repr(e)}")
             errors.append({"list_id": lid, "error": str(e)})
 
-    status = "ok" if not errors else "partial"
-    return {"status": status, "mode": "per_list", "created": created, "errors": errors}
+    return {"status": "ok" if not errors else "partial", "mode": "per_list", "created": created, "errors": errors}
 
 # -------------------------------------
 #   SETTINGS (theme, language, any future)
