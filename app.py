@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.68"
+VersionApp = "0.70"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -191,6 +191,218 @@ def atomic_write_json(dst: Path, obj: dict | list):
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, dst)  # атомарная замена
+
+def _update_presets_video_ids(user_id: str, mapping: dict[str, str]):
+    """
+    Проходит по ВСЕМ пресетам пользователя и заменяет значения в videoIds
+    согласно mapping {old_vk_id: new_vk_id}.
+    """
+    if not mapping:
+        return
+
+    data = ensure_user_structure(user_id)
+    cabinets = data.get("cabinets", []) or []
+
+    for cab in cabinets:
+        cab_id = str(cab.get("id"))
+        pdir = USERS_DIR / user_id / "presets" / cab_id
+        if not pdir.exists():
+            continue
+
+        for f in pdir.glob("*.json"):
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    preset = json.load(fh)
+            except Exception as e:
+                log_error(f"_update_presets_video_ids: read error {f}: {repr(e)}")
+                continue
+
+            if not isinstance(preset, dict):
+                continue
+
+            ads = preset.get("ads")
+            if not isinstance(ads, list):
+                continue
+
+            changed = False
+            for ad in ads:
+                vids = ad.get("videoIds")
+                if not isinstance(vids, list):
+                    continue
+                for i, vid in enumerate(vids):
+                    svid = str(vid)
+                    if svid in mapping:
+                        vids[i] = mapping[svid]
+                        changed = True
+
+            if changed:
+                try:
+                    atomic_write_json(f, preset)
+                except Exception as e:
+                    log_error(f"_update_presets_video_ids: write error {f}: {repr(e)}")
+
+VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv")
+
+def _rehash_one_file(user_data: dict, user_id: str, cabinet_id: str, fname: str) -> dict:
+    """
+    Перезаливает один файл для одного cabinet_id:
+    - читает meta,
+    - заливает в VK,
+    - создаёт новый локальный файл и meta,
+    - возвращает словарь с old/new vk_id и url.
+    """
+    storage = cabinet_storage(cabinet_id)
+    file_path = storage / fname
+    if not file_path.exists():
+        raise HTTPException(404, f"File {fname} not found for cabinet {cabinet_id}")
+
+    base_no_ext, ext = os.path.splitext(fname)
+    meta_path = storage / f"{base_no_ext}.json"
+    meta: dict = {}
+
+    if meta_path.exists():
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                meta = json.load(fh) or {}
+        except Exception as e:
+            log_error(f"_rehash_one_file: meta read error {meta_path}: {repr(e)}")
+            meta = {}
+
+    old_vk_id = str(meta.get("vk_id") or fname.split("_", 1)[0])
+
+    # определяем тип
+    ctype = (meta.get("content_type") or "").lower()
+    is_video = (meta.get("type") == "video") or ext.lower() in VIDEO_EXTS or ctype.startswith("video/")
+    is_image = not is_video
+
+    # размеры
+    width = meta.get("width")
+    height = meta.get("height")
+    try:
+        width = int(width) if width is not None else None
+        height = int(height) if height is not None else None
+    except Exception:
+        width = height = None
+
+    if is_image and (not width or not height):
+        try:
+            img = Image.open(file_path)
+            width, height = img.size
+        except Exception as e:
+            log_error(f"_rehash_one_file: image size error {file_path}: {repr(e)}")
+            width, height = 720, 1280
+
+    if not width or not height:
+        width, height = (720, 1280)
+
+    # имя для отображения
+    display_name = meta.get("display_name")
+    if not display_name:
+        display_name = fname.split("_", 1)[1] if "_" in fname else fname
+
+    # токен кабинета
+    cab = next((c for c in user_data.get("cabinets", []) if str(c.get("id")) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        raise HTTPException(400, f"Invalid cabinet {cabinet_id} or missing token")
+
+    token_name = cab["token"]
+    real_token = os.getenv(token_name)
+    if not real_token:
+        raise HTTPException(500, f"Token {token_name} not found in environment")
+
+    vk_url = (
+        "https://ads.vk.com/api/v2/content/video.json"
+        if is_video else
+        "https://ads.vk.com/api/v2/content/static.json"
+    )
+
+    headers = {"Authorization": f"Bearer {real_token}"}
+
+    with open(file_path, "rb") as fh:
+        files = {
+            "file": (display_name, fh, ctype or "application/octet-stream"),
+            "data": (None, json.dumps({"width": width, "height": height}), "application/json"),
+        }
+        resp = requests.post(vk_url, headers=headers, files=files, timeout=60)
+
+    if resp.status_code != 200:
+        raise HTTPException(502, f"VK error: {resp.text}")
+
+    resp_json = resp.json()
+    new_vk_id = resp_json.get("id")
+    if not new_vk_id:
+        raise HTTPException(500, "VK did not return id")
+
+    # новый файл локально: <new_vk_id>_Оригинал.ext
+    final_name = f"{new_vk_id}_{display_name}"
+    final_path = storage / final_name
+
+    try:
+        shutil.copy(file_path, final_path)
+    except Exception as e:
+        log_error(f"_rehash_one_file: copy error {file_path} -> {final_path}: {repr(e)}")
+        raise HTTPException(500, "Internal copy error")
+
+    # удаляем старый файл и meta + старые превью
+    _safe_unlink(file_path)
+    _safe_unlink(meta_path)
+    _safe_unlink(storage / (fname + ".jpg"))
+    _safe_unlink(storage / f"{base_no_ext}.jpg")
+
+    new_thumb_url = None
+    if is_video:
+        try:
+            thumb_name = f"{final_name}.jpg"
+            thumb_path = storage / thumb_name
+            proc = subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-ss", "1",
+                    "-i", str(final_path),
+                    "-vframes", "1",
+                    "-vf", "scale=360:-1",
+                    str(thumb_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if proc.returncode == 0 and thumb_path.exists():
+                new_thumb_url = f"/auto_ads/video/{cabinet_id}/{thumb_name}"
+            else:
+                log_error(f"_rehash_one_file ffmpeg failed for {final_path}: {proc.stderr[:400]}")
+        except Exception as e:
+            log_error(f"_rehash_one_file thumb exception for {final_path}: {repr(e)}")
+
+    # новая meta
+    base_new, _ = os.path.splitext(final_name)
+    new_meta_path = storage / f"{base_new}.json"
+    new_meta = dict(meta)
+    new_meta.update({
+        "vk_id": str(new_vk_id),
+        "vk_response": resp_json,
+        "cabinet_id": str(cabinet_id),
+        "display_name": display_name,
+        "stored_file": f"/auto_ads/video/{cabinet_id}/{final_name}",
+        "thumb_url": new_thumb_url,
+        "content_type": ctype or (meta.get("content_type") or ""),
+        "width": width,
+        "height": height,
+        "uploaded_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "type": "video" if is_video else "image",
+    })
+    try:
+        atomic_write_json(new_meta_path, new_meta)
+    except Exception as e:
+        log_error(f"_rehash_one_file: write meta error {new_meta_path}: {repr(e)}")
+
+    return {
+        "cabinet_id": str(cabinet_id),
+        "old_vk_id": old_vk_id,
+        "new_vk_id": str(new_vk_id),
+        "url": f"/auto_ads/video/{cabinet_id}/{final_name}",
+        "thumb_url": new_thumb_url,
+    }
 
 def remove_from_global_queue(user_id: str, cabinet_id: str, preset_id: str):
     """
@@ -762,6 +974,211 @@ async def creative_delete(payload: dict):
         log_error(f"/creative/delete error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
         
+@secure_auto.post("/creative/rehash")
+@secure_api.post("/creative/rehash")
+async def creative_rehash(payload: dict):
+    """
+    Тело:
+    {
+      "userId": "...",
+      "cabinetId": "...",      # кабинет, для которого открыт UI (может быть 'all')
+      "setId": "...",          # id набора креативов
+      "itemId": "..."          # id элемента внутри набора
+    }
+
+    Делает:
+      - перезаливку видео в VK (новый vk_id),
+      - пересоздание локальных файлов/превью/json,
+      - обновление creatives (vkByCabinet, url, id),
+      - замену old_vk_id -> new_vk_id во всех пресетах пользователя.
+    """
+    try:
+        user_id = payload.get("userId")
+        cabinet_id = str(payload.get("cabinetId", ""))
+        set_id = payload.get("setId")
+        item_id = payload.get("itemId")
+
+        if not user_id or not set_id or not item_id:
+            raise HTTPException(400, "Missing userId/setId/itemId")
+
+        user_data = ensure_user_structure(user_id)
+
+        f = creatives_path(user_id, cabinet_id)
+        if not f.exists():
+            raise HTTPException(404, "Creatives file not found")
+
+        lock = f.with_suffix(f.suffix + ".lock")
+
+        # --- Шаг 1: читаем sets.json и определяем список файлов для rehash ---
+        with file_lock(lock):
+            with open(f, "r", encoding="utf-8") as fh:
+                text = fh.read()
+
+            try:
+                data = json.loads(text) if text.strip() else []
+            except json.JSONDecodeError as je:
+                log_error(f"/creative/rehash JSONDecodeError on {f}: {repr(je)}")
+                raise HTTPException(500, "Invalid creatives storage")
+
+            if not isinstance(data, list):
+                raise HTTPException(500, "Creatives storage is not a list")
+
+            target_set = None
+            for s in data:
+                if str(s.get("id")) == str(set_id):
+                    target_set = s
+                    break
+
+            if not target_set:
+                raise HTTPException(404, "Creative set not found")
+
+            items = target_set.get("items") or []
+            target_item = None
+            for it in items:
+                if str(it.get("id")) == str(item_id):
+                    target_item = it
+                    break
+
+            if not target_item:
+                raise HTTPException(404, "Creative item not found")
+
+            # список (cabinet_id, filename) для rehash
+            tasks: list[tuple[str, str]] = []
+
+            if isinstance(target_item.get("urls"), dict) and target_item["urls"]:
+                # вариант когда загружали в 'all' — несколько кабинетов
+                for cab, url in target_item["urls"].items():
+                    if isinstance(url, str) and url:
+                        name = Path(url).name
+                        tasks.append((str(cab), name))
+            elif isinstance(target_item.get("url"), str) and target_item["url"]:
+                url = target_item["url"]
+                name = Path(url).name
+                # вытащим cabinet из url (/auto_ads/video/<cab>/<file>)
+                try:
+                    parts = url.strip("/").split("/")
+                    idx = parts.index("video")
+                    cab = parts[idx + 1]
+                except Exception:
+                    cab = cabinet_id or "all"
+                tasks.append((str(cab), name))
+
+        if not tasks:
+            raise HTTPException(400, "No files to rehash for this item")
+
+        # --- Шаг 2: перезаливаем файлы в VK и готовим mapping old->new ---
+        rehash_results: list[dict] = []
+        mapping: dict[str, str] = {}
+
+        for cab, fname in tasks:
+            try:
+                res = _rehash_one_file(user_data, user_id, cab, fname)
+                rehash_results.append(res)
+                ov = res.get("old_vk_id")
+                nv = res.get("new_vk_id")
+                if ov and nv:
+                    mapping[str(ov)] = str(nv)
+            except HTTPException:
+                raise
+            except Exception as e:
+                log_error(f"/creative/rehash _rehash_one_file error for {cab}/{fname}: {repr(e)}")
+                raise HTTPException(500, "Internal rehash error")
+
+        # --- Шаг 3: обновляем creatives (vkByCabinet, url, id, thumbUrl) ---
+        with file_lock(lock):
+            with open(f, "r", encoding="utf-8") as fh:
+                text = fh.read()
+
+            try:
+                data = json.loads(text) if text.strip() else []
+            except json.JSONDecodeError as je:
+                log_error(f"/creative/rehash second read JSONDecodeError on {f}: {repr(je)}")
+                raise HTTPException(500, "Invalid creatives storage on second read")
+
+            if not isinstance(data, list):
+                raise HTTPException(500, "Creatives storage is not a list (second read)")
+
+            target_set = None
+            for s in data:
+                if str(s.get("id")) == str(set_id):
+                    target_set = s
+                    break
+
+            if not target_set:
+                # если вдруг кто-то удалил набор параллельно — просто сохраняем как есть
+                log_error(f"/creative/rehash: set {set_id} disappeared on second read")
+                atomic_write_json(f, data)
+            else:
+                items = target_set.get("items") or []
+                target_item = None
+                for it in items:
+                    if str(it.get("id")) == str(item_id):
+                        target_item = it
+                        break
+
+                if target_item:
+                    # обновляем item согласно rehash_results
+                    if isinstance(target_item.get("urls"), dict) and target_item["urls"]:
+                        # вариант 'all': urls + vkByCabinet
+                        urls = dict(target_item.get("urls") or {})
+                        vk_by_cab = dict(target_item.get("vkByCabinet") or {})
+                        thumb_url = target_item.get("thumbUrl")
+
+                        for res in rehash_results:
+                            cab = str(res.get("cabinet_id"))
+                            nv = str(res.get("new_vk_id"))
+                            url = res.get("url")
+                            tmb = res.get("thumb_url")
+                            if cab and nv:
+                                vk_by_cab[cab] = nv
+                            if cab and isinstance(url, str):
+                                urls[cab] = url
+                            if tmb and not thumb_url:
+                                thumb_url = tmb
+
+                        target_item["urls"] = urls
+                        target_item["vkByCabinet"] = vk_by_cab
+                        if thumb_url:
+                            target_item["thumbUrl"] = thumb_url
+                    else:
+                        # одиночный кабинет: используем первый результат
+                        res0 = rehash_results[0]
+                        nv = str(res0.get("new_vk_id"))
+                        url = res0.get("url")
+                        tmb = res0.get("thumb_url")
+                        cab = str(res0.get("cabinet_id"))
+
+                        if nv:
+                            target_item["id"] = nv
+                        if isinstance(url, str):
+                            target_item["url"] = url
+                        vk_by_cab = dict(target_item.get("vkByCabinet") or {})
+                        if cab and nv:
+                            vk_by_cab[cab] = nv
+                        target_item["vkByCabinet"] = vk_by_cab
+                        if tmb:
+                            target_item["thumbUrl"] = tmb
+
+                    # сохраняем весь список
+                    atomic_write_json(f, data)
+                else:
+                    log_error(f"/creative/rehash: item {item_id} disappeared on second read")
+                    atomic_write_json(f, data)
+
+        # --- Шаг 4: заменяем videoIds во всех пресетах ---
+        try:
+            _update_presets_video_ids(user_id, mapping)
+        except Exception as e:
+            log_error(f"/creative/rehash _update_presets_video_ids error: {repr(e)}")
+
+        return {"status": "ok", "results": rehash_results}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"/creative/rehash fatal error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
 # -------- Queue status (per preset) --------
 @secure_api.get("/queue/status/get")
 @secure_auto.get("/queue/status/get")
