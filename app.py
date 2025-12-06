@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.71"
+VersionApp = "0.72"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -386,15 +386,22 @@ def _rehash_one_file(user_data: dict, user_id: str, cabinet_id: str, fname: str)
     final_name = f"{new_vk_id}_{display_name}"
     final_path = storage / final_name
 
-    try:
-        shutil.copy(file_path, final_path)
-    except Exception as e:
-        log_error(f"_rehash_one_file: copy error {file_path} -> {final_path}: {repr(e)}")
-        raise HTTPException(500, "Internal copy error")
+    # Если VK вернул тот же id и имя совпало — файл уже на месте, копировать нельзя
+    if final_path.resolve() != file_path.resolve():
+        try:
+            shutil.copy(file_path, final_path)
+        except Exception as e:
+            log_error(f"_rehash_one_file: copy error {file_path} -> {final_path}: {repr(e)}")
+            raise HTTPException(500, "Internal copy error")
 
-    # удаляем старый файл и meta + старые превью
-    _safe_unlink(file_path)
+        # удаляем старый файл только если действительно создали новый
+        _safe_unlink(file_path)
+    else:
+        log_error(f"_rehash_one_file: VK returned same id for {file_path}, skip copy/unlink")
+
+    # meta можно удалить в любом случае — ниже мы её перезапишем
     _safe_unlink(meta_path)
+    # и старые превью тоже очищаем
     _safe_unlink(storage / (fname + ".jpg"))
     _safe_unlink(storage / f"{base_no_ext}.jpg")
 
