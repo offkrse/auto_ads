@@ -17,7 +17,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.25"
+VersionCyclop = "1.26"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -946,7 +946,13 @@ def make_banner_for_creative(ad_object_id: int,
         raise ValueError("Отсутствует logoId (icon_256x256.id).")
 
     content = {"icon_256x256": {"id": int(icon_id)}}
-    content[media_kind] = {"id": int(media_id)}
+    # Если это портретное видео 9:16 — кладём оба формата
+    if media_kind == "video_portrait_9_16_30s":
+        content["video_portrait_9_16_30s"] = {"id": int(media_id)}
+        content["video_portrait_9_16_180s"] = {"id": int(media_id)}
+    else:
+        # Для картинок и любых других типов — как раньше
+        content[media_kind] = {"id": int(media_id)}
 
     log.info("Banner #%d: icon_id=%s, %s=%s, name='%s', cta='%s'",
              idx, int(icon_id), media_kind, media_id, banner_name, cta_text)
