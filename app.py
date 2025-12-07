@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.79"
+VersionApp = "0.80"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2220,6 +2220,8 @@ async def upload_creative(
                 "vk_id": vk_id,
                 "url": f"/auto_ads/video/{cabinet['id']}/{final_name}",
                 "display_name": display_name,
+                "name": display_name,
+                "uploaded": True,
                 **({"thumb_url": thumb_url} if thumb_url else {}),
             })
         # --- Авто-добавление в creatives/sets.json выбранного кабинета ---
@@ -2241,13 +2243,15 @@ async def upload_creative(
                 if not existing:
                     existing = [{"id": f"id_{uuid.uuid4().hex[:8]}", "name": "Набор 1", "items": []}]
 
-                # добавляем как ОДИН item:
-                # - если cabinet_id == "all": собираем urls/vkByCabinet
-                # - иначе: одиночный url + id
+                # Общие поля для имени и uploaded
+                # Берём красивое отображаемое имя (то, что справа от vk_id_) — мы уже кладём его в results
+                display_name_for_item = (results[0].get("display_name")
+                                         or (file.filename or "").strip()
+                                         or "file")
+
                 if str(cabinet_id) == "all":
                     urls = {str(r["cabinet_id"]): r["url"] for r in results if r.get("url")}
                     vk_by = {str(r["cabinet_id"]): r["vk_id"] for r in results if r.get("vk_id")}
-                    # выберем "главный" id как первый из результатов (для удобства)
                     main_id = str(results[0]["vk_id"])
                     item = {
                         "id": main_id,
@@ -2255,6 +2259,8 @@ async def upload_creative(
                         "urls": urls,
                         "vkByCabinet": vk_by,
                         "type": "image" if is_image else "video",
+                        "name": display_name_for_item,
+                        "uploaded": True,
                     }
                     if is_video and results[0].get("thumb_url"):
                         item["thumbUrl"] = results[0]["thumb_url"]
@@ -2265,6 +2271,8 @@ async def upload_creative(
                         "url": r0["url"],
                         "vkByCabinet": {str(cabinet_id): str(r0["vk_id"])},
                         "type": "image" if is_image else "video",
+                        "name": display_name_for_item,
+                        "uploaded": True,
                     }
                     if is_video and r0.get("thumb_url"):
                         item["thumbUrl"] = r0["thumb_url"]
