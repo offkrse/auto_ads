@@ -20,7 +20,7 @@ import uuid
 
 app = FastAPI()
 
-VersionApp = "0.78"
+VersionApp = "0.79"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -191,6 +191,90 @@ def atomic_write_json(dst: Path, obj: dict | list):
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, dst)  # атомарная замена
+
+def _replace_media_id_in_presets_for_cab(user_id: str, cabinet_id: str, mapping: dict[str, str]):
+    """
+    Заменяет старые id на новые ТОЛЬКО в пресетах cabinet_id.
+    mapping: {old_id: new_id}
+    """
+    if not mapping:
+        return
+    pdir = USERS_DIR / user_id / "presets" / str(cabinet_id)
+    if not pdir.exists():
+        return
+    for f in pdir.glob("*.json"):
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                preset = json.load(fh)
+        except Exception as e:
+            log_error(f"_replace_media_id_in_presets_for_cab: read error {f}: {repr(e)}")
+            continue
+        if not isinstance(preset, dict):
+            continue
+        ads = preset.get("ads")
+        if not isinstance(ads, list):
+            continue
+
+        changed = False
+        for ad in ads:
+            imgs = ad.get("imageIds")
+            if isinstance(imgs, list):
+                new_imgs = [mapping.get(str(x), x) for x in imgs]
+                if new_imgs != imgs:
+                    ad["imageIds"] = new_imgs
+                    changed = True
+            vids = ad.get("videoIds")
+            if isinstance(vids, list):
+                new_vids = [mapping.get(str(x), x) for x in vids]
+                if new_vids != vids:
+                    ad["videoIds"] = new_vids
+                    changed = True
+        if changed:
+            try:
+                atomic_write_json(f, preset)
+            except Exception as e:
+                log_error(f"_replace_media_id_in_presets_for_cab: write error {f}: {repr(e)}")
+
+
+def _drop_media_id_in_presets_for_cab(user_id: str, cabinet_id: str, media_id: str):
+    """
+    Удаляет media_id из imageIds/videoIds во всех preset_*.json данного cabinet_id.
+    """
+    pdir = USERS_DIR / user_id / "presets" / str(cabinet_id)
+    if not pdir.exists():
+        return
+    for f in pdir.glob("*.json"):
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                preset = json.load(fh)
+        except Exception as e:
+            log_error(f"_drop_media_id_in_presets_for_cab: read error {f}: {repr(e)}")
+            continue
+        if not isinstance(preset, dict):
+            continue
+        ads = preset.get("ads")
+        if not isinstance(ads, list):
+            continue
+
+        changed = False
+        for ad in ads:
+            imgs = ad.get("imageIds")
+            if isinstance(imgs, list):
+                new_imgs = [x for x in imgs if str(x) != str(media_id)]
+                if new_imgs != imgs:
+                    ad["imageIds"] = new_imgs
+                    changed = True
+            vids = ad.get("videoIds")
+            if isinstance(vids, list):
+                new_vids = [x for x in vids if str(x) != str(media_id)]
+                if new_vids != vids:
+                    ad["videoIds"] = new_vids
+                    changed = True
+        if changed:
+            try:
+                atomic_write_json(f, preset)
+            except Exception as e:
+                log_error(f"_drop_media_id_in_presets_for_cab: write error {f}: {repr(e)}")
 
 def _update_presets_image_ids(user_id: str, mapping: dict[str, str]):
     """
@@ -1049,7 +1133,59 @@ async def creative_delete(payload: dict):
                 _safe_unlink(storage / (fname + ".jpg"))
                 # b) <final_stem>.jpg (если отрезали расширение исходника)
                 _safe_unlink(storage / f"{base_no_ext}.jpg")
+                
+        # --- ДОПОЛНИТЕЛЬНО: удаляем элемент из creatives/sets.json и чистим пресеты кабинета ---
+        try:
+            ensure_user_structure(user_id)
+            # читаем sets.json ТЕКУЩЕГО cabinet_id (из параметра запроса)
+            sets_file = creatives_path(user_id, cabinet_id)
+            if sets_file.exists():
+                lock2 = sets_file.with_suffix(sets_file.suffix + ".lock")
+                with file_lock(lock2):
+                    raw = sets_file.read_text(encoding="utf-8")
+                    sets = json.loads(raw) if raw.strip() else []
+                    if not isinstance(sets, list):
+                        sets = []
 
+                    # Пытаемся найти элемент по url/urls и вычислить его vk-id для текущего кабинета
+                    item_vk_id_to_drop = None
+
+                    def _match_item(it: dict) -> bool:
+                        u = it.get("url")
+                        if isinstance(u, str) and any(Path(u).name == fname for _cab, fname in to_delete):
+                            return True
+                        urls = it.get("urls")
+                        if isinstance(urls, dict):
+                            for _cab, u2 in urls.items():
+                                if isinstance(u2, str):
+                                    if any(Path(u2).name == fname for _cab2, fname in to_delete):
+                                        return True
+                        return False
+
+                    for s in sets:
+                        items = s.get("items") or []
+                        keep = []
+                        for it in items:
+                            if _match_item(it):
+                                # берём vk-id для текущего кабинета (если all — пробуем вытянуть из url)
+                                vk_by_cab = it.get("vkByCabinet") or {}
+                                cand = vk_by_cab.get(str(cabinet_id))
+                                if isinstance(cand, (str, int)):
+                                    item_vk_id_to_drop = str(cand)
+                                elif isinstance(it.get("id"), (str, int)):
+                                    item_vk_id_to_drop = str(it["id"])
+                                # пропускаем (удаляем этот item)
+                                continue
+                            keep.append(it)
+                        s["items"] = keep
+
+                    atomic_write_json(sets_file, sets)
+
+                # если нашли vk-id — удалим его из пресетов этого кабинета
+                if item_vk_id_to_drop:
+                    _drop_media_id_in_presets_for_cab(user_id, str(cabinet_id), item_vk_id_to_drop)
+        except Exception as e:
+            log_error(f"/creative/delete: cleanup sets/presets failed: {repr(e)}")
         return {"status": "ok", "deleted": deleted}
     except HTTPException:
         raise
@@ -1248,16 +1384,11 @@ async def creative_rehash(payload: dict):
                     log_error(f"/creative/rehash: item {item_id} disappeared on second read")
                     atomic_write_json(f, data)
 
-        # --- Шаг 4: заменяем videoIds и imageIds во всех пресетах ---
+        # --- Шаг 4: заменяем id в пресетах ТЕКУЩЕГО кабинета ---
         try:
-            _update_presets_video_ids(user_id, mapping)
+            _replace_media_id_in_presets_for_cab(user_id, str(cabinet_id), mapping)
         except Exception as e:
-            log_error(f"/creative/rehash _update_presets_video_ids error: {repr(e)}")
-
-        try:
-            _update_presets_image_ids(user_id, mapping)
-        except Exception as e:
-            log_error(f"/creative/rehash _update_presets_image_ids error: {repr(e)}")
+            log_error(f"/creative/rehash _replace_media_id_in_presets_for_cab error: {repr(e)}")
 
         return {"status": "ok", "results": rehash_results}
 
@@ -2091,6 +2222,59 @@ async def upload_creative(
                 "display_name": display_name,
                 **({"thumb_url": thumb_url} if thumb_url else {}),
             })
+        # --- Авто-добавление в creatives/sets.json выбранного кабинета ---
+        try:
+            ensure_user_structure(user_id)
+            sets_file = creatives_path(user_id, cabinet_id)
+            lock3 = sets_file.with_suffix(sets_file.suffix + ".lock")
+            with file_lock(lock3):
+                existing = []
+                if sets_file.exists():
+                    try:
+                        existing = json.loads(sets_file.read_text(encoding="utf-8")) or []
+                        if not isinstance(existing, list):
+                            existing = []
+                    except Exception:
+                        existing = []
+
+                # если набора нет — создадим "Набор 1"
+                if not existing:
+                    existing = [{"id": f"id_{uuid.uuid4().hex[:8]}", "name": "Набор 1", "items": []}]
+
+                # добавляем как ОДИН item:
+                # - если cabinet_id == "all": собираем urls/vkByCabinet
+                # - иначе: одиночный url + id
+                if str(cabinet_id) == "all":
+                    urls = {str(r["cabinet_id"]): r["url"] for r in results if r.get("url")}
+                    vk_by = {str(r["cabinet_id"]): r["vk_id"] for r in results if r.get("vk_id")}
+                    # выберем "главный" id как первый из результатов (для удобства)
+                    main_id = str(results[0]["vk_id"])
+                    item = {
+                        "id": main_id,
+                        "url": results[0]["url"],
+                        "urls": urls,
+                        "vkByCabinet": vk_by,
+                        "type": "image" if is_image else "video",
+                    }
+                    if is_video and results[0].get("thumb_url"):
+                        item["thumbUrl"] = results[0]["thumb_url"]
+                else:
+                    r0 = results[0]
+                    item = {
+                        "id": str(r0["vk_id"]),
+                        "url": r0["url"],
+                        "vkByCabinet": {str(cabinet_id): str(r0["vk_id"])},
+                        "type": "image" if is_image else "video",
+                    }
+                    if is_video and r0.get("thumb_url"):
+                        item["thumbUrl"] = r0["thumb_url"]
+
+                # добавляем в первый набор
+                existing[0].setdefault("items", []).append(item)
+
+                atomic_write_json(sets_file, existing)
+        except Exception as e:
+            log_error(f"upload: auto-append to sets.json failed: {repr(e)}")
 
         return {"status": "ok", "results": results}
 
