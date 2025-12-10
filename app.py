@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.82"
+VersionApp = "0.83"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2046,41 +2046,46 @@ def get_textsets(user_id: str, cabinet_id: str):
     try:
         ensure_user_structure(user_id)
         f = textsets_path(user_id, str(cabinet_id))
+
         if not f.exists():
             return {"textsets": []}
 
-        lock = f.with_suffix(f.suffix + ".lock")
-        with file_lock(lock):
-            # до 3 попыток, короткая пауза между ними
-            last_text = ""
-            for attempt in range(3):
+        last_text = ""
+        for attempt in range(3):
+            try:
+                text = f.read_text(encoding="utf-8")
+                last_text = text
+            except Exception as e:
+                log_error(f"textsets/get read failed {f}: {repr(e)}")
+                # короткая пауза и повтор
+                time.sleep(0.15)
+                continue
+
+            # Пустой файл трактуем как валидный «пустой список»
+            if not (text or "").strip():
+                return {"textsets": []}
+
+            try:
+                data = json.loads(text)
+                if not isinstance(data, list):
+                    data = []
+                return {"textsets": data}
+            except Exception as je:
+                # если это не последняя попытка — подождём и попробуем ещё раз
+                if attempt < 2:
+                    time.sleep(0.2)  # на случай конкурентной записи
+                    continue
+                # после 3-й неудачи — откладываем битый файл и возвращаем пусто
                 try:
-                    text = f.read_text(encoding="utf-8")
-                    last_text = text
-                except Exception as e:
-                    log_error(f"textsets/get read failed {f}: {repr(e)}")
-                    text = ""
-                # пустой файл трактуем как валидный «пустой список»
-                if not text.strip():
-                    return {"textsets": []}
-                try:
-                    data = json.loads(text)
-                    if not isinstance(data, list):
-                        data = []
-                    return {"textsets": data}
-                except Exception as je:
-                    # если это не последняя попытка — подождём и попробуем ещё раз
-                    if attempt < 2:
-                        time.sleep(0.2)  # короткая пауза — на случай конкурентной записи
-                        continue
-                    # после 3-й неудачи — откладываем битый файл и возвращаем пусто
                     bad = f.with_suffix(f.suffix + f".bad_{int(datetime.utcnow().timestamp())}")
-                    try:
-                        bad.write_text(last_text, encoding="utf-8")
-                    except Exception as e2:
-                        log_error(f"textsets/get failed to write .bad: {repr(e2)}")
-                    log_error(f"textsets/get JSON error on {f}: {repr(je)}; moved to {bad.name}")
-                    return {"textsets": []}
+                    bad.write_text(last_text, encoding="utf-8")
+                except Exception as e2:
+                    log_error(f"textsets/get failed to write .bad: {repr(e2)}")
+                log_error(f"textsets/get JSON error on {f}: {repr(je)}; moved to {bad.name}")
+                return {"textsets": []}
+
+        # если все попытки чтения файла отвалились по I/O — вернём пусто
+        return {"textsets": []}
 
     except Exception as e:
         log_error(f"textsets/get[{user_id}/{cabinet_id}] error: {repr(e)}")
