@@ -17,10 +17,11 @@ import os
 import fcntl
 import errno
 import uuid
+import time
 
 app = FastAPI()
 
-VersionApp = "0.80"
+VersionApp = "0.81"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -934,12 +935,16 @@ def list_presets(user_id: str, cabinet_id: str):
     pdir = USERS_DIR / user_id / "presets" / cabinet_id
     presets = []
 
-    for file in pdir.glob("*.json"):
+    # Берём только файлы пресетов
+    for file in pdir.glob("preset_*.json"):
         try:
             with open(file, "r", encoding="utf-8") as f:
                 data = json.load(f)
+
             if not isinstance(data, dict):
                 raise ValueError("Preset file is not an object")
+
+            # минимальная валидация структуры
             if "company" not in data or not isinstance(data["company"], dict):
                 data["company"] = {}
             if "groups" not in data or not isinstance(data["groups"], list):
@@ -2046,24 +2051,37 @@ def get_textsets(user_id: str, cabinet_id: str):
 
         lock = f.with_suffix(f.suffix + ".lock")
         with file_lock(lock):
-            with open(f, "r", encoding="utf-8") as fh:
-                text = fh.read()
+            # до 3 попыток, короткая пауза между ними
+            last_text = ""
+            for attempt in range(3):
+                try:
+                    text = f.read_text(encoding="utf-8")
+                    last_text = text
+                except Exception as e:
+                    log_error(f"textsets/get read failed {f}: {repr(e)}")
+                    text = ""
+                # пустой файл трактуем как валидный «пустой список»
+                if not text.strip():
+                    return {"textsets": []}
+                try:
+                    data = json.loads(text)
+                    if not isinstance(data, list):
+                        data = []
+                    return {"textsets": data}
+                except Exception as je:
+                    # если это не последняя попытка — подождём и попробуем ещё раз
+                    if attempt < 2:
+                        time.sleep(0.2)  # короткая пауза — на случай конкурентной записи
+                        continue
+                    # после 3-й неудачи — откладываем битый файл и возвращаем пусто
+                    bad = f.with_suffix(f.suffix + f".bad_{int(datetime.utcnow().timestamp())}")
+                    try:
+                        bad.write_text(last_text, encoding="utf-8")
+                    except Exception as e2:
+                        log_error(f"textsets/get failed to write .bad: {repr(e2)}")
+                    log_error(f"textsets/get JSON error on {f}: {repr(je)}; moved to {bad.name}")
+                    return {"textsets": []}
 
-        try:
-            data = json.loads(text) if text.strip() else []
-            if not isinstance(data, list):
-                data = []
-            return {"textsets": data}
-        except json.JSONDecodeError as je:
-            # переименуем битый файл, чтобы не валить последующие запросы
-            bad = f.with_suffix(f.suffix + f".bad_{int(datetime.utcnow().timestamp())}")
-            try:
-                with open(bad, "w", encoding="utf-8") as bfh:
-                    bfh.write(text)
-            except Exception as e2:
-                log_error(f"textsets/get failed to write .bad: {repr(e2)}")
-            log_error(f"textsets/get JSONDecodeError on {f}: {repr(je)}; moved to {bad.name}")
-            return {"textsets": []}
     except Exception as e:
         log_error(f"textsets/get[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
