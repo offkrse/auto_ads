@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.81"
+VersionApp = "0.82"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2094,6 +2094,8 @@ async def upload_creative(
     user_id: str,
     cabinet_id: str,
     file: UploadFile = File(...),
+    set_id: str | None = Query(None, alias="setId"),
+    set_name: str | None = Query(None, alias="setName"),
 ):
     content_type = (file.content_type or "").lower()
     filename_lower = (file.filename or "").lower()
@@ -2245,60 +2247,110 @@ async def upload_creative(
         # --- Авто-добавление в creatives/sets.json выбранного кабинета ---
         try:
             ensure_user_structure(user_id)
-            sets_file = creatives_path(user_id, cabinet_id)
-            lock3 = sets_file.with_suffix(sets_file.suffix + ".lock")
-            with file_lock(lock3):
-                existing = []
-                if sets_file.exists():
-                    try:
-                        existing = json.loads(sets_file.read_text(encoding="utf-8")) or []
-                        if not isinstance(existing, list):
+
+            # 1) Если пришёл setId и это не "all" — кладём строго в указанный набор
+            if set_id and cabinet_id != "all":
+                fsets = creatives_path(user_id, cabinet_id)
+                lock = fsets.with_suffix(fsets.suffix + ".lock")
+                with file_lock(lock):
+                    # читаем текущий sets.json
+                    if fsets.exists():
+                        try:
+                            data = json.loads(fsets.read_text(encoding="utf-8"))
+                            if not isinstance(data, list):
+                                data = []
+                        except Exception:
+                            data = []
+                    else:
+                        data = []
+
+                    # ищем/создаём набор
+                    target_set = None
+                    for s in data:
+                        if str(s.get("id")) == str(set_id):
+                            target_set = s
+                            break
+                    if target_set is None:
+                        target_set = {
+                            "id": str(set_id),
+                            "name": set_name or "Набор",
+                            "items": []
+                        }
+                        data.append(target_set)
+
+                    items = target_set.get("items") or []
+                    # берём результат именно для текущего cabinet_id
+                    res0 = next((r for r in results if str(r["cabinet_id"]) == str(cabinet_id)), None)
+                    if res0:
+                        new_item = {
+                            "id": str(res0["vk_id"]),
+                            "url": res0["url"],
+                            "name": res0.get("display_name") or file.filename or "",
+                            "type": "image" if is_image else "video",
+                            "uploaded": True,
+                            "vkByCabinet": {str(cabinet_id): str(res0["vk_id"])},
+                        }
+                        if res0.get("thumb_url"):
+                            new_item["thumbUrl"] = res0["thumb_url"]
+
+                        items.append(new_item)
+                        target_set["items"] = items
+
+                    atomic_write_json(fsets, data)
+
+            # 2) Иначе — ведём себя как раньше (кладём в первый набор / поддерживаем режим "all")
+            else:
+                sets_file = creatives_path(user_id, cabinet_id)
+                lock3 = sets_file.with_suffix(sets_file.suffix + ".lock")
+                with file_lock(lock3):
+                    existing = []
+                    if sets_file.exists():
+                        try:
+                            existing = json.loads(sets_file.read_text(encoding="utf-8")) or []
+                            if not isinstance(existing, list):
+                                existing = []
+                        except Exception:
                             existing = []
-                    except Exception:
-                        existing = []
 
-                # если набора нет — создадим "Набор 1"
-                if not existing:
-                    existing = [{"id": f"id_{uuid.uuid4().hex[:8]}", "name": "Набор 1", "items": []}]
+                    if not existing:
+                        existing = [{"id": f"id_{uuid.uuid4().hex[:8]}", "name": "Набор 1", "items": []}]
 
-                # Общие поля для имени и uploaded
-                # Берём красивое отображаемое имя (то, что справа от vk_id_) — мы уже кладём его в results
-                display_name_for_item = (results[0].get("display_name")
-                                         or (file.filename or "").strip()
-                                         or "file")
+                    display_name_for_item = (
+                        results[0].get("display_name")
+                        or (file.filename or "").strip()
+                        or "file"
+                    )
 
-                if str(cabinet_id) == "all":
-                    urls = {str(r["cabinet_id"]): r["url"] for r in results if r.get("url")}
-                    vk_by = {str(r["cabinet_id"]): r["vk_id"] for r in results if r.get("vk_id")}
-                    main_id = str(results[0]["vk_id"])
-                    item = {
-                        "id": main_id,
-                        "url": results[0]["url"],
-                        "urls": urls,
-                        "vkByCabinet": vk_by,
-                        "type": "image" if is_image else "video",
-                        "name": display_name_for_item,
-                        "uploaded": True,
-                    }
-                    if is_video and results[0].get("thumb_url"):
-                        item["thumbUrl"] = results[0]["thumb_url"]
-                else:
-                    r0 = results[0]
-                    item = {
-                        "id": str(r0["vk_id"]),
-                        "url": r0["url"],
-                        "vkByCabinet": {str(cabinet_id): str(r0["vk_id"])},
-                        "type": "image" if is_image else "video",
-                        "name": display_name_for_item,
-                        "uploaded": True,
-                    }
-                    if is_video and r0.get("thumb_url"):
-                        item["thumbUrl"] = r0["thumb_url"]
+                    if str(cabinet_id) == "all":
+                        urls = {str(r["cabinet_id"]): r["url"] for r in results if r.get("url")}
+                        vk_by = {str(r["cabinet_id"]): r["vk_id"] for r in results if r.get("vk_id")}
+                        main_id = str(results[0]["vk_id"])
+                        item = {
+                            "id": main_id,
+                            "url": results[0]["url"],
+                            "urls": urls,
+                            "vkByCabinet": vk_by,
+                            "type": "image" if is_image else "video",
+                            "name": display_name_for_item,
+                            "uploaded": True,
+                        }
+                        if not is_image and results[0].get("thumb_url"):
+                            item["thumbUrl"] = results[0]["thumb_url"]
+                    else:
+                        r0 = results[0]
+                        item = {
+                            "id": str(r0["vk_id"]),
+                            "url": r0["url"],
+                            "vkByCabinet": {str(cabinet_id): str(r0["vk_id"])},
+                            "type": "image" if is_image else "video",
+                            "name": display_name_for_item,
+                            "uploaded": True,
+                        }
+                        if not is_image and r0.get("thumb_url"):
+                            item["thumbUrl"] = r0["thumb_url"]
 
-                # добавляем в первый набор
-                existing[0].setdefault("items", []).append(item)
-
-                atomic_write_json(sets_file, existing)
+                    existing[0].setdefault("items", []).append(item)
+                    atomic_write_json(sets_file, existing)
         except Exception as e:
             log_error(f"upload: auto-append to sets.json failed: {repr(e)}")
 
