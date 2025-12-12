@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.83"
+VersionApp = "0.84"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -88,6 +88,11 @@ def next_display_name(storage: Path, original: str) -> str:
         if candidate not in used:
             return candidate
         n += 1
+
+def pixels_path(user_id: str, cabinet_id: str) -> Path:
+    p = USERS_DIR / str(user_id) / "others"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / f"{cabinet_id}pixels.json"
 
 def check_telegram_init_data(init_data: str) -> dict:
     """
@@ -1444,6 +1449,72 @@ async def queue_status_set(payload: dict):
         log_error(f"queue/status/set error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error":"Internal Server Error"})
 
+# -------------------------------------
+#   PIXELS
+# -------------------------------------
+@secure_auto.get("/pixels/get")
+@secure_api.get("/pixels/get")
+def pixels_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    ensure_user_structure(user_id)
+    f = pixels_path(user_id, str(cabinet_id))
+    lock = f.with_suffix(".lock")
+
+    if not f.exists():
+        return {"pixels": []}
+
+    with file_lock(lock):
+        raw = f.read_text(encoding="utf-8") if f.exists() else ""
+
+    try:
+        data = json.loads(raw) if raw.strip() else []
+        if not isinstance(data, list):
+            data = []
+        # нормализуем в [{id,name}]
+        out = []
+        for it in data:
+            if isinstance(it, dict):
+                pid = str(it.get("id", "")).strip()
+                name = str(it.get("name", "")).strip() or pid
+                if pid:
+                    out.append({"id": pid, "name": name})
+            elif isinstance(it, str) and it.strip():
+                out.append({"id": it.strip(), "name": it.strip()})
+        return {"pixels": out}
+    except Exception as e:
+        log_error(f"pixels_get JSON error {f}: {repr(e)}")
+        return {"pixels": []}
+
+@secure_auto.post("/pixels/save")
+@secure_api.post("/pixels/save")
+async def pixels_save(payload: dict):
+    user_id = payload.get("userId")
+    cabinet_id = payload.get("cabinetId")
+    pixels = payload.get("pixels", [])
+
+    if not user_id or cabinet_id is None:
+        raise HTTPException(400, "Missing userId/cabinetId")
+
+    ensure_user_structure(str(user_id))
+    f = pixels_path(str(user_id), str(cabinet_id))
+    lock = f.with_suffix(".lock")
+
+    # нормализация
+    out = []
+    if isinstance(pixels, list):
+        for it in pixels:
+            if isinstance(it, dict):
+                pid = str(it.get("id", "")).strip()
+                name = str(it.get("name", "")).strip() or pid
+                if pid:
+                    out.append({"id": pid, "name": name})
+            elif isinstance(it, str) and it.strip():
+                s = it.strip()
+                out.append({"id": s, "name": s})
+
+    with file_lock(lock):
+        atomic_write_json(f, out)
+
+    return {"status": "ok", "pixels": out}
 
 # -------------------------------------
 #   LOGO SETS
