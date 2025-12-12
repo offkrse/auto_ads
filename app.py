@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.84"
+VersionApp = "0.85"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1469,16 +1469,25 @@ def pixels_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
         data = json.loads(raw) if raw.strip() else []
         if not isinstance(data, list):
             data = []
-        # нормализуем в [{id,name}]
+
         out = []
         for it in data:
             if isinstance(it, dict):
                 pid = str(it.get("id", "")).strip()
                 name = str(it.get("name", "")).strip() or pid
+                domain = str(it.get("domain", "")).strip()
                 if pid:
-                    out.append({"id": pid, "name": name})
+                    row = {"id": pid, "name": name}
+                    if domain:
+                        row["domain"] = domain
+                        row["label"] = f"{domain} - {name}"   # удобно для dropdown
+                    else:
+                        row["label"] = name
+                    out.append(row)
             elif isinstance(it, str) and it.strip():
-                out.append({"id": it.strip(), "name": it.strip()})
+                s = it.strip()
+                out.append({"id": s, "name": s, "label": s})
+
         return {"pixels": out}
     except Exception as e:
         log_error(f"pixels_get JSON error {f}: {repr(e)}")
@@ -1498,15 +1507,18 @@ async def pixels_save(payload: dict):
     f = pixels_path(str(user_id), str(cabinet_id))
     lock = f.with_suffix(".lock")
 
-    # нормализация
     out = []
     if isinstance(pixels, list):
         for it in pixels:
             if isinstance(it, dict):
                 pid = str(it.get("id", "")).strip()
                 name = str(it.get("name", "")).strip() or pid
+                domain = str(it.get("domain", "")).strip()
                 if pid:
-                    out.append({"id": pid, "name": name})
+                    row = {"id": pid, "name": name}
+                    if domain:
+                        row["domain"] = domain
+                    out.append(row)
             elif isinstance(it, str) and it.strip():
                 s = it.strip()
                 out.append({"id": s, "name": s})
