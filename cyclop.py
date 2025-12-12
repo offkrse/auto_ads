@@ -18,7 +18,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.31"
+VersionCyclop = "1.32"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -422,8 +422,9 @@ def _find_creative_meta(cabinet_id: str, media_id: int) -> Optional[Dict[str, An
 def _add_group_with_optional_pads(payload_ad_groups: List[Dict[str, Any]],
                                  group_payload: Dict[str, Any],
                                  placements: List[int]) -> None:
+    # pads должен быть ТОЛЬКО внутри targetings
     if placements:
-        group_payload["pads"] = placements
+        group_payload.setdefault("targetings", {})["pads"] = placements
     payload_ad_groups.append(group_payload)
 
 def detect_image_media_kind(media_id: int, cabinet_id: Optional[str]) -> str:
@@ -1064,17 +1065,18 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             targetings["interests"] = interests_list
         if age_list:
             targetings["age"] = {"age_list": age_list}
+        if placements:
+            targetings["pads"] = placements
 
-        pads_vals = PADS_FOR_PACKAGE.get(package_id)
 
         budget_day = int(g.get("budget") or 0)
         utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
         banners_payload = [{"name": f"Объявление {g_idx}", "urls": {"primary": {"id": ad_object_id}}}]
 
-        group_payload: Dict[str, Any] = {
+        ad_groups_payload.append({
             "name": group_name,
-            "targetings": targetings,
+            "targetings": json.loads(json.dumps(targetings)),
             "max_price": 0,
             "autobidding_mode": "max_goals",
             "budget_limit": None,
@@ -1085,12 +1087,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             "package_id": package_id,
             "utm": utm,
             "banners": banners_payload,
-        }
-        
-        if placements:
-            group_payload["pads"] = placements
-
-        ad_groups_payload.append(group_payload)
+        })
         
     payload = {
         "name": company_name,
@@ -1425,7 +1422,6 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
     payload_try["ad_groups"] = []  # перезапишем полностью
 
     pkg_id = package_id_for_objective(objective)
-    pads_vals = PADS_FOR_PACKAGE.get(pkg_id)
 
     # по каждой группе fast-пресета
     for g_idx, g in enumerate(groups, start=1):
@@ -1488,6 +1484,8 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 targetings["segments"] = seg_ids
             if age_list:
                 targetings["age"] = {"age_list": age_list}
+            if placements:
+                targetings["pads"] = placements
 
             budget_day = int(g.get("budget") or 0)
             utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
@@ -1554,7 +1552,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         
                     group_payload = {
                         "name": safe_g_name,
-                        "targetings": targetings,
+                        "targetings": json.loads(json.dumps(targetings)),
                         "max_price": 0,
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
@@ -1615,7 +1613,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
                     group_payload = {
                         "name": safe_g_name,
-                        "targetings": targetings,
+                        "targetings": json.loads(json.dumps(targetings)),
                         "max_price": 0,
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
