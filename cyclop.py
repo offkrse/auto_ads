@@ -18,7 +18,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.33"
+VersionCyclop = "1.34"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -440,10 +440,6 @@ def sleep_to_next_tick(target_second: int = TARGET_SECOND, *, wake_early: float 
     time.sleep(sleep_s)
 
 def _build_priced_goal_company(company: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Для site_conversions:
-    priced_goal в payload компании (верхний уровень).
-    """
     if (company.get("targetAction") or "") != "site_conversions":
         return None
 
@@ -453,19 +449,13 @@ def _build_priced_goal_company(company: Dict[str, Any]) -> Optional[Dict[str, An
     if not name or pixel is None or str(pixel).strip() == "":
         raise ValueError("site_conversions требует company.siteAction и company.sitePixel")
 
+    # ВАЖНО: никаких None/null — только реально нужные поля
     return {
-        "inapp_event_category_id": None,
-        "miniapp_inapp_event_name": None,
         "name": name,
         "source_id": int(pixel),
     }
 
 def _build_priced_goal_group(company: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Для site_conversions:
-    priced_goal в каждой группе (campaigns).
-    ВАЖНО: без miniapp_inapp_event_name, как ты просил.
-    """
     if (company.get("targetAction") or "") != "site_conversions":
         return None
 
@@ -476,7 +466,6 @@ def _build_priced_goal_group(company: Dict[str, Any]) -> Optional[Dict[str, Any]
         raise ValueError("site_conversions требует company.siteAction и company.sitePixel")
 
     return {
-        "inapp_event_category_id": None,
         "name": name,
         "source_id": int(pixel),
     }
@@ -1701,6 +1690,9 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "utm": utm,
                         "banners": [banner],
                     }
+                    pg_group = _build_priced_goal_group(company)
+                    if pg_group:
+                        group_payload["priced_goal"] = pg_group
                     _add_group_with_optional_pads(payload_try["ad_groups"], group_payload, placements)
                     made_any = True
             if not made_any:
@@ -1819,7 +1811,6 @@ def process_queue_once() -> None:
         log.warning("Queue is not a list")
         return
 
-    now_local = datetime.now(LOCAL_TZ)
     for item in queue:
         try:
             # статус пресета в очереди (по умолчанию считаем active)
@@ -1838,6 +1829,9 @@ def process_queue_once() -> None:
             count_repeats = int(item.get("count_repeats") or 1)
             fast_flag = str(item.get("fast_preset", "")).strip().lower() == "true"
 
+            now_local = datetime.now(LOCAL_TZ)
+            match, info = check_trigger(trigger_time, now_local)
+            
             match, info = check_trigger(trigger_time, now_local)
             if not match:
                 log.info("[WAIT] %s/%s preset=%s | trigger=%s | target(shifted)=%s | now(+%sh)=%s | delta=%ss (window=%ss)",
