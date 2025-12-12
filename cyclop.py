@@ -18,7 +18,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.32"
+VersionCyclop = "1.33"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -31,6 +31,7 @@ API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 # Фиксированное смещение: от trigger_time ВСЕГДА вычитаем 4 часа
 SERVER_SHIFT_HOURS = 4
 MATCH_WINDOW_SECONDS = int("59")  # окно совпадения, сек
+TARGET_SECOND = 30  # триггер в HH:MM:30
 
 DEBUG_SAVE_PAYLOAD = os.getenv("DEBUG_SAVE_PAYLOAD", "0") == "1"
 DEBUG_DRY_RUN = os.getenv("DEBUG_DRY_RUN", "0") == "1"
@@ -419,6 +420,67 @@ def _find_creative_meta(cabinet_id: str, media_id: int) -> Optional[Dict[str, An
 
     return None
 
+def sleep_to_next_tick(target_second: int = TARGET_SECOND, *, wake_early: float = 0.15) -> None:
+    """
+    Спим до ближайшего времени HH:MM:target_second (по LOCAL_TZ).
+    wake_early — проснуться чуть раньше (в секундах), чтобы не проскочить из-за задержек.
+    """
+    now = datetime.now(LOCAL_TZ)
+
+    next_tick = now.replace(second=target_second, microsecond=0)
+    if now >= next_tick:
+        next_tick += timedelta(minutes=1)
+
+    sleep_s = (next_tick - now).total_seconds() - float(wake_early)
+    # защита от отрицательных/слишком малых
+    if sleep_s < 0.05:
+        sleep_s = 0.05
+
+    log.debug("Sleeping %.3fs until %s", sleep_s, next_tick.strftime("%Y-%m-%d %H:%M:%S %Z"))
+    time.sleep(sleep_s)
+
+def _build_priced_goal_company(company: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Для site_conversions:
+    priced_goal в payload компании (верхний уровень).
+    """
+    if (company.get("targetAction") or "") != "site_conversions":
+        return None
+
+    name = (company.get("siteAction") or "").strip()
+    pixel = company.get("sitePixel")
+
+    if not name or pixel is None or str(pixel).strip() == "":
+        raise ValueError("site_conversions требует company.siteAction и company.sitePixel")
+
+    return {
+        "inapp_event_category_id": None,
+        "miniapp_inapp_event_name": None,
+        "name": name,
+        "source_id": int(pixel),
+    }
+
+def _build_priced_goal_group(company: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Для site_conversions:
+    priced_goal в каждой группе (campaigns).
+    ВАЖНО: без miniapp_inapp_event_name, как ты просил.
+    """
+    if (company.get("targetAction") or "") != "site_conversions":
+        return None
+
+    name = (company.get("siteAction") or "").strip()
+    pixel = company.get("sitePixel")
+
+    if not name or pixel is None or str(pixel).strip() == "":
+        raise ValueError("site_conversions требует company.siteAction и company.sitePixel")
+
+    return {
+        "inapp_event_category_id": None,
+        "name": name,
+        "source_id": int(pixel),
+    }
+
 def _add_group_with_optional_pads(payload_ad_groups: List[Dict[str, Any]],
                                  group_payload: Dict[str, Any],
                                  placements: List[int]) -> None:
@@ -716,7 +778,7 @@ def compute_target_dt(trigger_hhmm: str, ref_now: datetime) -> datetime:
     Берём часы/минуты из trigger_hhmm для СЕГОДНЯ в LOCAL_TZ (без смещений).
     """
     h, m = parse_hhmm(trigger_hhmm)
-    return ref_now.replace(hour=h, minute=m, second=0, microsecond=0)
+    return ref_now.replace(hour=h, minute=m, second=TARGET_SECOND, microsecond=0)
 
 def check_trigger(trigger_hhmm: str, now_local: Optional[datetime] = None) -> Tuple[bool, Dict[str, str]]:
     if now_local is None:
@@ -1074,9 +1136,9 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
 
         banners_payload = [{"name": f"Объявление {g_idx}", "urls": {"primary": {"id": ad_object_id}}}]
 
-        ad_groups_payload.append({
+        group_payload = {
             "name": group_name,
-            "targetings": json.loads(json.dumps(targetings)),
+            "targetings": targetings,
             "max_price": 0,
             "autobidding_mode": "max_goals",
             "budget_limit": None,
@@ -1087,7 +1149,13 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             "package_id": package_id,
             "utm": utm,
             "banners": banners_payload,
-        })
+        }
+        
+        pg_group = _build_priced_goal_group(company)
+        if pg_group:
+            group_payload["priced_goal"] = pg_group
+        
+        ad_groups_payload.append(group_payload)
         
     payload = {
         "name": company_name,
@@ -1103,6 +1171,11 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         "ad_object_type": "url",
         "ad_groups": ad_groups_payload,
     }
+
+    pg_company = _build_priced_goal_company(company)
+    if pg_company:
+        payload["priced_goal"] = pg_company
+    
     return payload
 
 # ============================ Создание плана ============================
@@ -1564,6 +1637,9 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "utm": utm,
                         "banners": [banner],
                     }
+                    pg_group = _build_priced_goal_group(company)
+                    if pg_group:
+                        group_payload["priced_goal"] = pg_group
                     _add_group_with_optional_pads(payload_try["ad_groups"], group_payload, placements)
                     made_any = True
                 # --- затем КАРТИНКИ ---
@@ -1817,7 +1893,7 @@ def main_loop() -> None:
             process_queue_once()
         except Exception as e:
             log.exception("Fatal error: %s", e)
-        time.sleep(60)
+        sleep_to_next_tick(TARGET_SECOND, wake_early=0.15)
 
 if __name__ == "__main__":
     main_loop()
