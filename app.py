@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.85"
+VersionApp = "0.86"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1511,14 +1511,16 @@ async def pixels_save(payload: dict):
     if isinstance(pixels, list):
         for it in pixels:
             if isinstance(it, dict):
-                pid = str(it.get("id", "")).strip()
-                name = str(it.get("name", "")).strip() or pid
-                domain = str(it.get("domain", "")).strip()
+                pid = str(it.get("id") or it.get("pixel") or it.get("value") or "").strip()
+                name = str(it.get("name") or it.get("label") or pid).strip() or pid
+                domain = str(it.get("domain") or "").strip()
+    
                 if pid:
                     row = {"id": pid, "name": name}
                     if domain:
                         row["domain"] = domain
                     out.append(row)
+    
             elif isinstance(it, str) and it.strip():
                 s = it.strip()
                 out.append({"id": s, "name": s})
