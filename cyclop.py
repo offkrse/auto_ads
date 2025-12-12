@@ -18,7 +18,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.3"
+VersionCyclop = "1.31"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -419,6 +419,12 @@ def _find_creative_meta(cabinet_id: str, media_id: int) -> Optional[Dict[str, An
 
     return None
 
+def _add_group_with_optional_pads(payload_ad_groups: List[Dict[str, Any]],
+                                 group_payload: Dict[str, Any],
+                                 placements: List[int]) -> None:
+    if placements:
+        group_payload["pads"] = placements
+    payload_ad_groups.append(group_payload)
 
 def detect_image_media_kind(media_id: int, cabinet_id: Optional[str]) -> str:
     """
@@ -1060,20 +1066,15 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             targetings["age"] = {"age_list": age_list}
 
         pads_vals = PADS_FOR_PACKAGE.get(package_id)
-        if placements:
-            targetings["pads"] = placements
-        elif pads_vals:
-            targetings["pads"] = pads_vals
 
         budget_day = int(g.get("budget") or 0)
         utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
         banners_payload = [{"name": f"Объявление {g_idx}", "urls": {"primary": {"id": ad_object_id}}}]
 
-        ad_groups_payload.append({
+        group_payload: Dict[str, Any] = {
             "name": group_name,
             "targetings": targetings,
-            "pads": placements,
             "max_price": 0,
             "autobidding_mode": "max_goals",
             "budget_limit": None,
@@ -1084,8 +1085,13 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             "package_id": package_id,
             "utm": utm,
             "banners": banners_payload,
-        })
+        }
+        
+        if placements:
+            group_payload["pads"] = placements
 
+        ad_groups_payload.append(group_payload)
+        
     payload = {
         "name": company_name,
         "status": "active",
@@ -1482,8 +1488,6 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 targetings["segments"] = seg_ids
             if age_list:
                 targetings["age"] = {"age_list": age_list}
-            if pads_vals:
-                targetings["pads"] = pads_vals
 
             budget_day = int(g.get("budget") or 0)
             utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
@@ -1548,11 +1552,10 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         log.error("FAST: banner is not a dict, skip group. ad_index=%s", ai)
                         continue
                         
-                    payload_try["ad_groups"].append({
+                    group_payload = {
                         "name": safe_g_name,
                         "targetings": targetings,
                         "max_price": 0,
-                        "pads": placements,
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
                         "budget_limit_day": budget_day,
@@ -1561,10 +1564,10 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "age_restrictions": "18+",
                         "package_id": pkg_id,
                         "utm": utm,
-                        "banners": [banner],            # ← один баннер в группе
-                    })
+                        "banners": [banner],
+                    }
+                    _add_group_with_optional_pads(payload_try["ad_groups"], group_payload, placements)
                     made_any = True
-            
                 # --- затем КАРТИНКИ ---
                 for img in (ad.get("imageIds") or []):
                     try:
@@ -1610,11 +1613,10 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         log.error("FAST: banner is not a dict, skip group. ad_index=%s", ai)
                         continue
 
-                    payload_try["ad_groups"].append({
+                    group_payload = {
                         "name": safe_g_name,
                         "targetings": targetings,
                         "max_price": 0,
-                        "pads": placements,
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
                         "budget_limit_day": budget_day,
@@ -1624,9 +1626,9 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "package_id": pkg_id,
                         "utm": utm,
                         "banners": [banner],
-                    })
+                    }
+                    _add_group_with_optional_pads(payload_try["ad_groups"], group_payload, placements)
                     made_any = True
-            
             if not made_any:
                 write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                                    "FAST: не собран ни один баннер (нет креативов)", "fast no creatives")
