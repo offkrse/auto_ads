@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import logging
 from logging.handlers import TimedRotatingFileHandler
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from dateutil import tz
@@ -17,7 +18,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.26"
+VersionCyclop = "1.3"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -85,7 +86,10 @@ log = setup_logger()
 # ============================ Пакеты / площадки ============================
 
 def package_id_for_objective(obj: str) -> int:
-    return {"socialengagement": 3127}.get(obj, 3127)
+    return {
+        "socialengagement": 3127,
+        "site_conversions": 3229,
+    }.get(obj, 3127)
 
 # Площадки (pads), разрешённые для пакета 3127 (примерный список)
 PADS_FOR_PACKAGE: Dict[int, List[int]] = {
@@ -553,18 +557,6 @@ def expand_abstract_names(abs_names: List[str], day_number: int) -> List[str]:
     # уникализируем, сохраняя порядок
     return list(dict.fromkeys(out))
 
-def expand_abstract_names(abs_names: List[str], day_number: int) -> List[str]:
-    """Возвращает человеко-читаемые названия аудиторий из abstractAudiences,
-    подставляя {день} -> day_number. Без запросов к API.
-    """
-    out: List[str] = []
-    for raw in abs_names or []:
-        name = str(raw).replace("{день}", str(day_number))
-        if name:
-            out.append(name)
-    # уникализируем, сохраняя порядок
-    return list(dict.fromkeys(out))
-
 def resolve_abstract_audiences(tokens: List[str], names: List[str], day_number: int) -> List[int]:
     """
     Для каждого имени в names подставляем {день} -> day_number,
@@ -890,6 +882,48 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
     log.info("Resolved URL '%s' -> id=%s", url_str, ad_id)
     return ad_id
 
+def normalize_site_url(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s:
+        return s
+
+    # если только домен/без схемы
+    if not re.match(r"^https?://", s, flags=re.I):
+        s = "https://" + s.lstrip("/")
+
+    parts = urlsplit(s)
+    path = parts.path or "/"
+    # ВАЖНО: для домена обеспечиваем слэш на конце (как в примере)
+    if path == "/":
+        path = "/"
+    # если пользователь дал вообще без path - тоже "/"
+    if not path:
+        path = "/"
+
+    norm = urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+    # чтобы https://narod-zaem.ru -> https://narod-zaem.ru/
+    if parts.netloc and (parts.path == "" or parts.path == "/"):
+        norm = f"{parts.scheme}://{parts.netloc}/"
+    if parts.netloc and norm == f"{parts.scheme}://{parts.netloc}":
+        norm += "/"
+
+    return norm
+
+def create_url_v2(url_str: str, tokens: List[str]) -> int:
+    endpoint = f"{API_BASE}/api/v2/urls.json"
+    body = json.dumps({"url": url_str}, ensure_ascii=False).encode("utf-8")
+    payload = with_retries("POST", endpoint, tokens, data=body)
+
+    if isinstance(payload, dict):
+        if "id" in payload:
+            return int(payload["id"])
+        # на всякий случай (если внезапно завернутый формат)
+        if isinstance(payload.get("url"), dict) and "id" in payload["url"]:
+            return int(payload["url"]["id"])
+
+    raise RuntimeError(f"No id in /api/v2/urls.json response: {payload}")
+    
 # ============================ Баннер (строго 2 креатива) ============================
 
 def pick_creative(ad: Dict[str, Any], cabinet_id: Optional[str] = None) -> Tuple[str, int]:
@@ -932,14 +966,16 @@ def make_banner_for_creative(ad_object_id: int,
                              banner_name: str,
                              cta_text: str,
                              media_kind: str,
-                             media_id: int) -> Dict[str, Any]:
+                             media_id: int,
+                             objective: str = "") -> Dict[str, Any]:
     """
     Собирает баннер с переданным media_kind ('image_600x600' или 'video_portrait_9_16_30s')
     и media_id. Остальные поля — как раньше.
     """
     title = (ad.get("title") or "").strip()
     short = (ad.get("shortDescription") or "").strip()
-
+    long_text = (ad.get("longDescription") or "").strip()
+                                 
     if not advertiser_info:
         raise ValueError("Отсутствует advertiserInfo (about_company_115).")
     if not icon_id:
@@ -956,17 +992,27 @@ def make_banner_for_creative(ad_object_id: int,
 
     log.info("Banner #%d: icon_id=%s, %s=%s, name='%s', cta='%s'",
              idx, int(icon_id), media_kind, media_id, banner_name, cta_text)
-
-    return {
-        "name": banner_name,
-        "urls": {"primary": {"id": ad_object_id}},
-        "content": content,
-        "textblocks": {
+    if objective == "site_conversions":
+        textblocks = {
+            "about_company_115": {"text": advertiser_info, "title": ""},
+            "cta_sites_full": {"text": (cta_text or "visitSite"), "title": ""},
+            "text_90": {"text": short, "title": ""},
+            "text_long": {"text": long_text, "title": ""},
+            "title_40_vkads": {"text": title, "title": ""},
+        }
+    else:
+        textblocks = {
             "about_company_115": {"text": advertiser_info, "title": ""},
             "cta_community_vk": {"text": (cta_text or "visitSite"), "title": ""},
             "text_2000": {"text": short, "title": ""},
             "title_40_vkads": {"text": title, "title": ""},
         }
+                                 
+    return {
+        "name": banner_name,
+        "urls": {"primary": {"id": ad_object_id}},
+        "content": content,
+        "textblocks": textblocks
     }
 
 # ============================ Построение payload ============================
@@ -992,6 +1038,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         group_name_tpl = (g.get("groupName") or f"Группа {g_idx}").strip()
         age_str = g.get("age", "")
         gender_str = g.get("gender", "")
+        placements = as_int_list(g.get("placements"))
         group_name = render_name_tokens(
             group_name_tpl, today_date=today, objective=objective, age=age_str, gender=gender_str, n=1, n_g=1
         )
@@ -1013,7 +1060,9 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             targetings["age"] = {"age_list": age_list}
 
         pads_vals = PADS_FOR_PACKAGE.get(package_id)
-        if pads_vals:
+        if placements:
+            targetings["pads"] = placements
+        elif pads_vals:
             targetings["pads"] = pads_vals
 
         budget_day = int(g.get("budget") or 0)
@@ -1024,6 +1073,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         ad_groups_payload.append({
             "name": group_name,
             "targetings": targetings,
+            "pads": placements,
             "max_price": 0,
             "autobidding_mode": "max_goals",
             "budget_limit": None,
@@ -1074,10 +1124,16 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     company_logo = company.get("logoId")
 
     company_name = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
+    objective = company.get("targetAction", "socialengagement")
 
     # Разрешаем URL -> id
     try:
-        ad_object_id = resolve_url_id(url, tokens)
+        if objective == "site_conversions":
+            norm_url = normalize_site_url(url)
+            ad_object_id = create_url_v2(norm_url, tokens)
+            log.info("site_conversions URL normalized: %s -> %s (ad_object_id=%s)", url, norm_url, ad_object_id)
+        else:
+            ad_object_id = resolve_url_id(url, tokens)
     except Exception as e:
         write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                            "Не удалось получить ad_object_id по URL", repr(e))
@@ -1216,7 +1272,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 ad_object_id, ad, idx=gi + 1,
                 advertiser_info=adv_info, icon_id=int(icon_id),
                 banner_name=banner_name, cta_text=cta_text,
-                media_kind=media_kind, media_id=media_id
+                media_kind=media_kind, media_id=media_id,
+                objective=objective
             )
             banners_by_group.append(banner)
             log.info("Собран баннер #%d для группы '%s' (name='%s')",
@@ -1332,7 +1389,12 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
     objective = company.get("targetAction", "socialengagement")
 
     try:
-        ad_object_id = resolve_url_id(url, tokens)
+        if objective == "site_conversions":
+            norm_url = normalize_site_url(url)
+            ad_object_id = create_url_v2(norm_url, tokens)
+            log.info("site_conversions URL normalized: %s -> %s (ad_object_id=%s)", url, norm_url, ad_object_id)
+        else:
+            ad_object_id = resolve_url_id(url, tokens)
     except Exception as e:
         write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                            "Не удалось получить ad_object_id по URL", repr(e))
@@ -1366,6 +1428,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
         genders = split_gender(g.get("gender", ""))
         age_str = g.get("age", "")
         age_list = build_age_list(age_str)
+        placements = as_int_list(g.get("placements"))
 
         base_segments = as_int_list(g.get("audienceIds"))
         base_abstract = g.get("abstractAudiences") or []
@@ -1474,7 +1537,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         ad_object_id, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
-                        media_kind="video_portrait_9_16_30s", media_id=media_id
+                        media_kind="video_portrait_9_16_30s", media_id=media_id, objective=objective
                     )
                     
                     safe_g_name = (g_name or "").strip()
@@ -1489,6 +1552,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "name": safe_g_name,
                         "targetings": targetings,
                         "max_price": 0,
+                        "pads": placements,
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
                         "budget_limit_day": budget_day,
@@ -1535,7 +1599,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         ad_object_id, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
-                        media_kind=media_kind, media_id=media_id
+                        media_kind=media_kind, media_id=media_id, objective=objective
                     )
 
                     safe_g_name = (g_name or "").strip()
@@ -1550,6 +1614,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "name": safe_g_name,
                         "targetings": targetings,
                         "max_price": 0,
+                        "pads": placements,
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
                         "budget_limit_day": budget_day,
