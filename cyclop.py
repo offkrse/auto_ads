@@ -18,7 +18,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.34"
+VersionCyclop = "1.35"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -940,6 +940,21 @@ def resolve_url_id(url_str: str, tokens: List[str]) -> int:
     log.info("Resolved URL '%s' -> id=%s", url_str, ad_id)
     return ad_id
 
+def get_url_object_id(raw_url: str, objective: str, tokens: List[str]) -> int:
+    """
+    Возвращает id url-объекта для баннера/кампании.
+    Для site_conversions используем /api/v2/urls.json (create_url_v2) и нормализацию.
+    Для остальных целей — /api/v1/urls/?url=... (resolve_url_id).
+    """
+    if not raw_url or not str(raw_url).strip():
+        raise ValueError("Empty URL")
+
+    if objective == "site_conversions":
+        norm = normalize_site_url(raw_url)
+        return create_url_v2(norm, tokens)
+    else:
+        return resolve_url_id(raw_url, tokens)
+
 def normalize_site_url(raw: str) -> str:
     s = (raw or "").strip()
     if not s:
@@ -1015,7 +1030,7 @@ def pick_creative(ad: Dict[str, Any], cabinet_id: Optional[str] = None) -> Tuple
 
     raise ValueError("Нет подходящего креатива: пустые imageIds и videoIds")
 
-def make_banner_for_creative(ad_object_id: int,
+def make_banner_for_creative(url_id: int,
                              ad: Dict[str, Any],
                              *,
                              idx: int,
@@ -1068,7 +1083,7 @@ def make_banner_for_creative(ad_object_id: int,
                                  
     return {
         "name": banner_name,
-        "urls": {"primary": {"id": ad_object_id}},
+        "urls": {"primary": {"id": int(url_id)}},
         "content": content,
         "textblocks": textblocks
     }
@@ -1203,6 +1218,19 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                            "Не удалось получить ad_object_id по URL", repr(e))
         raise
+        
+    # --- cache for URL -> id (чтобы не дергать API много раз) ---
+    url_id_cache: Dict[str, int] = {}
+
+    def cached_url_id(u: str) -> int:
+        u = (u or "").strip()
+        if not u:
+            raise ValueError("Empty URL")
+        key = normalize_site_url(u) if objective == "site_conversions" else u
+        if key in url_id_cache:
+            return url_id_cache[key]
+        url_id_cache[key] = get_url_object_id(u, objective, tokens)
+        return url_id_cache[key]
 
     # Копия пресета — будем расширять audienceIds из abstractAudiences
     preset_mut = json.loads(json.dumps(preset, ensure_ascii=False))
@@ -1330,11 +1358,30 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
         cta_text = (ad.get("button") or "visitSite").strip()
 
+        # --- bannerUrl -> url_id для баннера (если нет — используем company.url) ---
+        banner_url_raw = (
+            (ad.get("bannerUrl") or "").strip()
+            or (company.get("bannerUrl") or "").strip()
+            or (preset.get("bannerUrl") or "").strip()
+        )
+
+        banner_url_id = ad_object_id
+        if banner_url_raw:
+            try:
+                banner_url_id = cached_url_id(banner_url_raw)
+                log.info("bannerUrl resolved: %s -> %s", banner_url_raw, banner_url_id)
+            except Exception as e:
+                write_result_error(
+                    user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                    "Не удалось получить id по bannerUrl", repr(e)
+                )
+                raise
+                
         try:
             media_kind, media_id = pick_creative(ad, cabinet_id=str(cabinet_id))
             
             banner = make_banner_for_creative(
-                ad_object_id, ad, idx=gi + 1,
+                banner_url_id, ad, idx=gi + 1,
                 advertiser_info=adv_info, icon_id=int(icon_id),
                 banner_name=banner_name, cta_text=cta_text,
                 media_kind=media_kind, media_id=media_id,
@@ -1464,6 +1511,19 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
         write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                            "Не удалось получить ad_object_id по URL", repr(e))
         raise
+        
+    # --- cache for URL -> id ---
+    url_id_cache: Dict[str, int] = {}
+
+    def cached_url_id(u: str) -> int:
+        u = (u or "").strip()
+        if not u:
+            raise ValueError("Empty URL")
+        key = normalize_site_url(u) if objective == "site_conversions" else u
+        if key in url_id_cache:
+            return url_id_cache[key]
+        url_id_cache[key] = get_url_object_id(u, objective, tokens)
+        return url_id_cache[key]
 
     preset_mut = json.loads(json.dumps(preset, ensure_ascii=False))
     groups = preset_mut.get("groups", []) or []
@@ -1566,7 +1626,26 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
             
                 ad_tpl = (ad.get("adName") or f"Объявление {ai+1}").strip()
                 btn = (ad.get("button") or "visitSite").strip()
-            
+                
+                # --- bannerUrl -> url_id для всех баннеров этого ad ---
+                banner_url_raw = (
+                    (ad.get("bannerUrl") or "").strip()
+                    or (company.get("bannerUrl") or "").strip()
+                    or (preset.get("bannerUrl") or "").strip()
+                )
+
+                ad_url_id_for_banner = ad_object_id
+                if banner_url_raw:
+                    try:
+                        ad_url_id_for_banner = cached_url_id(banner_url_raw)
+                        log.info("FAST bannerUrl resolved: %s -> %s", banner_url_raw, ad_url_id_for_banner)
+                    except Exception as e:
+                        write_result_error(
+                            user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                            "Не удалось получить id по bannerUrl (FAST)", repr(e)
+                        )
+                        raise
+                        
                 # --- сначала ВИДЕО ---
                 for vid in (ad.get("videoIds") or []):
                     try:
@@ -1598,7 +1677,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     )
             
                     banner = make_banner_for_creative(
-                        ad_object_id, ad, idx=1,
+                        ad_url_id_for_banner, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
                         media_kind="video_portrait_9_16_30s", media_id=media_id, objective=objective
@@ -1662,7 +1741,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     )
 
                     banner = make_banner_for_creative(
-                        ad_object_id, ad, idx=1,
+                        ad_url_id_for_banner, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
                         media_kind=media_kind, media_id=media_id, objective=objective
