@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.87"
+VersionApp = "0.88"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -206,6 +206,43 @@ def atomic_write_json(dst: Path, obj: dict | list):
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, dst)  # атомарная замена
+
+# ===== helpers: VK users_lists =====
+
+def _vk_get_token_for_cabinet(user_id: str, cabinet_id: str) -> str:
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c.get("id")) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        raise HTTPException(400, "Invalid cabinet or missing token")
+    token = os.getenv(cab["token"])
+    if not token:
+        raise HTTPException(500, f"Token {cab['token']} not found in .env")
+    return token
+
+def _vk_users_lists_count(headers: dict) -> int:
+    try:
+        r0 = requests.get(
+            "https://ads.vk.com/api/v3/remarketing/users_lists.json?limit=1",
+            headers=headers,
+            timeout=10,
+        )
+        j0 = r0.json()
+        return int(j0.get("count", 0))
+    except Exception as e:
+        raise HTTPException(502, f"VK users_lists count error: {str(e)}")
+
+def _vk_users_lists_page(headers: dict, limit: int, offset: int) -> list[dict]:
+    url = (
+        "https://ads.vk.com/api/v3/remarketing/users_lists.json"
+        f"?limit={limit}&offset={offset}"
+    )
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        j = r.json()
+        items = j.get("items", [])
+        return items if isinstance(items, list) else []
+    except Exception as e:
+        raise HTTPException(502, f"VK users_lists list error: {str(e)}")
 
 def _replace_media_id_in_presets_for_cab(user_id: str, cabinet_id: str, mapping: dict[str, str]):
     """
@@ -2078,6 +2115,105 @@ def create_segments_from_users_lists(payload: dict):
             errors.append({"list_id": lid, "error": str(e)})
 
     return {"status": "ok" if not errors else "partial", "mode": "per_list", "created": created, "errors": errors}
+
+@secure_auto.get("/vk/users_lists/search")
+@secure_api.get("/vk/users_lists/search")
+def vk_users_lists_search(
+    user_id: str,
+    cabinet_id: str,
+    q: str = Query("", description="строка поиска (по имени списка)"),
+    limit: int = Query(50, ge=1, le=200, description="сколько отдать совпадений"),
+    offset: int = Query(-1, description="VK offset для продолжения; -1 = начать с конца"),
+    mode: str = Query("startswith", description="startswith|contains"),
+    scan_pages: int = Query(8, ge=1, le=50, description="сколько страниц по 200 элементов максимум просканировать"),
+):
+    """
+    Поиск users_lists по имени.
+
+    Надёжный вариант: VK API не обязана поддерживать фильтр по name, поэтому:
+    - берём count
+    - начинаем с хвоста (самые новые)
+    - идём назад по страницам (limit=200)
+    - фильтруем локально по имени (startswith/contains)
+    - возвращаем до `limit` результатов + next_offset для продолжения
+    """
+
+    token = _vk_get_token_for_cabinet(user_id, cabinet_id)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    q_norm = (q or "").strip().lower()
+
+    total = _vk_users_lists_count(headers)
+    if total <= 0:
+        return {"items": [], "count": 0, "limit": limit, "offset": 0, "next_offset": None, "done": True}
+
+    page_limit = 200
+
+    # стартовый offset: либо как передали, либо последняя страница
+    if offset < 0:
+        cur_offset = max(0, total - page_limit)
+    else:
+        cur_offset = max(0, offset)
+
+    found: list[dict] = []
+    pages_scanned = 0
+
+    while pages_scanned < scan_pages and cur_offset >= 0:
+        pages_scanned += 1
+
+        items = _vk_users_lists_page(headers, page_limit, cur_offset)
+
+        # у тебя в page() было reversed(items), чтобы самые новые были первыми
+        # сделаем так же: новые -> старые
+        items = list(reversed(items))
+
+        if q_norm:
+            def match_name(it: dict) -> bool:
+                name = str(it.get("name") or "").strip().lower()
+                if not name:
+                    return False
+                if mode == "contains":
+                    return q_norm in name
+                # default startswith
+                return name.startswith(q_norm)
+
+            items = [it for it in items if isinstance(it, dict) and match_name(it)]
+        else:
+            # если q пустой — просто отдаём хвост (как “последние списки”)
+            items = [it for it in items if isinstance(it, dict)]
+
+        for it in items:
+            found.append(it)
+            if len(found) >= limit:
+                break
+
+        if len(found) >= limit:
+            break
+
+        # идём на предыдущую страницу
+        if cur_offset == 0:
+            break
+        cur_offset = max(0, cur_offset - page_limit)
+
+    # next_offset — это offset, который фронт может передать чтобы продолжить поиск
+    # логика: если мы не дошли до 0 и ещё есть смысл сканировать назад
+    next_offset = None
+    done = True
+    if cur_offset > 0 and pages_scanned >= 1:
+        # мы остановились либо по limit, либо по scan_pages — значит можно продолжать
+        next_offset = max(0, cur_offset - page_limit)
+        done = False
+
+    return {
+        "items": found[:limit],
+        "count": total,
+        "limit": limit,
+        "offset": offset if offset >= 0 else max(0, total - page_limit),
+        "next_offset": next_offset,
+        "done": done,
+        "mode": mode,
+        "scan_pages": pages_scanned,
+    }
 
 # -------------------------------------
 #   SETTINGS (theme, language, any future)
