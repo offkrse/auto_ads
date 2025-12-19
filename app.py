@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.86"
+VersionApp = "0.87"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -59,6 +59,15 @@ def _safe_unlink(p: Path):
             p.unlink()
     except Exception as e:
         log_error(f"safe_unlink failed for {p}: {repr(e)}")
+
+# --- VK segments helpers ---
+_VK_SUBSEGMENT_NAMES = {"positive subsegment", "negative subsegment"}
+
+def _is_vk_subsegment(item: dict) -> bool:
+    name = str(item.get("name", "")).strip().lower()
+    return name in _VK_SUBSEGMENT_NAMES
+
+# ----------------------------
 
 def next_display_name(storage: Path, original: str) -> str:
     """
@@ -1719,15 +1728,16 @@ def fetch_vk_audiences(user_id: str, cabinet_id: str):
         r2 = requests.get(url2, headers=headers, timeout=15)
         j2 = r2.json()
         items = j2.get("items", [])
+        items = [it for it in items if isinstance(it, dict) and not _is_vk_subsegment(it)]
     except Exception as e:
         return JSONResponse(status_code=502, content={"audiences": [], "error": f"VK list error: {str(e)}"})
 
     out = [{
         "type": "vk",
-        "id": str(it["id"]),
-        "name": it["name"],
+        "id": str(it.get("id", "")),
+        "name": it.get("name", ""),
         "created": it.get("created", "")
-    } for it in items]
+    } for it in items if it.get("id") and it.get("name")]
 
     # сохраняем локально
     f = audiences_path(user_id, cabinet_id)
@@ -1852,6 +1862,7 @@ def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
         r = requests.get(url, headers=headers, timeout=15)
         j = r.json()
         items = j.get("items", [])
+        items = [it for it in items if isinstance(it, dict) and not _is_vk_subsegment(it)]
     except Exception as e:
         return JSONResponse(
             status_code=502,
