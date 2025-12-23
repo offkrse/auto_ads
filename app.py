@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.93"
+VersionApp = "0.94"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2295,15 +2295,30 @@ async def save_settings(payload: dict):
         raise HTTPException(400, "Missing userId or settings")
 
     user_id = str(user_id)
+
+    # 1) Сначала гарантируем структуру (она сама лочит файл)
+    base = ensure_user_structure(user_id)
+
+    # 2) Потом отдельным заходом лочим и пишем обновлённые настройки
     user_dir = USERS_DIR / user_id
     info_file = user_dir / f"{user_id}.json"
     lock = info_file.with_suffix(info_file.suffix + ".lock")
 
     try:
-        with file_lock(lock, timeout=3):
-            data = ensure_user_structure(user_id)
+        with file_lock(lock, timeout=5):  # можно 3, но 5 устойчивее
+            # перечитываем свежую версию (на случай параллельных обновлений)
+            try:
+                raw = info_file.read_text(encoding="utf-8").strip()
+                data = json.loads(raw) if raw else base
+            except Exception:
+                data = base
+
+            if not isinstance(data, dict):
+                data = base if isinstance(base, dict) else {"user_id": user_id}
+
             data.update(settings)
             atomic_write_json(info_file, data)
+
     except FileLockTimeout:
         raise HTTPException(503, "Settings storage busy, retry")
 
