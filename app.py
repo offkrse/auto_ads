@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.91"
+VersionApp = "0.92"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -832,7 +832,7 @@ def ensure_user_structure(user_id: str):
     lock = info_file.with_suffix(info_file.suffix + ".lock")
 
     try:
-        with file_lock(lock):
+        with file_lock(lock, timeout=3):
             # 1) загрузка или дефолт
             if not info_file.exists():
                 data = {
@@ -1113,14 +1113,11 @@ def get_creatives(user_id: str, cabinet_id: str):
             return {"creatives": []}
 
         lock = f.with_suffix(f.suffix + ".lock")
-        with file_lock(lock):
-            # читаем целиком безопасно
-            try:
-                with file_lock(lock, timeout=3):
-                    with open(f, "r", encoding="utf-8") as fh:
-                        text = fh.read()
-            except FileLockTimeout:
-                raise HTTPException(503, "Creatives storage busy, retry")
+        try:
+            with file_lock(lock, timeout=3):
+                text = f.read_text(encoding="utf-8")
+        except FileLockTimeout:
+            raise HTTPException(503, "Creatives storage busy, retry")
 
         try:
             data = json.loads(text) if text.strip() else []
@@ -1241,10 +1238,9 @@ async def creative_delete(payload: dict):
             ensure_user_structure(user_id)
             # читаем sets.json ТЕКУЩЕГО cabinet_id (из параметра запроса)
             sets_file = creatives_path(user_id, cabinet_id)
-            if sets_file.exists():
-                lock2 = sets_file.with_suffix(sets_file.suffix + ".lock")
+            lock2 = sets_file.with_suffix(sets_file.suffix + ".lock")
             try:
-                with file_lock(lock2):
+                with file_lock(lock2, timeout=3):
                     raw = sets_file.read_text(encoding="utf-8")
                     sets = json.loads(raw) if raw.strip() else []
                     if not isinstance(sets, list):
@@ -1335,7 +1331,7 @@ async def creative_rehash(payload: dict):
         lock = f.with_suffix(f.suffix + ".lock")
 
         # --- Шаг 1: читаем sets.json и определяем список файлов для rehash ---
-        with file_lock(lock):
+        with file_lock(lock, timeout=5):
             with open(f, "r", encoding="utf-8") as fh:
                 text = fh.read()
 
@@ -1410,7 +1406,7 @@ async def creative_rehash(payload: dict):
                 raise HTTPException(500, "Internal rehash error")
 
         # --- Шаг 3: обновляем creatives (vkByCabinet, url, id, thumbUrl) ---
-        with file_lock(lock):
+        with file_lock(lock, timeout=5):
             with open(f, "r", encoding="utf-8") as fh:
                 text = fh.read()
 
@@ -1683,15 +1679,13 @@ async def upload_logo(
             raise HTTPException(500, f"Token {cab['token']} not found in environment")
 
         headers = {"Authorization": f"Bearer {real_token}"}
+        vk_url = "https://ads.vk.com/api/v2/content/static.json"
         with open(tmp_path, "rb") as img_fh:
             files = {
-                "file": ("img256x256.jpg", open(tmp_path, "rb"), "image/jpeg"),
+                "file": ("img256x256.jpg", img_fh, "image/jpeg"),
                 "data": (None, json.dumps({"width": 256, "height": 256}), "application/json"),
             }
-
-        # загружаем в VK
-        vk_url = "https://ads.vk.com/api/v2/content/static.json"
-        resp = requests.post(vk_url, headers=headers, files=files, timeout=20)
+            resp = requests.post(vk_url, headers=headers, files=files, timeout=20)
         if resp.status_code != 200:
             return JSONResponse(status_code=502, content={"error": resp.text})
         vk_id = resp.json().get("id")
@@ -1707,7 +1701,7 @@ async def upload_logo(
         # сохраняем мету под блокировкой
         meta_path = logo_meta_path(user_id, cabinet_id)
         lock = meta_path.with_suffix(".lock")
-        with file_lock(lock):
+        with file_lock(lock, timeout=5):
             atomic_write_json(meta_path, {
                 "id": vk_id,
                 "url": f"/auto_ads/logo/{cabinet_id}/{final_name}"
@@ -1718,10 +1712,11 @@ async def upload_logo(
         log_error(f"logo/upload[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
     finally:
-        try:
-            os.remove(tmp_path)  # type: ignore
-        except Exception:
-            pass
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
 @secure_auto.get("/logo/get")
 @secure_api.get("/logo/get")
@@ -1788,9 +1783,11 @@ async def save_audiences(payload: dict):
 
     f = audiences_path(str(user_id), str(cabinet_id))
     lock = f.with_suffix(f.suffix + ".lock")
-
-    with file_lock(lock):
-        atomic_write_json(f, audiences if audiences is not None else [])
+    try:
+        with file_lock(lock, timeout=5):
+            atomic_write_json(f, audiences if audiences is not None else [])
+    except FileLockTimeout:
+        raise HTTPException(503, "Creatives sets busy, retry")
 
     return {"status": "ok"}
 
@@ -1889,8 +1886,11 @@ def get_audiences(user_id: str, cabinet_id: str):
         return {"audiences": []}
 
     lock = f.with_suffix(f.suffix + ".lock")
-    with file_lock(lock):
-        text = f.read_text(encoding="utf-8") if f.exists() else ""
+    try:
+        with file_lock(lock, timeout=5):
+            text = f.read_text(encoding="utf-8") if f.exists() else ""
+    except FileLockTimeout:
+        raise HTTPException(503, "Creatives storage busy, retry")
 
     try:
         data = json.loads(text) if text.strip() else []
@@ -2339,12 +2339,15 @@ def save_textsets(payload: dict):
         lock = f.with_suffix(f.suffix + ".lock")
 
         # атомарная запись под блокировкой
-    try:
-        with file_lock(lock, timeout=3):
-            atomic_write_json(f, sets if isinstance(sets, list) else [])
+        try:
+            with file_lock(lock, timeout=3):
+                atomic_write_json(f, sets if isinstance(sets, list) else [])
+        except FileLockTimeout:
+            raise HTTPException(503, "Textsets storage busy, retry")
+
+        return {"status": "ok"}
     except FileLockTimeout:
         raise HTTPException(503, "Textsets storage busy, retry")
-        return {"status": "ok"}
     except Exception as e:
         log_error(f"textsets/save[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
@@ -2477,6 +2480,7 @@ async def upload_creative(
                 "https://ads.vk.com/api/v2/content/video.json"
             )
             headers = {"Authorization": f"Bearer {real_token}"}
+
             with open(tmp_path, "rb") as fh:
                 files = {
                     "file": (file.filename, fh, content_type or "application/octet-stream"),
@@ -2498,15 +2502,15 @@ async def upload_creative(
 
             # кладём локальную копию под vk_id
             storage = cabinet_storage(cabinet["id"])
-            
+
             # подбираем отображаемое имя заранее
             display_name = next_display_name(storage, file.filename)
             final_name = f"{vk_id}_{display_name}"
             final_path = storage / final_name
-            
+
             # копируем ОДИН раз
             shutil.copy(tmp_path, final_path)
-            
+
             # генерим превью (только для видео) уже от конечного файла
             thumb_url = None
             if is_video:
@@ -2533,9 +2537,8 @@ async def upload_creative(
                 except Exception as e:
                     log_error(f"thumb exception for {final_path}: {repr(e)}")
 
+            # пишем meta
             try:
-                base_no_ext, _ = os.path.splitext(final_name)
-                meta_path = storage / f"{base_no_ext}.json"
                 meta = {
                     "vk_response": resp_json,
                     "cabinet_id": str(cabinet["id"]),
@@ -2549,11 +2552,10 @@ async def upload_creative(
                     "uploaded_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                     "type": "image" if is_image else "video",
                 }
-                # атомарно, как и по проекту
                 atomic_write_json(storage / f"{os.path.splitext(final_name)[0]}.json", meta)
             except Exception as e:
                 log_error(f"upload meta write failed for {final_path}: {repr(e)}")
-            
+
             results.append({
                 "cabinet_id": cabinet["id"],
                 "vk_id": vk_id,
@@ -2563,6 +2565,7 @@ async def upload_creative(
                 "uploaded": True,
                 **({"thumb_url": thumb_url} if thumb_url else {}),
             })
+
         # --- Авто-добавление в creatives/sets.json выбранного кабинета ---
         try:
             ensure_user_structure(user_id)
@@ -2571,22 +2574,23 @@ async def upload_creative(
             if set_id and cabinet_id != "all":
                 fsets = creatives_path(user_id, cabinet_id)
                 lock = fsets.with_suffix(fsets.suffix + ".lock")
+
                 try:
-                    with file_lock(lock):
+                    with file_lock(lock, timeout=5):
                         # читаем текущий sets.json
                         if fsets.exists():
                             try:
-                                data = json.loads(fsets.read_text(encoding="utf-8"))
-                                if not isinstance(data, list):
-                                    data = []
+                                sets_data = json.loads(fsets.read_text(encoding="utf-8"))
+                                if not isinstance(sets_data, list):
+                                    sets_data = []
                             except Exception:
-                                data = []
+                                sets_data = []
                         else:
-                            data = []
+                            sets_data = []
 
                         # ищем/создаём набор
                         target_set = None
-                        for s in data:
+                        for s in sets_data:
                             if str(s.get("id")) == str(set_id):
                                 target_set = s
                                 break
@@ -2596,16 +2600,20 @@ async def upload_creative(
                                 "name": set_name or "Набор",
                                 "items": []
                             }
-                            data.append(target_set)
+                            sets_data.append(target_set)
 
                         items = target_set.get("items") or []
+
                         # берём результат именно для текущего cabinet_id
-                        res0 = next((r for r in results if str(r["cabinet_id"]) == str(cabinet_id)), None)
+                        res0 = next(
+                            (r for r in results if str(r["cabinet_id"]) == str(cabinet_id)),
+                            None
+                        )
                         if res0:
                             new_item = {
                                 "id": str(res0["vk_id"]),
                                 "url": res0["url"],
-                                "name": res0.get("display_name") or file.filename or "",
+                                "name": res0.get("display_name") or (file.filename or ""),
                                 "type": "image" if is_image else "video",
                                 "uploaded": True,
                                 "vkByCabinet": {str(cabinet_id): str(res0["vk_id"])},
@@ -2616,68 +2624,70 @@ async def upload_creative(
                             items.append(new_item)
                             target_set["items"] = items
 
-                        atomic_write_json(fsets, data)
-                        
-                    except FileLockTimeout:
-                        raise HTTPException(503, "Creatives sets busy, retry")
-
-            # 2) Иначе — ведём себя как раньше (кладём в первый набор / поддерживаем режим "all")
-            else:
-                sets_file = creatives_path(user_id, cabinet_id)
-                lock3 = sets_file.with_suffix(sets_file.suffix + ".lock")
-            try:
-                with file_lock(lock3):
-                    existing = []
-                    if sets_file.exists():
-                        try:
-                            existing = json.loads(sets_file.read_text(encoding="utf-8")) or []
-                            if not isinstance(existing, list):
-                                existing = []
-                        except Exception:
-                            existing = []
-
-                    if not existing:
-                        existing = [{"id": f"id_{uuid.uuid4().hex[:8]}", "name": "Набор 1", "items": []}]
-
-                    display_name_for_item = (
-                        results[0].get("display_name")
-                        or (file.filename or "").strip()
-                        or "file"
-                    )
-
-                    if str(cabinet_id) == "all":
-                        urls = {str(r["cabinet_id"]): r["url"] for r in results if r.get("url")}
-                        vk_by = {str(r["cabinet_id"]): r["vk_id"] for r in results if r.get("vk_id")}
-                        main_id = str(results[0]["vk_id"])
-                        item = {
-                            "id": main_id,
-                            "url": results[0]["url"],
-                            "urls": urls,
-                            "vkByCabinet": vk_by,
-                            "type": "image" if is_image else "video",
-                            "name": display_name_for_item,
-                            "uploaded": True,
-                        }
-                        if not is_image and results[0].get("thumb_url"):
-                            item["thumbUrl"] = results[0]["thumb_url"]
-                    else:
-                        r0 = results[0]
-                        item = {
-                            "id": str(r0["vk_id"]),
-                            "url": r0["url"],
-                            "vkByCabinet": {str(cabinet_id): str(r0["vk_id"])},
-                            "type": "image" if is_image else "video",
-                            "name": display_name_for_item,
-                            "uploaded": True,
-                        }
-                        if not is_image and r0.get("thumb_url"):
-                            item["thumbUrl"] = r0["thumb_url"]
-
-                    existing[0].setdefault("items", []).append(item)
-                    atomic_write_json(sets_file, existing)
+                        atomic_write_json(fsets, sets_data)
 
                 except FileLockTimeout:
                     raise HTTPException(503, "Creatives sets busy, retry")
+
+            # 2) Иначе — как раньше (кладём в первый набор / поддерживаем режим "all")
+            else:
+                sets_file = creatives_path(user_id, cabinet_id)
+                lock3 = sets_file.with_suffix(sets_file.suffix + ".lock")
+
+                try:
+                    with file_lock(lock3, timeout=5):
+                        existing = []
+                        if sets_file.exists():
+                            try:
+                                existing = json.loads(sets_file.read_text(encoding="utf-8")) or []
+                                if not isinstance(existing, list):
+                                    existing = []
+                            except Exception:
+                                existing = []
+
+                        if not existing:
+                            existing = [{"id": f"id_{uuid.uuid4().hex[:8]}", "name": "Набор 1", "items": []}]
+
+                        display_name_for_item = (
+                            results[0].get("display_name")
+                            or (file.filename or "").strip()
+                            or "file"
+                        )
+
+                        if str(cabinet_id) == "all":
+                            urls = {str(r["cabinet_id"]): r["url"] for r in results if r.get("url")}
+                            vk_by = {str(r["cabinet_id"]): r["vk_id"] for r in results if r.get("vk_id")}
+                            main_id = str(results[0]["vk_id"])
+                            item = {
+                                "id": main_id,
+                                "url": results[0]["url"],
+                                "urls": urls,
+                                "vkByCabinet": vk_by,
+                                "type": "image" if is_image else "video",
+                                "name": display_name_for_item,
+                                "uploaded": True,
+                            }
+                            if not is_image and results[0].get("thumb_url"):
+                                item["thumbUrl"] = results[0]["thumb_url"]
+                        else:
+                            r0 = results[0]
+                            item = {
+                                "id": str(r0["vk_id"]),
+                                "url": r0["url"],
+                                "vkByCabinet": {str(cabinet_id): str(r0["vk_id"])},
+                                "type": "image" if is_image else "video",
+                                "name": display_name_for_item,
+                                "uploaded": True,
+                            }
+                            if not is_image and r0.get("thumb_url"):
+                                item["thumbUrl"] = r0["thumb_url"]
+
+                        existing[0].setdefault("items", []).append(item)
+                        atomic_write_json(sets_file, existing)
+
+                except FileLockTimeout:
+                    raise HTTPException(503, "Creatives sets busy, retry")
+
         except Exception as e:
             log_error(f"upload: auto-append to sets.json failed: {repr(e)}")
 
@@ -2688,6 +2698,7 @@ async def upload_creative(
             os.remove(tmp_path)
         except Exception:
             pass
+
 
 
 # -------------------------------------
