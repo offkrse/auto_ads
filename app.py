@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.89"
+VersionApp = "0.90"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -807,49 +807,64 @@ def cabinet_storage(cabinet_id: str) -> Path:
     return path
     
 def ensure_user_structure(user_id: str):
-    """Создает структуру и единый файл <id>.json, если его нет."""
-
+    user_id = str(user_id)
     user_dir = USERS_DIR / user_id
     user_dir.mkdir(parents=True, exist_ok=True)
 
-    # Основные директории
     (user_dir / "presets").mkdir(exist_ok=True)
     (user_dir / "creatives").mkdir(exist_ok=True)
     (user_dir / "audiences").mkdir(exist_ok=True)
 
-    # Файл user.json
     info_file = user_dir / f"{user_id}.json"
+    lock = info_file.with_suffix(info_file.suffix + ".lock")
 
-    # Если первый вход — создаём дефолтный файл
-    if not info_file.exists():
-        data = {
-            "user_id": user_id,
-            "cabinets": [  # Всегда создаём кабинет ALL
-                {"id": "all", "name": "Все кабинеты", "token": ""}
-            ],
-            "selected_cabinet_id": "all"
-        }
-        with open(info_file, "w") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    with file_lock(lock):
+        # 1) загрузка или дефолт
+        if not info_file.exists():
+            data = {
+                "user_id": user_id,
+                "cabinets": [{"id": "all", "name": "Все кабинеты", "token": ""}],
+                "selected_cabinet_id": "all",
+            }
+            atomic_write_json(info_file, data)
+        else:
+            raw = info_file.read_text(encoding="utf-8").strip()
+            if not raw:
+                data = {
+                    "user_id": user_id,
+                    "cabinets": [{"id": "all", "name": "Все кабинеты", "token": ""}],
+                    "selected_cabinet_id": "all",
+                }
+                atomic_write_json(info_file, data)
+            else:
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    log_error(f"ensure_user_structure: broken json {info_file}: {repr(e)} (reset)")
+                    data = {
+                        "user_id": user_id,
+                        "cabinets": [{"id": "all", "name": "Все кабинеты", "token": ""}],
+                        "selected_cabinet_id": "all",
+                    }
+                    atomic_write_json(info_file, data)
 
-    # Загружаем файл
-    with open(info_file, "r") as f:
-        data = json.load(f)
+        # 2) нормализация
+        if not isinstance(data, dict):
+            data = {"user_id": user_id, "cabinets": [], "selected_cabinet_id": "all"}
 
-    # Гарантируем наличие кабинета all
-    if not any(c["id"] == "all" for c in data["cabinets"]):
-        data["cabinets"].insert(0, {"id": "all", "name": "Все кабинеты", "token": ""})
+        data.setdefault("cabinets", [])
+        if not any(str(c.get("id")) == "all" for c in data["cabinets"] if isinstance(c, dict)):
+            data["cabinets"].insert(0, {"id": "all", "name": "Все кабинеты", "token": ""})
 
-    # Создаём директории под каждый кабинет
-    for cab in data["cabinets"]:
-        cab_id = str(cab["id"])
-        (user_dir / "presets" / cab_id).mkdir(exist_ok=True)
-        (user_dir / "creatives" / cab_id).mkdir(exist_ok=True)
-        (user_dir / "audiences" / cab_id).mkdir(exist_ok=True)
+        # 3) директории под кабинеты
+        for cab in data["cabinets"]:
+            cab_id = str(cab.get("id"))
+            (user_dir / "presets" / cab_id).mkdir(exist_ok=True)
+            (user_dir / "creatives" / cab_id).mkdir(exist_ok=True)
+            (user_dir / "audiences" / cab_id).mkdir(exist_ok=True)
 
-    # Перезаписываем (если изменилось)
-    with open(info_file, "w") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        # 4) записать обратно атомарно
+        atomic_write_json(info_file, data)
 
     return data
 
@@ -1736,11 +1751,16 @@ async def save_audiences(payload: dict):
     cabinet_id = payload.get("cabinetId")
     audiences = payload.get("audiences")
 
-    ensure_user_structure(user_id)
+    if not user_id or cabinet_id is None:
+        raise HTTPException(400, "Missing userId or cabinetId")
 
-    f = audiences_path(user_id, cabinet_id)
-    with open(f, "w") as file:
-        json.dump(audiences, file, ensure_ascii=False, indent=2)
+    ensure_user_structure(str(user_id))
+
+    f = audiences_path(str(user_id), str(cabinet_id))
+    lock = f.with_suffix(f.suffix + ".lock")
+
+    with file_lock(lock):
+        atomic_write_json(f, audiences if audiences is not None else [])
 
     return {"status": "ok"}
 
@@ -1832,14 +1852,24 @@ def save_abstract_audiences(payload: dict):
 @secure_auto.get("/audiences/get")
 @secure_api.get("/audiences/get")
 def get_audiences(user_id: str, cabinet_id: str):
-    ensure_user_structure(user_id)
+    ensure_user_structure(str(user_id))
 
-    f = audiences_path(user_id, cabinet_id)
+    f = audiences_path(str(user_id), str(cabinet_id))
     if not f.exists():
         return {"audiences": []}
 
-    with open(f, "r") as file:
-        return {"audiences": json.load(file)}
+    lock = f.with_suffix(f.suffix + ".lock")
+    with file_lock(lock):
+        text = f.read_text(encoding="utf-8") if f.exists() else ""
+
+    try:
+        data = json.loads(text) if text.strip() else []
+        if not isinstance(data, list):
+            data = []
+        return {"audiences": data}
+    except json.JSONDecodeError as e:
+        log_error(f"audiences/get JSONDecodeError on {f}: {repr(e)}")
+        return {"audiences": []}
 
 @secure_api.get("/vk/audiences/search")
 def search_vk_audiences(user_id: str, cabinet_id: str, q: str = ""):
@@ -2235,19 +2265,18 @@ async def save_settings(payload: dict):
     user_id = payload.get("userId")
     settings = payload.get("settings")
 
-    if not user_id or not settings:
+    if not user_id or not isinstance(settings, dict):
         raise HTTPException(400, "Missing userId or settings")
 
+    user_id = str(user_id)
     user_dir = USERS_DIR / user_id
     info_file = user_dir / f"{user_id}.json"
+    lock = info_file.with_suffix(info_file.suffix + ".lock")
 
-    data = ensure_user_structure(user_id)
-
-    # Обновляем только settings-поле
-    data.update(settings)
-
-    with open(info_file, "w") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with file_lock(lock):
+        data = ensure_user_structure(user_id)
+        data.update(settings)
+        atomic_write_json(info_file, data)
 
     return {"status": "ok"}
 
