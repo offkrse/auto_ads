@@ -5,6 +5,7 @@ import os
 import time
 import re
 import random
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
@@ -18,7 +19,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.36"
+VersionCyclop = "1.37"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -830,19 +831,28 @@ def build_age_list(age_range_str: str) -> List[int]:
     ages.extend(list(range(a, b + 1)))
     return ages
 
-def compute_group_max_price(g: Dict[str, Any]) -> int:
+def as_money_str(v) -> str:
+    d = Decimal(str(v)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"{d:.2f}"
+
+def compute_group_max_price(g: Dict[str, Any]) -> str:
     """
     bidStrategy:
-      - "min" (или отсутствует) -> max_price = 0 (как сейчас)
-      - "cap" -> max_price = int(maxCpa)
+      - "cap" -> max_price = "NNN.NN" из maxCpa
+      - иначе -> "0.00"
     """
     strat = str(g.get("bidStrategy") or "min").strip().lower()
     if strat != "cap":
-        return 0
+        return "0.00"
+
+    v = g.get("maxCpa")
+    if v is None or str(v).strip() == "":
+        return "0.00"
+
     try:
-        return int(float(g.get("maxCpa") or 0))
+        return as_money_str(v)
     except Exception:
-        return 0
+        return "0.00"
 
 def env_token(name: str) -> Optional[str]:
     return os.getenv(name)
@@ -1158,9 +1168,9 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         group_payload = {
             "name": group_name,
             "targetings": targetings,
-            "max_price": int(max_price),
             "autobidding_mode": "max_goals",
             "budget_limit": None,
+            "max_price": max_price,
             "budget_limit_day": budget_day,
             "date_start": start_date_str,
             "date_end": None,
@@ -1710,7 +1720,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     group_payload = {
                         "name": safe_g_name,
                         "targetings": json.loads(json.dumps(targetings)),
-                        "max_price": int(max_price_for_group),
+                        "max_price": max_price_for_group,
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
                         "budget_limit_day": budget_day,
@@ -1774,7 +1784,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     group_payload = {
                         "name": safe_g_name,
                         "targetings": json.loads(json.dumps(targetings)),
-                        "max_price": int(max_price_for_group),
+                        "max_price": max_price_for_group,
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
                         "budget_limit_day": budget_day,
