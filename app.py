@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.90"
+VersionApp = "0.91"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -174,29 +174,42 @@ def log_error(msg: str):
             fh.write(f"[{ts}] {msg}\n")
     except Exception:
         pass  # последняя линия обороны — лог просто пропускаем
+        
+class FileLockTimeout(Exception):
+    pass
 
 class file_lock:
-    """Простейшая advisory-блокировка на файле (Unix)."""
-    def __init__(self, path: Path):
+    """Advisory-блокировка на файле (Unix) с таймаутом."""
+    def __init__(self, path: Path, timeout: float = 5.0, poll: float = 0.05):
         self._path = path
         self._fh = None
+        self._timeout = timeout
+        self._poll = poll
+
     def __enter__(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self._path, "a+")  # создаём, если нет
+        self._fh = open(self._path, "a+")
+        deadline = time.monotonic() + float(self._timeout)
+
         while True:
             try:
-                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
-                break
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self._fh
             except OSError as e:
                 if e.errno in (errno.EINTR, errno.EAGAIN):
+                    if time.monotonic() >= deadline:
+                        raise FileLockTimeout(f"Lock timeout: {self._path}")
+                    time.sleep(self._poll)
                     continue
                 raise
-        return self._fh
+
     def __exit__(self, exc_type, exc, tb):
         try:
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            if self._fh:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
         finally:
-            self._fh.close()
+            if self._fh:
+                self._fh.close()
 
 def atomic_write_json(dst: Path, obj: dict | list):
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -818,18 +831,10 @@ def ensure_user_structure(user_id: str):
     info_file = user_dir / f"{user_id}.json"
     lock = info_file.with_suffix(info_file.suffix + ".lock")
 
-    with file_lock(lock):
-        # 1) загрузка или дефолт
-        if not info_file.exists():
-            data = {
-                "user_id": user_id,
-                "cabinets": [{"id": "all", "name": "Все кабинеты", "token": ""}],
-                "selected_cabinet_id": "all",
-            }
-            atomic_write_json(info_file, data)
-        else:
-            raw = info_file.read_text(encoding="utf-8").strip()
-            if not raw:
+    try:
+        with file_lock(lock):
+            # 1) загрузка или дефолт
+            if not info_file.exists():
                 data = {
                     "user_id": user_id,
                     "cabinets": [{"id": "all", "name": "Все кабинеты", "token": ""}],
@@ -837,36 +842,48 @@ def ensure_user_structure(user_id: str):
                 }
                 atomic_write_json(info_file, data)
             else:
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError as e:
-                    log_error(f"ensure_user_structure: broken json {info_file}: {repr(e)} (reset)")
+                raw = info_file.read_text(encoding="utf-8").strip()
+                if not raw:
                     data = {
                         "user_id": user_id,
                         "cabinets": [{"id": "all", "name": "Все кабинеты", "token": ""}],
                         "selected_cabinet_id": "all",
                     }
                     atomic_write_json(info_file, data)
+                else:
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError as e:
+                        log_error(f"ensure_user_structure: broken json {info_file}: {repr(e)} (reset)")
+                        data = {
+                            "user_id": user_id,
+                            "cabinets": [{"id": "all", "name": "Все кабинеты", "token": ""}],
+                            "selected_cabinet_id": "all",
+                        }
+                        atomic_write_json(info_file, data)
 
-        # 2) нормализация
-        if not isinstance(data, dict):
-            data = {"user_id": user_id, "cabinets": [], "selected_cabinet_id": "all"}
+            # 2) нормализация
+            if not isinstance(data, dict):
+                data = {"user_id": user_id, "cabinets": [], "selected_cabinet_id": "all"}
 
-        data.setdefault("cabinets", [])
-        if not any(str(c.get("id")) == "all" for c in data["cabinets"] if isinstance(c, dict)):
-            data["cabinets"].insert(0, {"id": "all", "name": "Все кабинеты", "token": ""})
+            data.setdefault("cabinets", [])
+            if not any(str(c.get("id")) == "all" for c in data["cabinets"] if isinstance(c, dict)):
+                data["cabinets"].insert(0, {"id": "all", "name": "Все кабинеты", "token": ""})
 
-        # 3) директории под кабинеты
-        for cab in data["cabinets"]:
-            cab_id = str(cab.get("id"))
-            (user_dir / "presets" / cab_id).mkdir(exist_ok=True)
-            (user_dir / "creatives" / cab_id).mkdir(exist_ok=True)
-            (user_dir / "audiences" / cab_id).mkdir(exist_ok=True)
+            # 3) директории под кабинеты
+            for cab in data["cabinets"]:
+                cab_id = str(cab.get("id"))
+                (user_dir / "presets" / cab_id).mkdir(exist_ok=True)
+                (user_dir / "creatives" / cab_id).mkdir(exist_ok=True)
+                (user_dir / "audiences" / cab_id).mkdir(exist_ok=True)
 
-        # 4) записать обратно атомарно
-        atomic_write_json(info_file, data)
+            # 4) записать обратно атомарно
+            atomic_write_json(info_file, data)
 
-    return data
+        return data
+
+    except FileLockTimeout:
+        raise HTTPException(503, "User storage busy, retry")
 
 
 def udir(user_id: str) -> Path:
@@ -903,11 +920,6 @@ def audiences_path(user_id: str, cabinet_id: str) -> Path:
 # ----------------------------------- API --------------------------------------------
 secure_api = APIRouter(prefix="/api", dependencies=[Depends(require_tg_user)])
 secure_auto = APIRouter(prefix="/auto_ads/api", dependencies=[Depends(require_tg_user)])
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    log_error(f"UNHANDLED {request.method} {request.url}: {repr(exc)}")
-    return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 # -------------------------------------
 #   HISTORY
 # -------------------------------------
@@ -1081,8 +1093,11 @@ async def save_creatives(payload: dict):
         lock = f.with_suffix(f.suffix + ".lock")
 
         # Блокируем на время записи
-        with file_lock(lock):
-            atomic_write_json(f, creatives if creatives is not None else [])
+        try:
+            with file_lock(lock, timeout=3):
+                atomic_write_json(f, creatives if creatives is not None else [])
+        except FileLockTimeout:
+            raise HTTPException(503, "Creatives storage busy, retry")
         return {"status": "ok"}
     except Exception as e:
         log_error(f"creatives/save[{user_id}/{cabinet_id}] error: {repr(e)}")
@@ -1100,8 +1115,12 @@ def get_creatives(user_id: str, cabinet_id: str):
         lock = f.with_suffix(f.suffix + ".lock")
         with file_lock(lock):
             # читаем целиком безопасно
-            with open(f, "r", encoding="utf-8") as fh:
-                text = fh.read()
+            try:
+                with file_lock(lock, timeout=3):
+                    with open(f, "r", encoding="utf-8") as fh:
+                        text = fh.read()
+            except FileLockTimeout:
+                raise HTTPException(503, "Creatives storage busy, retry")
 
         try:
             data = json.loads(text) if text.strip() else []
@@ -1224,6 +1243,7 @@ async def creative_delete(payload: dict):
             sets_file = creatives_path(user_id, cabinet_id)
             if sets_file.exists():
                 lock2 = sets_file.with_suffix(sets_file.suffix + ".lock")
+            try:
                 with file_lock(lock2):
                     raw = sets_file.read_text(encoding="utf-8")
                     sets = json.loads(raw) if raw.strip() else []
@@ -1263,6 +1283,9 @@ async def creative_delete(payload: dict):
                         s["items"] = keep
 
                     atomic_write_json(sets_file, sets)
+
+                except FileLockTimeout:
+                    raise HTTPException(503, "Creatives sets busy, retry")
 
                 # если нашли vk-id — удалим его из пресетов этого кабинета
                 if item_vk_id_to_drop:
@@ -1535,8 +1558,11 @@ def pixels_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
     if not f.exists():
         return {"pixels": []}
 
-    with file_lock(lock):
-        raw = f.read_text(encoding="utf-8") if f.exists() else ""
+    try:
+        with file_lock(lock, timeout=3):
+            raw = f.read_text(encoding="utf-8") if f.exists() else ""
+    except FileLockTimeout:
+        raise HTTPException(503, "Pixels storage busy, retry")
 
     try:
         data = json.loads(raw) if raw.strip() else []
@@ -1598,8 +1624,11 @@ async def pixels_save(payload: dict):
                 s = it.strip()
                 out.append({"id": s, "name": s})
 
-    with file_lock(lock):
-        atomic_write_json(f, out)
+    try:
+        with file_lock(lock, timeout=3):
+            atomic_write_json(f, out)
+    except FileLockTimeout:
+        raise HTTPException(503, "Pixels storage busy, retry")
 
     return {"status": "ok", "pixels": out}
 
@@ -1654,10 +1683,11 @@ async def upload_logo(
             raise HTTPException(500, f"Token {cab['token']} not found in environment")
 
         headers = {"Authorization": f"Bearer {real_token}"}
-        files = {
-            "file": ("img256x256.jpg", open(tmp_path, "rb"), "image/jpeg"),
-            "data": (None, json.dumps({"width": 256, "height": 256}), "application/json"),
-        }
+        with open(tmp_path, "rb") as img_fh:
+            files = {
+                "file": ("img256x256.jpg", open(tmp_path, "rb"), "image/jpeg"),
+                "data": (None, json.dumps({"width": 256, "height": 256}), "application/json"),
+            }
 
         # загружаем в VK
         vk_url = "https://ads.vk.com/api/v2/content/static.json"
@@ -2273,10 +2303,13 @@ async def save_settings(payload: dict):
     info_file = user_dir / f"{user_id}.json"
     lock = info_file.with_suffix(info_file.suffix + ".lock")
 
-    with file_lock(lock):
-        data = ensure_user_structure(user_id)
-        data.update(settings)
-        atomic_write_json(info_file, data)
+    try:
+        with file_lock(lock, timeout=3):
+            data = ensure_user_structure(user_id)
+            data.update(settings)
+            atomic_write_json(info_file, data)
+    except FileLockTimeout:
+        raise HTTPException(503, "Settings storage busy, retry")
 
     return {"status": "ok"}
 
@@ -2306,8 +2339,11 @@ def save_textsets(payload: dict):
         lock = f.with_suffix(f.suffix + ".lock")
 
         # атомарная запись под блокировкой
-        with file_lock(lock):
+    try:
+        with file_lock(lock, timeout=3):
             atomic_write_json(f, sets if isinstance(sets, list) else [])
+    except FileLockTimeout:
+        raise HTTPException(503, "Textsets storage busy, retry")
         return {"status": "ok"}
     except Exception as e:
         log_error(f"textsets/save[{user_id}/{cabinet_id}] error: {repr(e)}")
@@ -2326,7 +2362,12 @@ def get_textsets(user_id: str, cabinet_id: str):
         last_text = ""
         for attempt in range(3):
             try:
-                text = f.read_text(encoding="utf-8")
+                lock = f.with_suffix(f.suffix + ".lock")
+                try:
+                    with file_lock(lock, timeout=2):
+                        text = f.read_text(encoding="utf-8")
+                except FileLockTimeout:
+                    raise HTTPException(503, "Textsets storage busy, retry")
                 last_text = text
             except Exception as e:
                 log_error(f"textsets/get read failed {f}: {repr(e)}")
@@ -2530,56 +2571,61 @@ async def upload_creative(
             if set_id and cabinet_id != "all":
                 fsets = creatives_path(user_id, cabinet_id)
                 lock = fsets.with_suffix(fsets.suffix + ".lock")
-                with file_lock(lock):
-                    # читаем текущий sets.json
-                    if fsets.exists():
-                        try:
-                            data = json.loads(fsets.read_text(encoding="utf-8"))
-                            if not isinstance(data, list):
+                try:
+                    with file_lock(lock):
+                        # читаем текущий sets.json
+                        if fsets.exists():
+                            try:
+                                data = json.loads(fsets.read_text(encoding="utf-8"))
+                                if not isinstance(data, list):
+                                    data = []
+                            except Exception:
                                 data = []
-                        except Exception:
+                        else:
                             data = []
-                    else:
-                        data = []
 
-                    # ищем/создаём набор
-                    target_set = None
-                    for s in data:
-                        if str(s.get("id")) == str(set_id):
-                            target_set = s
-                            break
-                    if target_set is None:
-                        target_set = {
-                            "id": str(set_id),
-                            "name": set_name or "Набор",
-                            "items": []
-                        }
-                        data.append(target_set)
+                        # ищем/создаём набор
+                        target_set = None
+                        for s in data:
+                            if str(s.get("id")) == str(set_id):
+                                target_set = s
+                                break
+                        if target_set is None:
+                            target_set = {
+                                "id": str(set_id),
+                                "name": set_name or "Набор",
+                                "items": []
+                            }
+                            data.append(target_set)
 
-                    items = target_set.get("items") or []
-                    # берём результат именно для текущего cabinet_id
-                    res0 = next((r for r in results if str(r["cabinet_id"]) == str(cabinet_id)), None)
-                    if res0:
-                        new_item = {
-                            "id": str(res0["vk_id"]),
-                            "url": res0["url"],
-                            "name": res0.get("display_name") or file.filename or "",
-                            "type": "image" if is_image else "video",
-                            "uploaded": True,
-                            "vkByCabinet": {str(cabinet_id): str(res0["vk_id"])},
-                        }
-                        if res0.get("thumb_url"):
-                            new_item["thumbUrl"] = res0["thumb_url"]
+                        items = target_set.get("items") or []
+                        # берём результат именно для текущего cabinet_id
+                        res0 = next((r for r in results if str(r["cabinet_id"]) == str(cabinet_id)), None)
+                        if res0:
+                            new_item = {
+                                "id": str(res0["vk_id"]),
+                                "url": res0["url"],
+                                "name": res0.get("display_name") or file.filename or "",
+                                "type": "image" if is_image else "video",
+                                "uploaded": True,
+                                "vkByCabinet": {str(cabinet_id): str(res0["vk_id"])},
+                            }
+                            if res0.get("thumb_url"):
+                                new_item["thumbUrl"] = res0["thumb_url"]
 
-                        items.append(new_item)
-                        target_set["items"] = items
+                            items.append(new_item)
+                            target_set["items"] = items
 
-                    atomic_write_json(fsets, data)
+                        atomic_write_json(fsets, data)
+                        
+                    except FileLockTimeout:
+                        raise HTTPException(503, "Creatives sets busy, retry")
 
             # 2) Иначе — ведём себя как раньше (кладём в первый набор / поддерживаем режим "all")
             else:
                 sets_file = creatives_path(user_id, cabinet_id)
                 lock3 = sets_file.with_suffix(sets_file.suffix + ".lock")
+            try:
                 with file_lock(lock3):
                     existing = []
                     if sets_file.exists():
@@ -2629,6 +2675,9 @@ async def upload_creative(
 
                     existing[0].setdefault("items", []).append(item)
                     atomic_write_json(sets_file, existing)
+
+                except FileLockTimeout:
+                    raise HTTPException(503, "Creatives sets busy, retry")
         except Exception as e:
             log_error(f"upload: auto-append to sets.json failed: {repr(e)}")
 
@@ -2655,4 +2704,4 @@ if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="auto_ads_frontend")
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8899, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=8899, reload=False)
