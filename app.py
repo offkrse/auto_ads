@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.92"
+VersionApp = "0.93"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1245,10 +1245,9 @@ async def creative_delete(payload: dict):
                     sets = json.loads(raw) if raw.strip() else []
                     if not isinstance(sets, list):
                         sets = []
-
-                    # Пытаемся найти элемент по url/urls и вычислить его vk-id для текущего кабинета
+            
                     item_vk_id_to_drop = None
-
+            
                     def _match_item(it: dict) -> bool:
                         u = it.get("url")
                         if isinstance(u, str) and any(Path(u).name == fname for _cab, fname in to_delete):
@@ -1256,32 +1255,29 @@ async def creative_delete(payload: dict):
                         urls = it.get("urls")
                         if isinstance(urls, dict):
                             for _cab, u2 in urls.items():
-                                if isinstance(u2, str):
-                                    if any(Path(u2).name == fname for _cab2, fname in to_delete):
-                                        return True
+                                if isinstance(u2, str) and any(Path(u2).name == fname for _cab2, fname in to_delete):
+                                    return True
                         return False
-
+            
                     for s in sets:
                         items = s.get("items") or []
                         keep = []
                         for it in items:
                             if _match_item(it):
-                                # берём vk-id для текущего кабинета (если all — пробуем вытянуть из url)
                                 vk_by_cab = it.get("vkByCabinet") or {}
                                 cand = vk_by_cab.get(str(cabinet_id))
                                 if isinstance(cand, (str, int)):
                                     item_vk_id_to_drop = str(cand)
                                 elif isinstance(it.get("id"), (str, int)):
                                     item_vk_id_to_drop = str(it["id"])
-                                # пропускаем (удаляем этот item)
                                 continue
                             keep.append(it)
                         s["items"] = keep
-
+            
                     atomic_write_json(sets_file, sets)
-
-                except FileLockTimeout:
-                    raise HTTPException(503, "Creatives sets busy, retry")
+            
+            except FileLockTimeout:
+                raise HTTPException(503, "Creatives sets busy, retry")
 
                 # если нашли vk-id — удалим его из пресетов этого кабинета
                 if item_vk_id_to_drop:
