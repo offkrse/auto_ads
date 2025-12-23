@@ -18,7 +18,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.35"
+VersionCyclop = "1.36"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -830,6 +830,20 @@ def build_age_list(age_range_str: str) -> List[int]:
     ages.extend(list(range(a, b + 1)))
     return ages
 
+def compute_group_max_price(g: Dict[str, Any]) -> int:
+    """
+    bidStrategy:
+      - "min" (или отсутствует) -> max_price = 0 (как сейчас)
+      - "cap" -> max_price = int(maxCpa)
+    """
+    strat = str(g.get("bidStrategy") or "min").strip().lower()
+    if strat != "cap":
+        return 0
+    try:
+        return int(float(g.get("maxCpa") or 0))
+    except Exception:
+        return 0
+
 def env_token(name: str) -> Optional[str]:
     return os.getenv(name)
 
@@ -1139,11 +1153,12 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
         utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
         banners_payload = [{"name": f"Объявление {g_idx}", "urls": {"primary": {"id": ad_object_id}}}]
+        max_price = compute_group_max_price(g)
 
         group_payload = {
             "name": group_name,
             "targetings": targetings,
-            "max_price": 0,
+            "max_price": int(max_price),
             "autobidding_mode": "max_goals",
             "budget_limit": None,
             "budget_limit_day": budget_day,
@@ -1611,6 +1626,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
             budget_day = int(g.get("budget") or 0)
             utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
+            max_price_for_group = compute_group_max_price(g)
 
             # КАЖДЫЙ креатив → отдельная группа с ОДНИМ баннером
             made_any = False
@@ -1694,7 +1710,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     group_payload = {
                         "name": safe_g_name,
                         "targetings": json.loads(json.dumps(targetings)),
-                        "max_price": 0,
+                        "max_price": int(max_price_for_group),
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
                         "budget_limit_day": budget_day,
@@ -1758,7 +1774,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     group_payload = {
                         "name": safe_g_name,
                         "targetings": json.loads(json.dumps(targetings)),
-                        "max_price": 0,
+                        "max_price": int(max_price_for_group),
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
                         "budget_limit_day": budget_day,
