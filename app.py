@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.88"
+VersionApp = "0.89"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -888,6 +888,11 @@ def audiences_path(user_id: str, cabinet_id: str) -> Path:
 # ----------------------------------- API --------------------------------------------
 secure_api = APIRouter(prefix="/api", dependencies=[Depends(require_tg_user)])
 secure_auto = APIRouter(prefix="/auto_ads/api", dependencies=[Depends(require_tg_user)])
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    log_error(f"UNHANDLED {request.method} {request.url}: {repr(exc)}")
+    return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 # -------------------------------------
 #   HISTORY
 # -------------------------------------
@@ -982,39 +987,46 @@ async def save_preset(payload: dict):
 @secure_api.get("/preset/list")
 @secure_auto.get("/preset/list")
 def list_presets(user_id: str, cabinet_id: str):
-    ensure_user_structure(user_id)
-    pdir = USERS_DIR / user_id / "presets" / cabinet_id
-    presets = []
+    try:
+        ensure_user_structure(str(user_id))
 
-    # Берём только файлы пресетов
-    for file in pdir.glob("preset_*.json"):
-        try:
-            with open(file, "r", encoding="utf-8") as f:
-                data = json.load(f)
+        pdir = USERS_DIR / str(user_id) / "presets" / str(cabinet_id)
+        # важно: создаём папку, чтобы не словить permission/ENOENT
+        pdir.mkdir(parents=True, exist_ok=True)
 
-            if not isinstance(data, dict):
-                raise ValueError("Preset file is not an object")
+        presets = []
+        for file in pdir.glob("preset_*.json"):
+            try:
+                with open(file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
 
-            # минимальная валидация структуры
-            if "company" not in data or not isinstance(data["company"], dict):
-                data["company"] = {}
-            if "groups" not in data or not isinstance(data["groups"], list):
-                data["groups"] = []
-            if "ads" not in data or not isinstance(data["ads"], list):
-                data["ads"] = []
+                if not isinstance(data, dict):
+                    raise ValueError("Preset file is not an object")
 
-            mtime = file.stat().st_mtime
-            created_at = datetime.utcfromtimestamp(mtime).isoformat(timespec="seconds") + "Z"
+                if "company" not in data or not isinstance(data["company"], dict):
+                    data["company"] = {}
+                if "groups" not in data or not isinstance(data["groups"], list):
+                    data["groups"] = []
+                if "ads" not in data or not isinstance(data["ads"], list):
+                    data["ads"] = []
 
-            presets.append({
-                "preset_id": file.stem,
-                "created_at": created_at,
-                "data": data
-            })
-        except Exception as e:
-            log_error(f"Skip invalid preset file: {file} | {repr(e)}")
+                mtime = file.stat().st_mtime
+                created_at = datetime.utcfromtimestamp(mtime).isoformat(timespec="seconds") + "Z"
 
-    return {"presets": presets}
+                presets.append({
+                    "preset_id": file.stem,
+                    "created_at": created_at,
+                    "data": data
+                })
+            except Exception as e:
+                log_error(f"preset/list skip {file}: {repr(e)}")
+                continue
+
+        return {"presets": presets}
+
+    except Exception as e:
+        log_error(f"preset/list FATAL user={user_id} cab={cabinet_id}: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 @secure_auto.delete("/preset/delete")
 @secure_api.delete("/preset/delete")
