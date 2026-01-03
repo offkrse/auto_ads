@@ -5,13 +5,15 @@ import os
 import time
 import re
 import random
+import urllib.request
+import urllib.parse
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import logging
 from logging.handlers import TimedRotatingFileHandler
-from urllib.parse import urlsplit, urlunsplit
+
 
 import requests
 from dateutil import tz
@@ -19,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.37"
+VersionCyclop = "1.4"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -672,6 +674,71 @@ def load_tokens_from_envfile() -> None:
     except Exception as e:
         log.warning("Failed to read tokens from %s: %s", ENV_FILE, e)
 
+def load_telegram_bot_token() -> Optional[str]:
+    """Загружает TELEGRAM_BOT_TOKEN из /opt/auto_ads/.env"""
+    if not ENV_FILE.exists():
+        return None
+    try:
+        values = dotenv_values(str(ENV_FILE))
+        return values.get("TELEGRAM_BOT_TOKEN")
+    except Exception as e:
+        log.warning("Failed to read TELEGRAM_BOT_TOKEN from %s: %s", ENV_FILE, e)
+        return None
+
+
+def get_notification_settings(user_id: str, cabinet_id: str) -> Dict[str, Any]:
+    """Читает настройки уведомлений из файла"""
+    path = USERS_ROOT / str(user_id) / "settings" / str(cabinet_id) / "notifications.json"
+    if not path.exists():
+        return {"notifyOnError": True}  # по умолчанию включено
+    try:
+        return load_json(path)
+    except Exception:
+        return {"notifyOnError": True}
+
+
+def send_telegram_notification(user_id: str, message: str) -> bool:
+    """Отправляет уведомление в Telegram пользователю"""
+    bot_token = load_telegram_bot_token()
+    if not bot_token:
+        log.warning("TELEGRAM_BOT_TOKEN not configured, skipping notification")
+        return False
+    
+    try:
+        # user_id в нашем случае = telegram_id
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        data = urllib.parse.urlencode({
+            "chat_id": user_id,
+            "text": message,
+            "parse_mode": "HTML"
+        }).encode("utf-8")
+        
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                log.info("Telegram notification sent to user %s", user_id)
+                return True
+            else:
+                log.warning("Telegram API returned status %s", resp.status)
+                return False
+    except Exception as e:
+        log.warning("Failed to send Telegram notification: %s", e)
+        return False
+
+
+def notify_error_if_enabled(user_id: str, cabinet_id: str, preset_name: str, error_msg: str) -> None:
+    """Отправляет уведомление об ошибке, если включено в настройках"""
+    settings = get_notification_settings(user_id, cabinet_id)
+    if not settings.get("notifyOnError", True):
+        return
+    
+    message = (
+        f"❌ <b>Ошибка создания кампании</b>\n\n"
+        f"Пресет: {preset_name or 'Без имени'}\n"
+        f"Ошибка: {error_msg}"
+    )
+    send_telegram_notification(user_id, message)
+
 def load_json(path: Path) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -722,18 +789,17 @@ def write_result_success(user_id: str, cabinet_id: str, preset_id: str, preset_n
 
 def write_result_error(user_id: str, cabinet_id: str, preset_id: str, preset_name: str,
                        trigger_time: str, human: str, tech: str) -> None:
-    entry = {
-        "cabinet_id": str(cabinet_id),
-        "date_time": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "preset_id": str(preset_id),
-        "preset_name": str(preset_name or ""),
-        "trigger_time": str(trigger_time or ""),
-        "status": "error",
-        "text_error": human,
-        "code_error": tech,
-        "id_company": [],
-    }
-    append_result_entry(user_id, cabinet_id, entry)
+    """
+    Логирует ошибку в cyclop.log и отправляет уведомление в Telegram (если включено).
+    НЕ записывает в created.json — только успехи туда попадают.
+    """
+    log.error(
+        "PRESET ERROR | user=%s | cabinet=%s | preset=%s (%s) | trigger=%s | error=%s | tech=%s",
+        user_id, cabinet_id, preset_id, preset_name, trigger_time, human, tech
+    )
+    
+    # Отправляем уведомление в Telegram
+    notify_error_if_enabled(user_id, cabinet_id, preset_name, human)
 
 def extract_campaign_ids_from_resp(resp: Dict[str, Any]) -> List[int]:
     #Возвращаем список int без дублей (порядок сохраняем).
