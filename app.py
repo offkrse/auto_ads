@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.94"
+VersionApp = "0.95"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -219,6 +219,13 @@ def atomic_write_json(dst: Path, obj: dict | list):
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, dst)  # атомарная замена
+
+# ===== УВЕДОМЛЕНИЯ =====
+
+def notifications_settings_path(user_id: str, cabinet_id: str) -> Path:
+    p = USERS_DIR / str(user_id) / "settings" / str(cabinet_id)
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "notifications.json"
 
 # ===== helpers: VK users_lists =====
 
@@ -1536,6 +1543,73 @@ async def queue_status_set(payload: dict):
     except Exception as e:
         log_error(f"queue/status/set error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error":"Internal Server Error"})
+
+# -------------------------------------
+#   NOTIFICATION SETTINGS
+# -------------------------------------
+
+@secure_auto.get("/notifications/get")
+@secure_api.get("/notifications/get")
+def get_notifications(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """
+    Возвращает настройки уведомлений для кабинета.
+    По умолчанию notifyOnError = True
+    """
+    try:
+        ensure_user_structure(user_id)
+        f = notifications_settings_path(user_id, cabinet_id)
+        
+        if not f.exists():
+            return {"notifyOnError": True}
+        
+        lock = f.with_suffix(".lock")
+        try:
+            with file_lock(lock, timeout=3):
+                raw = f.read_text(encoding="utf-8")
+        except FileLockTimeout:
+            return {"notifyOnError": True}
+        
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+            return {"notifyOnError": data.get("notifyOnError", True)}
+        except Exception:
+            return {"notifyOnError": True}
+    except Exception as e:
+        log_error(f"notifications/get[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return {"notifyOnError": True}
+
+
+@secure_auto.post("/notifications/save")
+@secure_api.post("/notifications/save")
+async def save_notifications(payload: dict):
+    """
+    Сохраняет настройки уведомлений.
+    Тело: { "userId": "...", "cabinetId": "...", "notifyOnError": true/false }
+    """
+    user_id = payload.get("userId")
+    cabinet_id = payload.get("cabinetId")
+    notify_on_error = payload.get("notifyOnError", True)
+    
+    if not user_id or cabinet_id is None:
+        raise HTTPException(400, "Missing userId or cabinetId")
+    
+    try:
+        ensure_user_structure(str(user_id))
+        f = notifications_settings_path(str(user_id), str(cabinet_id))
+        lock = f.with_suffix(".lock")
+        
+        try:
+            with file_lock(lock, timeout=3):
+                atomic_write_json(f, {"notifyOnError": bool(notify_on_error)})
+        except FileLockTimeout:
+            raise HTTPException(503, "Notifications storage busy, retry")
+        
+        return {"status": "ok", "notifyOnError": bool(notify_on_error)}
+    except FileLockTimeout:
+        raise HTTPException(503, "Notifications storage busy, retry")
+    except Exception as e:
+        log_error(f"notifications/save[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 # -------------------------------------
 #   PIXELS
