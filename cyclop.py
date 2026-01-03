@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.41"
+VersionCyclop = "1.42"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -441,6 +441,14 @@ def sleep_to_next_tick(target_second: int = TARGET_SECOND, *, wake_early: float 
 
     log.debug("Sleeping %.3fs until %s", sleep_s, next_tick.strftime("%Y-%m-%d %H:%M:%S %Z"))
     time.sleep(sleep_s)
+
+def truncate_name(name: str, max_len: int = 200) -> str:
+    """Обрезает название до max_len символов."""
+    if not name:
+        return name
+    if len(name) <= max_len:
+        return name
+    return name[:max_len].rstrip()
 
 def _build_priced_goal_company(company: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if (company.get("targetAction") or "") != "site_conversions":
@@ -1179,31 +1187,54 @@ def make_banner_for_creative(url_id: int,
 
 # ============================ Построение payload ============================
 
-def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index: int) -> Dict[str, Any]:
+def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index: int,
+                          *, rendered_company_name: str = "",
+                          rendered_group_names: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Собирает payload для POST /api/v2/ad_plans.json.
+    Если переданы rendered_company_name / rendered_group_names — использует их,
+    иначе рендерит по старой логике (для обратной совместимости).
+    """
     company = preset["company"]
     groups = preset.get("groups", [])
     objective = company.get("targetAction", "socialengagement")
 
-    # дата «сегодня» со сдвигом +4ч (как и во всех остальных местах)
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
 
-    # companyName с шаблонами
-    company_name_tpl = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
-    company_name = render_name_tokens(company_name_tpl, today_date=today, objective=objective, n=1, n_g=1)
+    # Название компании
+    if rendered_company_name:
+        company_name = truncate_name(rendered_company_name, 200)
+    else:
+        company_name_tpl = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
+        company_name = truncate_name(
+            render_name_tokens(company_name_tpl, today_date=today, objective=objective, n=1, n_g=1),
+            200
+        )
 
     package_id = package_id_for_objective(objective)
-    start_date_str = today.isoformat()  # дата старта = сегодняшняя (с учётом +4ч)
+    start_date_str = today.isoformat()
 
     ad_groups_payload = []
 
     for g_idx, g in enumerate(groups, start=1):
-        group_name_tpl = (g.get("groupName") or f"Группа {g_idx}").strip()
+        # Название группы
+        if rendered_group_names and g_idx <= len(rendered_group_names):
+            group_name = truncate_name(rendered_group_names[g_idx - 1], 200)
+        else:
+            group_name_tpl = (g.get("groupName") or f"Группа {g_idx}").strip()
+            age_str = g.get("age", "")
+            gender_str = g.get("gender", "")
+            group_name = truncate_name(
+                render_name_tokens(
+                    group_name_tpl, today_date=today, objective=objective,
+                    age=age_str, gender=gender_str, n=g_idx, n_g=g_idx
+                ),
+                200
+            )
+
         age_str = g.get("age", "")
         gender_str = g.get("gender", "")
         placements = as_int_list(g.get("placements"))
-        group_name = render_name_tokens(
-            group_name_tpl, today_date=today, objective=objective, age=age_str, gender=gender_str, n=1, n_g=1
-        )
 
         regions = as_int_list(g.get("regions"))
         genders = split_gender(gender_str)
@@ -1222,7 +1253,6 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             targetings["age"] = {"age_list": age_list}
         if placements:
             targetings["pads"] = placements
-
 
         budget_day = int(g.get("budget") or 0)
         utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
@@ -1244,13 +1274,13 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             "utm": utm,
             "banners": banners_payload,
         }
-        
+
         pg_group = _build_priced_goal_group(company)
         if pg_group:
             group_payload["priced_goal"] = pg_group
-        
+
         ad_groups_payload.append(group_payload)
-        
+
     payload = {
         "name": company_name,
         "status": "active",
@@ -1269,7 +1299,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     pg_company = _build_priced_goal_company(company)
     if pg_company:
         payload["priced_goal"] = pg_company
-    
+
     return payload
 
 # ============================ Создание плана ============================
@@ -1293,7 +1323,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     company_adv = (company.get("advertiserInfo") or "").strip()
     company_logo = company.get("logoId")
 
-    company_name = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
+    company_name_tpl = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
     objective = company.get("targetAction", "socialengagement")
 
     # Разрешаем URL -> id
@@ -1308,7 +1338,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                            "Не удалось получить ad_object_id по URL", repr(e))
         raise
-        
+
     # --- cache for URL -> id (чтобы не дергать API много раз) ---
     url_id_cache: Dict[str, int] = {}
 
@@ -1340,14 +1370,13 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             try:
                 add_ids = resolve_abstract_audiences(tokens, abstract_names, day_number)
             except Exception as e:
-                # не критично — просто лог и без добавления
-                log.warning("resolve_abstract_audiences failed for group %d: %s", gi+1, e)
+                log.warning("resolve_abstract_audiences failed for group %d: %s", gi + 1, e)
                 add_ids = []
             if add_ids:
                 base_ids = g.get("audienceIds") or []
                 merged = as_int_list(base_ids) + add_ids
                 g["audienceIds"] = list(dict.fromkeys(merged))
-                log.info("Group #%d segments extended by abstractAudiences: +%d id(s)", gi+1, len(add_ids))
+                log.info("Group #%d segments extended by abstractAudiences: +%d id(s)", gi + 1, len(add_ids))
 
     # 2) Диагностика объявлений
     for i, ad in enumerate(ads):
@@ -1356,50 +1385,83 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                  ad.get("logoId") or company.get("logoId"),
                  ad.get("advertiserInfo") or company.get("advertiserInfo"))
 
-    # 3) Баннеры 1:1 с группами + рендер имён с плейсхолдерами
-    banners_by_group: List[Dict[str, Any]] = []
-    company_counter = 0  # для {%N-G%} на баннерах
+    # === РЕНДЕРИНГ НАЗВАНИЙ С ПОЛНЫМИ ТОКЕНАМИ ===
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
-    objective = (preset.get("company") or {}).get("targetAction", "socialengagement")
-
-    # заранее подготовим «рендеренные» имена групп, чтобы {%N%}/{%N-G%} работали в GROUP
-    rendered_group_names: List[str] = []
     day_number_for_names = compute_day_number(datetime.now(LOCAL_TZ))
+
+    # Подготовим списки имён аудиторий для каждой группы
+    group_audience_names: List[List[str]] = []
+    for gi, g in enumerate(groups):
+        aud_names = list(g.get("audienceNames") or [])
+        abs_names = list(g.get("abstractAudiences") or [])
+        if not aud_names and abs_names:
+            aud_names = expand_abstract_names(abs_names, day_number_for_names)
+        group_audience_names.append(aud_names)
+
+    # Рендерим название компании с полными токенами
+    first_group_auds = group_audience_names[0] if group_audience_names else []
+    first_group = groups[0] if groups else {}
+    first_ad = ads[0] if ads else {}
+    first_creo = "Видео" if (first_ad.get("videoIds") or []) else "Статика"
+
+    rendered_company_name = truncate_name(
+        render_with_tokens(
+            company_name_tpl,
+            today_date=today,
+            objective=objective,
+            age=first_group.get("age", ""),
+            gender=first_group.get("gender", ""),
+            n=1,
+            n_g=1,
+            creo=first_creo,
+            audience_names=first_group_auds,
+            company_src=company_name_tpl,
+            group_src=(first_group.get("groupName") or ""),
+            banner_src=(first_ad.get("adName") or "")
+        ),
+        200
+    )
+
+    # Рендерим названия групп с полными токенами
+    rendered_group_names: List[str] = []
     for gi, g in enumerate(groups):
         age_str = g.get("age", "")
         gender_str = g.get("gender", "")
-        group_tpl = (g.get("groupName") or f"Группа {gi+1}").strip()
-    
-        # БАЗОВЫЕ списки
-        aud_names = list(g.get("audienceNames") or [])
-        aud_ids   = as_int_list(g.get("audienceIds"))
-        abs_names = list(g.get("abstractAudiences") or [])
-    
-        # ЕСЛИ нет имён, но есть abstractAudiences → берём названия из abstractAudiences
-        if not aud_names and abs_names:
-            aud_names = expand_abstract_names(abs_names, day_number_for_names)
-    
-        g_name = render_with_tokens(
-            group_tpl,
-            today_date=today,
-            objective=objective,
-            age=age_str,
-            gender=gender_str,
-            n=gi+1,           # номер группы в компании
-            n_g=gi+1,         # тот же номер
-            audience_names=aud_names,               # <-- используем актуальный список имён
-            company_src=(company.get("companyName") or ""),
-            group_src=group_tpl,
-            banner_src=""
+        group_tpl = (g.get("groupName") or f"Группа {gi + 1}").strip()
+        aud_names = group_audience_names[gi]
+
+        ad = ads[gi] if gi < len(ads) else {}
+        creo = "Видео" if (ad.get("videoIds") or []) else "Статика"
+
+        g_name = truncate_name(
+            render_with_tokens(
+                group_tpl,
+                today_date=today,
+                objective=objective,
+                age=age_str,
+                gender=gender_str,
+                n=gi + 1,
+                n_g=gi + 1,
+                creo=creo,
+                audience_names=aud_names,
+                company_src=company_name_tpl,
+                group_src=group_tpl,
+                banner_src=(ad.get("adName") or "")
+            ),
+            200
         )
         rendered_group_names.append(g_name)
+
+    # 3) Баннеры 1:1 с группами + рендер имён с плейсхолдерами
+    banners_by_group: List[Dict[str, Any]] = []
+    company_counter = 0
 
     for gi in range(len(groups)):
         g = groups[gi]
         ad = ads[gi] if gi < len(ads) else None
         if not ad:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                               f"Для группы #{gi+1} отсутствует объявление в 'ads'",
+                               f"Для группы #{gi + 1} отсутствует объявление в 'ads'",
                                f"ads[{gi}] is missing")
             raise RuntimeError(f"ads[{gi}] is missing")
 
@@ -1407,12 +1469,12 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         icon_id = ad.get("logoId") or company_logo
         if not adv_info:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                               f"В объявлении #{gi+1} отсутствует 'advertiserInfo' и не задан в company",
+                               f"В объявлении #{gi + 1} отсутствует 'advertiserInfo' и не задан в company",
                                f"Missing ads[{gi}].advertiserInfo and company.advertiserInfo")
             raise RuntimeError("missing advertiserInfo")
         if not icon_id:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                               f"В объявлении #{gi+1} отсутствует 'logoId' и не задан в company",
+                               f"В объявлении #{gi + 1} отсутствует 'logoId' и не задан в company",
                                f"Missing ads[{gi}].logoId and company.logoId")
             raise RuntimeError("missing logoId")
 
@@ -1422,28 +1484,28 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         # контексты
         age_str = g.get("age", "")
         gender_str = g.get("gender", "")
-        aud_names = g.get("audienceNames") or []
-        group_tpl = (g.get("groupName") or f"Группа {gi+1}").strip()
-        ad_tpl = (ad.get("adName") or f"Объявление {gi+1}").strip()
+        aud_names = group_audience_names[gi]
+        group_tpl = (g.get("groupName") or f"Группа {gi + 1}").strip()
+        ad_tpl = (ad.get("adName") or f"Объявление {gi + 1}").strip()
         creo = "Видео" if (ad.get("videoIds") or []) else "Статика"
-        aud_ids   = as_int_list(g.get("audienceIds"))
-        abs_names = list(g.get("abstractAudiences") or [])
-        if not aud_names and abs_names:
-            aud_names = expand_abstract_names(abs_names, day_number_for_names)
 
-        banner_name = render_with_tokens(
-            ad_tpl,
-            today_date=today,
-            objective=objective,
-            age=age_str,
-            gender=gender_str,
-            n=1 + 0,          # счётчик в рамках группы (если будет несколько баннеров в группе — увеличивай)
-            n_g=company_counter,
-            creo=creo,
-            audience_names=aud_names,
-            company_src=(company.get("companyName") or ""),
-            group_src=rendered_group_names[gi],
-            banner_src=ad_tpl
+        # Рендерим название баннера с полными токенами
+        banner_name = truncate_name(
+            render_with_tokens(
+                ad_tpl,
+                today_date=today,
+                objective=objective,
+                age=age_str,
+                gender=gender_str,
+                n=1,
+                n_g=company_counter,
+                creo=creo,
+                audience_names=aud_names,
+                company_src=company_name_tpl,
+                group_src=rendered_group_names[gi],
+                banner_src=ad_tpl
+            ),
+            200
         )
 
         cta_text = (ad.get("button") or "visitSite").strip()
@@ -1466,10 +1528,10 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     "Не удалось получить id по bannerUrl", repr(e)
                 )
                 raise
-                
+
         try:
             media_kind, media_id = pick_creative(ad, cabinet_id=str(cabinet_id))
-            
+
             banner = make_banner_for_creative(
                 banner_url_id, ad, idx=gi + 1,
                 advertiser_info=adv_info, icon_id=int(icon_id),
@@ -1479,16 +1541,21 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             )
             banners_by_group.append(banner)
             log.info("Собран баннер #%d для группы '%s' (name='%s')",
-                     gi+1, rendered_group_names[gi], banner_name)
+                     gi + 1, rendered_group_names[gi], banner_name)
         except Exception as e:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                                "Ошибка сборки баннера", repr(e))
             raise
+
     results = []
     endpoint = f"{API_BASE}/api/v2/ad_plans.json"
 
     for i in range(1, repeats + 1):
-        base_payload = build_ad_plan_payload(preset_mut, ad_object_id, i)
+        base_payload = build_ad_plan_payload(
+            preset_mut, ad_object_id, i,
+            rendered_company_name=rendered_company_name,
+            rendered_group_names=rendered_group_names
+        )
         payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
 
         # подставляем баннеры в группы
@@ -1504,7 +1571,6 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             media_key = None
             media_id = None
 
-            # ищем любой ключ вида image_* или video_*
             for k, v in c.items():
                 if not isinstance(v, dict):
                     continue
@@ -1529,7 +1595,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         body_bytes = json.dumps(payload_try, ensure_ascii=False).encode("utf-8")
         log.info(
             "POST ad_plan (%d/%d): groups=%d, banners_per_group=1, payload=%.1f KB, timeout=disabled",
-            i, repeats, len(ad_groups), len(body_bytes)/1024.0
+            i, repeats, len(ad_groups), len(body_bytes) / 1024.0
         )
 
         try:
@@ -1537,18 +1603,16 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             results.append({"request": payload_try, "response": resp})
             log.info("POST OK (%d/%d).", i, repeats)
         except ApiHTTPError as e:
-            # сохраняем полный ответ в файл
             err_path = save_text_blob(user_id, cabinet_id, "vk_error_ad_plan_post", e.body)
             log.error("VK HTTP error %s on %s. Full body saved to: %s (len=%d)",
                       e.status, e.url, err_path, len(e.body or ""))
-        
-            # пробуем распарсить как JSON и красиво развернуть валидацию
+
             try:
                 err_json = json.loads(e.body)
                 _dump_vk_validation(err_json)
             except Exception as ex:
                 log.error("VALIDATION: non-JSON or parse failed: %s", ex)
-        
+
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                                "Ошибка создания кампании в VK Ads", f"HTTP {e.status} {e.url}")
             raise
@@ -1588,6 +1652,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
     company_adv = (company.get("advertiserInfo") or "").strip()
     company_logo = company.get("logoId")
+    company_name_tpl = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
     objective = company.get("targetAction", "socialengagement")
 
     try:
@@ -1601,7 +1666,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
         write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                            "Не удалось получить ad_object_id по URL", repr(e))
         raise
-        
+
     # --- cache for URL -> id ---
     url_id_cache: Dict[str, int] = {}
 
@@ -1628,8 +1693,37 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
         raise RuntimeError("ads is empty")
 
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
+    day_number_for_names = compute_day_number(datetime.now(LOCAL_TZ))
 
-    base_payload = build_ad_plan_payload(preset_mut, ad_object_id, 1)
+    # === РЕНДЕРИМ НАЗВАНИЕ КОМПАНИИ С ПОЛНЫМИ ТОКЕНАМИ ===
+    first_group = groups[0] if groups else {}
+    first_ad = ads[0] if ads else {}
+    first_creo = "Видео" if (first_ad.get("videoIds") or []) else "Статика"
+
+    first_aud_names = list(first_group.get("audienceNames") or [])
+    first_abs_names = list(first_group.get("abstractAudiences") or [])
+    if not first_aud_names and first_abs_names:
+        first_aud_names = expand_abstract_names(first_abs_names, day_number_for_names)
+
+    rendered_company_name = truncate_name(
+        render_with_tokens(
+            company_name_tpl,
+            today_date=today,
+            objective=objective,
+            age=first_group.get("age", ""),
+            gender=first_group.get("gender", ""),
+            n=1,
+            n_g=1,
+            creo=first_creo,
+            audience_names=first_aud_names,
+            company_src=company_name_tpl,
+            group_src=(first_group.get("groupName") or ""),
+            banner_src=(first_ad.get("adName") or "")
+        ),
+        200
+    )
+
+    base_payload = build_ad_plan_payload(preset_mut, ad_object_id, 1, rendered_company_name=rendered_company_name)
     payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
     payload_try["ad_groups"] = []  # перезапишем полностью
 
@@ -1672,22 +1766,8 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
             seg_ids = list(dict.fromkeys(int(x) for x in seg_ids))
 
             aud_names = list(group_aud_names or []) + list(cont.get("audienceNames") or [])
-            # ЕСЛИ нет ни audienceIds, ни audienceNames → берём NAMES из abstractAudiences
             if not aud_names and abs_names:
-                try:
-                    day_number_for_names = day_number
-                except NameError:
-                    day_number_for_names = compute_day_number(datetime.now(LOCAL_TZ))
                 aud_names = expand_abstract_names(abs_names, day_number_for_names)
-                
-            g_name = render_with_tokens(
-                group_tpl, today_date=today, objective=objective,
-                age=age_str, gender=",".join(genders) if genders else "",
-                n=len(payload_try["ad_groups"]) + 1, n_g=len(payload_try["ad_groups"]) + 1,
-                audience_names=aud_names,
-                company_src=(company.get("companyName") or ""),
-                group_src=group_tpl, banner_src=""
-            )
 
             targetings: Dict[str, Any] = {"geo": {"regions": regions}}
             if genders:
@@ -1705,7 +1785,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
             # КАЖДЫЙ креатив → отдельная группа с ОДНИМ баннером
             made_any = False
-            
+
             for ai, ad in enumerate(ads):
                 adv_info = (ad.get("advertiserInfo") or company_adv or "").strip()
                 icon_id = ad.get("logoId") or company_logo
@@ -1714,10 +1794,10 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                                        f"FAST: у ads[{ai}] нет advertiserInfo/logoId",
                                        f"fast missing fields in ads[{ai}]")
                     raise RuntimeError("fast missing fields")
-            
-                ad_tpl = (ad.get("adName") or f"Объявление {ai+1}").strip()
+
+                ad_tpl = (ad.get("adName") or f"Объявление {ai + 1}").strip()
                 btn = (ad.get("button") or "visitSite").strip()
-                
+
                 # --- bannerUrl -> url_id для всех баннеров этого ad ---
                 banner_url_raw = (
                     (ad.get("bannerUrl") or "").strip()
@@ -1736,52 +1816,70 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                             "Не удалось получить id по bannerUrl (FAST)", repr(e)
                         )
                         raise
-                        
+
                 # --- сначала ВИДЕО ---
                 for vid in (ad.get("videoIds") or []):
                     try:
                         media_id = int(vid)
                     except Exception:
                         continue
-                    
-                    # глобальный порядковый номер группы (для {%N%}/{%N-G%} в GROUP)
+
+                    creo = "Видео"
                     group_seq = len(payload_try["ad_groups"]) + 1
-            
-                    # имя группы (можно использовать {%AUD%}, {%N%}/{%N-G%}, и т.д.)
-                    g_name = render_with_tokens(
-                        group_tpl, today_date=today, objective=objective,
-                        age=age_str, gender=",".join(genders) if genders else "",
-                        n=group_seq, n_g=group_seq,                   # нумерация для группы
-                        audience_names=aud_names,
-                        company_src=(company.get("companyName") or ""),
-                        group_src=group_tpl, banner_src=""
+
+                    # Рендерим название группы с полными токенами
+                    g_name = truncate_name(
+                        render_with_tokens(
+                            group_tpl,
+                            today_date=today,
+                            objective=objective,
+                            age=age_str,
+                            gender=",".join(genders) if genders else "",
+                            n=group_seq,
+                            n_g=group_seq,
+                            creo=creo,
+                            audience_names=aud_names,
+                            company_src=company_name_tpl,
+                            group_src=group_tpl,
+                            banner_src=ad_tpl
+                        ),
+                        200
                     )
-            
-                    # имя баннера: в группе он один → {%N%}=1; глобально можно дать group_seq
-                    banner_name = render_with_tokens(
-                        ad_tpl, today_date=today, objective=objective,
-                        age=age_str, gender=",".join(genders) if genders else "",
-                        n=1, n_g=group_seq, creo="Видео",
-                        audience_names=aud_names,
-                        company_src=(company.get("companyName") or ""),
-                        group_src=g_name, banner_src=ad_tpl
+
+                    # Рендерим название баннера с полными токенами
+                    banner_name = truncate_name(
+                        render_with_tokens(
+                            ad_tpl,
+                            today_date=today,
+                            objective=objective,
+                            age=age_str,
+                            gender=",".join(genders) if genders else "",
+                            n=1,
+                            n_g=group_seq,
+                            creo=creo,
+                            audience_names=aud_names,
+                            company_src=company_name_tpl,
+                            group_src=g_name,
+                            banner_src=ad_tpl
+                        ),
+                        200
                     )
-            
+
                     banner = make_banner_for_creative(
                         ad_url_id_for_banner, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
                         media_kind="video_portrait_9_16_30s", media_id=media_id, objective=objective
                     )
-                    
+
                     safe_g_name = (g_name or "").strip()
                     if not safe_g_name:
                         safe_g_name = f"Группа {len(payload_try['ad_groups']) + 1}"
-                    
+
                     if not isinstance(banner, dict):
                         log.error("FAST: banner is not a dict, skip group. ad_index=%s", ai)
                         continue
-                        
+
                     group_payload = {
                         "name": safe_g_name,
                         "targetings": json.loads(json.dumps(targetings)),
@@ -1801,6 +1899,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         group_payload["priced_goal"] = pg_group
                     _add_group_with_optional_pads(payload_try["ad_groups"], group_payload, placements)
                     made_any = True
+
                 # --- затем КАРТИНКИ ---
                 for img in (ad.get("imageIds") or []):
                     try:
@@ -1808,27 +1907,46 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     except Exception:
                         continue
 
-                    # определяем media_kind по JSON в /mnt/data/auto_ads_storage/video/<cabinet_id>/
                     media_kind = detect_image_media_kind(media_id, cabinet_id)
-
+                    creo = "Статика"
                     group_seq = len(payload_try["ad_groups"]) + 1
 
-                    g_name = render_with_tokens(
-                        group_tpl, today_date=today, objective=objective,
-                        age=age_str, gender=",".join(genders) if genders else "",
-                        n=group_seq, n_g=group_seq,
-                        audience_names=aud_names,
-                        company_src=(company.get("companyName") or ""),
-                        group_src=group_tpl, banner_src=""
+                    # Рендерим название группы с полными токенами
+                    g_name = truncate_name(
+                        render_with_tokens(
+                            group_tpl,
+                            today_date=today,
+                            objective=objective,
+                            age=age_str,
+                            gender=",".join(genders) if genders else "",
+                            n=group_seq,
+                            n_g=group_seq,
+                            creo=creo,
+                            audience_names=aud_names,
+                            company_src=company_name_tpl,
+                            group_src=group_tpl,
+                            banner_src=ad_tpl
+                        ),
+                        200
                     )
 
-                    banner_name = render_with_tokens(
-                        ad_tpl, today_date=today, objective=objective,
-                        age=age_str, gender=",".join(genders) if genders else "",
-                        n=1, n_g=group_seq, creo="Статика",
-                        audience_names=aud_names,
-                        company_src=(company.get("companyName") or ""),
-                        group_src=g_name, banner_src=ad_tpl
+                    # Рендерим название баннера с полными токенами
+                    banner_name = truncate_name(
+                        render_with_tokens(
+                            ad_tpl,
+                            today_date=today,
+                            objective=objective,
+                            age=age_str,
+                            gender=",".join(genders) if genders else "",
+                            n=1,
+                            n_g=group_seq,
+                            creo=creo,
+                            audience_names=aud_names,
+                            company_src=company_name_tpl,
+                            group_src=g_name,
+                            banner_src=ad_tpl
+                        ),
+                        200
                     )
 
                     banner = make_banner_for_creative(
@@ -1865,6 +1983,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         group_payload["priced_goal"] = pg_group
                     _add_group_with_optional_pads(payload_try["ad_groups"], group_payload, placements)
                     made_any = True
+
             if not made_any:
                 write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                                    "FAST: не собран ни один баннер (нет креативов)", "fast no creatives")
@@ -1892,7 +2011,6 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
             results.append({"request": payload_try, "response": resp})
             log.info("FAST POST OK (%d/%d).", i, repeats)
         except ApiHTTPError as e:
-            # пробуем понять — это именно bad_width на image_600x600?
             body_text = e.body or ""
             try:
                 err_json = json.loads(body_text)
@@ -1901,7 +2019,6 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
             need_swap = False
             if isinstance(err_json, dict):
-                # грубая проверка наличия подсказок про image_600x600/bad_width
                 txt = json.dumps(err_json, ensure_ascii=False)
                 need_swap = ("image_600x600" in txt) and ("bad_width" in txt)
 
@@ -1915,9 +2032,8 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         resp2 = with_retries("POST", endpoint, tokens, data=body_bytes_retry)
                         results.append({"request": payload_try, "response": resp2})
                         log.info("FAST POST OK on retry with image_1080x1080.")
-                        continue  # к следующему repeats (если есть)
+                        continue
                     except ApiHTTPError as e2:
-                        # провал ретрая — оформим стандартно
                         err_path = save_text_blob(user_id, cabinet_id, "vk_error_ad_plan_post_fast_retry", e2.body)
                         log.error("FAST retry failed: HTTP %s on %s. Saved to: %s (len=%d)",
                                   e2.status, e2.url, err_path, len(e2.body or ""))
@@ -1931,7 +2047,6 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                                            f"HTTP {e2.status} {e2.url}")
                         raise
 
-            # стандартная обработка первоначальной ошибки
             err_path = save_text_blob(user_id, cabinet_id, "vk_error_ad_plan_post_fast", body_text)
             log.error("FAST VK HTTP error %s on %s. Full body saved to: %s (len=%d)",
                       e.status, e.url, err_path, len(body_text))
