@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.95"
+VersionApp = "0.99"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1079,6 +1079,410 @@ def delete_preset(
         log_error(f"delete_preset: remove_from_global_queue failed: {repr(e)}")
     return {"status": "deleted"}
 
+
+# -------------------------------------
+#   VK AD_PLANS (COMPANIES)
+# -------------------------------------
+
+@secure_auto.get("/vk/ad_plans/list")
+@secure_api.get("/vk/ad_plans/list")
+def vk_ad_plans_list(
+    user_id: str = Query(...),
+    cabinet_id: str = Query(...),
+    sorting: str = Query("-created", description="Поле сортировки, с - для desc"),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Получает список кампаний (ad_plans) из VK Ads API.
+    sorting: id, -id, name, -name, status, -status, created, -created
+    """
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return JSONResponse(
+            status_code=400,
+            content={"items": [], "count": 0, "error": "Invalid cabinet or missing token"}
+        )
+
+    token = os.getenv(cab["token"])
+    if not token:
+        return JSONResponse(
+            status_code=500,
+            content={"items": [], "count": 0, "error": f"Token {cab['token']} not found in .env"}
+        )
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Формируем URL
+    url = (
+        f"https://ads.vk.com/api/v2/ad_plans.json"
+        f"?_status__ne=deleted"
+        f"&limit={limit}"
+        f"&offset={offset}"
+        f"&fields=id,name,created,status,objective"
+    )
+    
+    # Добавляем сортировку если указана
+    if sorting:
+        url += f"&sorting={sorting}"
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            log_error(f"vk/ad_plans/list VK error: {resp.status_code} {resp.text[:300]}")
+            return JSONResponse(
+                status_code=502,
+                content={"items": [], "count": 0, "error": f"VK API error: {resp.status_code}"}
+            )
+        
+        j = resp.json()
+        return {
+            "items": j.get("items", []),
+            "count": j.get("count", 0),
+            "offset": j.get("offset", offset),
+        }
+    except Exception as e:
+        log_error(f"vk/ad_plans/list error: {repr(e)}")
+        return JSONResponse(
+            status_code=502,
+            content={"items": [], "count": 0, "error": str(e)}
+        )
+
+
+@secure_auto.get("/vk/statistics/ad_plans")
+@secure_api.get("/vk/statistics/ad_plans")
+def vk_statistics_ad_plans(
+    user_id: str = Query(...),
+    cabinet_id: str = Query(...),
+    ids: str = Query(..., description="Comma-separated IDs"),
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    metrics: str = Query("base"),
+    sort_by: str = Query(None, description="e.g. base.cpa, base.clicks"),
+    d: str = Query("desc", description="asc or desc"),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Получает статистику по кампаниям из VK Ads API.
+    goals и cpa берутся из vk подобъекта.
+    """
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return JSONResponse(
+            status_code=400,
+            content={"items": [], "error": "Invalid cabinet or missing token"}
+        )
+
+    token = os.getenv(cab["token"])
+    if not token:
+        return JSONResponse(
+            status_code=500,
+            content={"items": [], "error": f"Token {cab['token']} not found in .env"}
+        )
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    params = {
+        "id": ids,
+        "metrics": metrics,
+        "date_from": date_from,
+        "date_to": date_to,
+        "limit": str(limit),
+        "offset": str(offset),
+    }
+
+    url = "https://ads.vk.com/api/v3/statistics/ad_plans/day.json"
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=60)
+        if resp.status_code != 200:
+            log_error(f"vk/statistics/ad_plans VK error: {resp.status_code} {resp.text[:300]}")
+            return JSONResponse(
+                status_code=502,
+                content={"items": [], "error": f"VK API error: {resp.status_code}"}
+            )
+
+        j = resp.json()
+
+        # VK возвращает total для каждого item - используем его напрямую
+        aggregated = []
+        for item in j.get("items", []):
+            item_id = item.get("id")
+            total = item.get("total", {})
+            base = total.get("base", {})
+            vk = base.get("vk", {})
+
+            # goals и cpa берём из vk, остальное из base
+            aggregated.append({
+                "id": item_id,
+                "base": {
+                    "shows": int(base.get("shows", 0) or 0),
+                    "clicks": int(base.get("clicks", 0) or 0),
+                    "goals": int(vk.get("goals", 0) or 0),  # из vk!
+                    "spent": str(base.get("spent", "0") or "0"),
+                    "cpc": str(base.get("cpc", "0") or "0"),
+                    "cpa": str(vk.get("cpa", "0") or "0"),  # из vk!
+                    "cpm": str(base.get("cpm", "0") or "0"),
+                    "ctr": float(base.get("ctr", 0) or 0),
+                }
+            })
+
+        # Сортируем если нужно
+        if sort_by and sort_by.startswith("base."):
+            field = sort_by.replace("base.", "")
+            reverse = (d == "desc")
+
+            def get_sort_val(item):
+                val = item.get("base", {}).get(field, 0)
+                try:
+                    return float(val)
+                except:
+                    return 0
+
+            aggregated.sort(key=get_sort_val, reverse=reverse)
+
+        return {"items": aggregated}
+
+    except Exception as e:
+        log_error(f"vk/statistics/ad_plans error: {repr(e)}")
+        return JSONResponse(
+            status_code=502,
+            content={"items": [], "error": str(e)}
+        )
+
+
+@secure_auto.get("/vk/statistics/ad_groups")
+@secure_api.get("/vk/statistics/ad_groups")
+def vk_statistics_ad_groups(
+    user_id: str = Query(...),
+    cabinet_id: str = Query(...),
+    ids: str = Query(..., description="Comma-separated IDs"),
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    metrics: str = Query("base"),
+    sort_by: str = Query(None),
+    d: str = Query("desc"),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Получает статистику по группам объявлений из VK Ads API.
+    """
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return JSONResponse(
+            status_code=400,
+            content={"items": [], "error": "Invalid cabinet or missing token"}
+        )
+
+    token = os.getenv(cab["token"])
+    if not token:
+        return JSONResponse(
+            status_code=500,
+            content={"items": [], "error": f"Token {cab['token']} not found in .env"}
+        )
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    params = {
+        "id": ids,
+        "metrics": metrics,
+        "date_from": date_from,
+        "date_to": date_to,
+        "limit": str(limit),
+        "offset": str(offset),
+    }
+    
+    if sort_by:
+        params["sort_by"] = sort_by
+        params["d"] = d
+
+    url = "https://ads.vk.com/api/v3/statistics/ad_groups/day.json"
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=60)
+        if resp.status_code != 200:
+            log_error(f"vk/statistics/ad_groups VK error: {resp.status_code} {resp.text[:300]}")
+            return JSONResponse(
+                status_code=502,
+                content={"items": [], "error": f"VK API error: {resp.status_code}"}
+            )
+        
+        j = resp.json()
+        
+        # Агрегируем так же как для ad_plans
+        aggregated = []
+        for item in j.get("items", []):
+            item_id = item.get("id")
+            rows = item.get("rows", [])
+            
+            total = {"shows": 0, "clicks": 0, "goals": 0, "spent": 0.0}
+            
+            for row in rows:
+                base = row.get("base", {})
+                total["shows"] += int(base.get("shows", 0) or 0)
+                total["clicks"] += int(base.get("clicks", 0) or 0)
+                total["goals"] += int(base.get("goals", 0) or 0)
+                try:
+                    total["spent"] += float(str(base.get("spent", "0") or "0"))
+                except:
+                    pass
+            
+            cpc = total["spent"] / total["clicks"] if total["clicks"] > 0 else 0
+            cpa = total["spent"] / total["goals"] if total["goals"] > 0 else 0
+            
+            aggregated.append({
+                "id": item_id,
+                "base": {
+                    "shows": total["shows"],
+                    "clicks": total["clicks"],
+                    "goals": total["goals"],
+                    "spent": f"{total['spent']:.2f}",
+                    "cpc": f"{cpc:.2f}",
+                    "cpa": f"{cpa:.2f}",
+                }
+            })
+        
+        if sort_by and sort_by.startswith("base."):
+            field = sort_by.replace("base.", "")
+            reverse = (d == "desc")
+            
+            def get_sort_val(item):
+                val = item.get("base", {}).get(field, 0)
+                try:
+                    return float(val)
+                except:
+                    return 0
+            
+            aggregated.sort(key=get_sort_val, reverse=reverse)
+        
+        return {"items": aggregated}
+        
+    except Exception as e:
+        log_error(f"vk/statistics/ad_groups error: {repr(e)}")
+        return JSONResponse(
+            status_code=502,
+            content={"items": [], "error": str(e)}
+        )
+
+
+@secure_auto.get("/vk/statistics/banners")
+@secure_api.get("/vk/statistics/banners")
+def vk_statistics_banners(
+    user_id: str = Query(...),
+    cabinet_id: str = Query(...),
+    ids: str = Query(..., description="Comma-separated IDs"),
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    metrics: str = Query("base"),
+    sort_by: str = Query(None),
+    d: str = Query("desc"),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Получает статистику по объявлениям (banners) из VK Ads API.
+    """
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return JSONResponse(
+            status_code=400,
+            content={"items": [], "error": "Invalid cabinet or missing token"}
+        )
+
+    token = os.getenv(cab["token"])
+    if not token:
+        return JSONResponse(
+            status_code=500,
+            content={"items": [], "error": f"Token {cab['token']} not found in .env"}
+        )
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    params = {
+        "id": ids,
+        "metrics": metrics,
+        "date_from": date_from,
+        "date_to": date_to,
+        "limit": str(limit),
+        "offset": str(offset),
+    }
+    
+    if sort_by:
+        params["sort_by"] = sort_by
+        params["d"] = d
+
+    url = "https://ads.vk.com/api/v3/statistics/banners/day.json"
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=60)
+        if resp.status_code != 200:
+            log_error(f"vk/statistics/banners VK error: {resp.status_code} {resp.text[:300]}")
+            return JSONResponse(
+                status_code=502,
+                content={"items": [], "error": f"VK API error: {resp.status_code}"}
+            )
+        
+        j = resp.json()
+        
+        aggregated = []
+        for item in j.get("items", []):
+            item_id = item.get("id")
+            rows = item.get("rows", [])
+            
+            total = {"shows": 0, "clicks": 0, "goals": 0, "spent": 0.0}
+            
+            for row in rows:
+                base = row.get("base", {})
+                total["shows"] += int(base.get("shows", 0) or 0)
+                total["clicks"] += int(base.get("clicks", 0) or 0)
+                total["goals"] += int(base.get("goals", 0) or 0)
+                try:
+                    total["spent"] += float(str(base.get("spent", "0") or "0"))
+                except:
+                    pass
+            
+            cpc = total["spent"] / total["clicks"] if total["clicks"] > 0 else 0
+            cpa = total["spent"] / total["goals"] if total["goals"] > 0 else 0
+            
+            aggregated.append({
+                "id": item_id,
+                "base": {
+                    "shows": total["shows"],
+                    "clicks": total["clicks"],
+                    "goals": total["goals"],
+                    "spent": f"{total['spent']:.2f}",
+                    "cpc": f"{cpc:.2f}",
+                    "cpa": f"{cpa:.2f}",
+                }
+            })
+        
+        if sort_by and sort_by.startswith("base."):
+            field = sort_by.replace("base.", "")
+            reverse = (d == "desc")
+            
+            def get_sort_val(item):
+                val = item.get("base", {}).get(field, 0)
+                try:
+                    return float(val)
+                except:
+                    return 0
+            
+            aggregated.sort(key=get_sort_val, reverse=reverse)
+        
+        return {"items": aggregated}
+        
+    except Exception as e:
+        log_error(f"vk/statistics/banners error: {repr(e)}")
+        return JSONResponse(
+            status_code=502,
+            content={"items": [], "error": str(e)}
+        )
 
 
 # -------------------------------------
