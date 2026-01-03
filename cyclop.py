@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.4"
+VersionCyclop = "1.41"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -733,9 +733,8 @@ def notify_error_if_enabled(user_id: str, cabinet_id: str, preset_name: str, err
         return
     
     message = (
-        f"❌ <b>Ошибка создания кампании</b>\n\n"
+        f"<b>Ошибка создания кампании: </b>"
         f"Пресет: {preset_name or 'Без имени'}\n"
-        f"Ошибка: {error_msg}"
     )
     send_telegram_notification(user_id, message)
 
