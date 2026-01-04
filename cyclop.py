@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.45"
+VersionCyclop = "1.46"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -57,7 +57,6 @@ def setup_logger() -> logging.Logger:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("auto_ads")
 
-    # Если уже настроен — ничего не делаем
     if logger.handlers:
         return logger
 
@@ -70,17 +69,22 @@ def setup_logger() -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # Пишем ВСЕГДА в один файл без ротации
+    # Основной лог
     file_handler = logging.FileHandler(str(LOG_FILE), encoding="utf-8")
     file_handler.setFormatter(fmt)
     file_handler.setLevel(level)
 
-    # И дублируем в консоль (по желанию можно убрать)
+    # ДОБАВИТЬ: Отдельный лог только для ошибок
+    error_handler = logging.FileHandler(str(LOGS_DIR / "cyclop_errors.log"), encoding="utf-8")
+    error_handler.setFormatter(fmt)
+    error_handler.setLevel(logging.ERROR)  # Только ERROR и выше
+
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(fmt)
     stream_handler.setLevel(level)
 
     logger.addHandler(file_handler)
+    logger.addHandler(error_handler)  # ДОБАВИТЬ эту строку
     logger.addHandler(stream_handler)
     logger.propagate = False
     return logger
@@ -567,16 +571,6 @@ def _swap_image_600_to_1080(payload: Dict[str, Any]) -> int:
         pass
     return changed
 
-def save_text_blob(user_id: str, cabinet_id: str, name: str, text: str) -> Path:
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    out_dir = USERS_ROOT / str(user_id) / "created_company" / str(cabinet_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{name}_{ts}.txt"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text if text is not None else "")
-    log.info("Saved text blob to %s (%d bytes)", path, len(text or ""))
-    return path
-
 def _dump_vk_validation(err_json: Dict[str, Any]) -> None:
     try:
         e = (err_json or {}).get("error") or {}
@@ -797,13 +791,27 @@ def write_result_success(user_id: str, cabinet_id: str, preset_id: str, preset_n
 def write_result_error(user_id: str, cabinet_id: str, preset_id: str, preset_name: str,
                        trigger_time: str, human: str, tech: str) -> None:
     """
-    Логирует ошибку в cyclop.log и отправляет уведомление в Telegram (если включено).
-    НЕ записывает в created.json — только успехи туда попадают.
+    Логирует ошибку в cyclop.log, cyclop_errors.log и записывает в created.json.
+    Отправляет уведомление в Telegram (если включено).
     """
     log.error(
         "PRESET ERROR | user=%s | cabinet=%s | preset=%s (%s) | trigger=%s | error=%s | tech=%s",
         user_id, cabinet_id, preset_id, preset_name, trigger_time, human, tech
     )
+    
+    # Записываем в created.json
+    entry = {
+        "cabinet_id": str(cabinet_id),
+        "date_time": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "preset_id": str(preset_id),
+        "preset_name": str(preset_name or ""),
+        "trigger_time": str(trigger_time or ""),
+        "status": "error",
+        "text_error": str(human),
+        "code_error": str(tech),
+        "id_company": [],
+    }
+    append_result_entry(user_id, cabinet_id, entry)
     
     # Отправляем уведомление в Telegram
     notify_error_if_enabled(user_id, cabinet_id, preset_name, human)
@@ -1603,9 +1611,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
             results.append({"request": payload_try, "response": resp})
             log.info("POST OK (%d/%d).", i, repeats)
         except ApiHTTPError as e:
-            err_path = save_text_blob(user_id, cabinet_id, "vk_error_ad_plan_post", e.body)
-            log.error("VK HTTP error %s on %s. Full body saved to: %s (len=%d)",
-                      e.status, e.url, err_path, len(e.body or ""))
+            log.error("VK HTTP error %s on %s. Body length=%d | Body: %s",
+                      e.status, e.url, len(e.body or ""), e.body or "")
 
             try:
                 err_json = json.loads(e.body)
@@ -2034,9 +2041,8 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         log.info("FAST POST OK on retry with image_1080x1080.")
                         continue
                     except ApiHTTPError as e2:
-                        err_path = save_text_blob(user_id, cabinet_id, "vk_error_ad_plan_post_fast_retry", e2.body)
-                        log.error("FAST retry failed: HTTP %s on %s. Saved to: %s (len=%d)",
-                                  e2.status, e2.url, err_path, len(e2.body or ""))
+                        log.error("FAST retry failed: HTTP %s on %s. Body length=%d | Body: %s",
+                                  e2.status, e2.url, len(e2.body or ""), e2.body or "")
                         try:
                             err_json2 = json.loads(e2.body)
                             _dump_vk_validation(err_json2)
