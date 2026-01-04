@@ -33,8 +33,8 @@ API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 
 # Фиксированное смещение: от trigger_time ВСЕГДА вычитаем 4 часа
 SERVER_SHIFT_HOURS = 4
-MATCH_WINDOW_SECONDS = int("40")  # окно совпадения, сек
-TARGET_SECOND = 20  # триггер в HH:MM:20
+MATCH_WINDOW_SECONDS = int("55")  # окно совпадения, сек
+TARGET_SECOND = 25  # триггер в HH:MM:20
 
 DEBUG_SAVE_PAYLOAD = os.getenv("DEBUG_SAVE_PAYLOAD", "0") == "1"
 DEBUG_DRY_RUN = os.getenv("DEBUG_DRY_RUN", "0") == "1"
