@@ -6,7 +6,7 @@ import time
 import re
 import random
 import urllib.request
-import urllib.parse
+from urllib.parse import urlsplit, urlunsplit
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.43"
+VersionCyclop = "1.44"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -34,7 +34,7 @@ API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 # Фиксированное смещение: от trigger_time ВСЕГДА вычитаем 4 часа
 SERVER_SHIFT_HOURS = 4
 MATCH_WINDOW_SECONDS = int("40")  # окно совпадения, сек
-TARGET_SECOND = 1  # триггер в HH:MM:01
+TARGET_SECOND = 29  # триггер в HH:MM:01
 
 DEBUG_SAVE_PAYLOAD = os.getenv("DEBUG_SAVE_PAYLOAD", "0") == "1"
 DEBUG_DRY_RUN = os.getenv("DEBUG_DRY_RUN", "0") == "1"
