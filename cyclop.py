@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.44"
+VersionCyclop = "1.45"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -34,7 +34,7 @@ API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 # Фиксированное смещение: от trigger_time ВСЕГДА вычитаем 4 часа
 SERVER_SHIFT_HOURS = 4
 MATCH_WINDOW_SECONDS = int("40")  # окно совпадения, сек
-TARGET_SECOND = 29  # триггер в HH:MM:01
+TARGET_SECOND = 20  # триггер в HH:MM:20
 
 DEBUG_SAVE_PAYLOAD = os.getenv("DEBUG_SAVE_PAYLOAD", "0") == "1"
 DEBUG_DRY_RUN = os.getenv("DEBUG_DRY_RUN", "0") == "1"
@@ -2172,7 +2172,7 @@ def main_loop() -> None:
             process_queue_once()
         except Exception as e:
             log.exception("Fatal error: %s", e)
-        sleep_to_next_tick(TARGET_SECOND, wake_early=0.15)
+        sleep_to_next_tick(30, wake_early=0.15)
 
 if __name__ == "__main__":
     main_loop()
