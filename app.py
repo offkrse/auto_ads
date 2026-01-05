@@ -22,7 +22,7 @@ import random
 
 app = FastAPI()
 
-VersionApp = "0.995"
+VersionApp = "0.996"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1556,7 +1556,26 @@ def vk_ad_groups_list(
         return JSONResponse(status_code=500, content={"items": [], "error": "Token not found"})
 
     headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://ads.vk.com/api/v2/ad_groups.json?_status__ne=deleted&limit={limit}&offset={offset}&sorting={sorting}&fields=id,name,created,ad_plan_id,budget_limit_day,objective,status"
+    # VK API поддерживает sorting только по id, name, status
+    vk_sorting = sorting if sorting.lstrip("-") in ("id", "name", "status") else "-id"
+    url = f"https://ads.vk.com/api/v2/ad_groups.json?_status__ne=deleted&limit={limit}&offset={offset}&sorting={vk_sorting}&fields=id,name,created,ad_plan_id,budget_limit_day,objective,status"
+
+    try:
+        resp = vk_request_with_retry("GET", url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            return JSONResponse(status_code=502, content={"items": [], "error": f"VK API error: {resp.status_code}"})
+        result = resp.json()
+        
+        # Локальная сортировка по created, если запрошена
+        if sorting.lstrip("-") == "created" and "items" in result:
+            reverse = sorting.startswith("-")
+            result["items"] = sorted(
+                result["items"],
+                key=lambda x: x.get("created", ""),
+                reverse=reverse
+            )
+        
+        return result
 
     try:
         resp = vk_request_with_retry("GET", url, headers=headers, timeout=30)
@@ -1590,7 +1609,26 @@ def vk_banners_list(
         return JSONResponse(status_code=500, content={"items": [], "error": "Token not found"})
 
     headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://ads.vk.com/api/v2/banners.json?_status__ne=deleted&limit={limit}&offset={offset}&sorting={sorting}&fields=id,name,created,ad_group_id,moderation_status,status"
+    # VK API поддерживает sorting только по id, name, status
+    vk_sorting = sorting if sorting.lstrip("-") in ("id", "name", "status") else "-id"
+    url = f"https://ads.vk.com/api/v2/banners.json?_status__ne=deleted&limit={limit}&offset={offset}&sorting={vk_sorting}&fields=id,name,created,ad_group_id,moderation_status,status"
+
+    try:
+        resp = vk_request_with_retry("GET", url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            return JSONResponse(status_code=502, content={"items": [], "error": f"VK API error: {resp.status_code}"})
+        result = resp.json()
+        
+        # Локальная сортировка по created, если запрошена
+        if sorting.lstrip("-") == "created" and "items" in result:
+            reverse = sorting.startswith("-")
+            result["items"] = sorted(
+                result["items"],
+                key=lambda x: x.get("created", ""),
+                reverse=reverse
+            )
+        
+        return result
 
     try:
         resp = vk_request_with_retry("GET", url, headers=headers, timeout=30)
