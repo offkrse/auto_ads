@@ -1576,12 +1576,6 @@ def vk_ad_groups_list(
             )
         
         return result
-
-    try:
-        resp = vk_request_with_retry("GET", url, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            return JSONResponse(status_code=502, content={"items": [], "error": f"VK API error: {resp.status_code}"})
-        return resp.json()
     except HTTPException:
         raise
     except Exception as e:
@@ -1630,11 +1624,6 @@ def vk_banners_list(
         
         return result
 
-    try:
-        resp = vk_request_with_retry("GET", url, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            return JSONResponse(status_code=502, content={"items": [], "error": f"VK API error: {resp.status_code}"})
-        return resp.json()
     except HTTPException:
         raise
     except Exception as e:
