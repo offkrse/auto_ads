@@ -18,10 +18,11 @@ import fcntl
 import errno
 import uuid
 import time
+import random
 
 app = FastAPI()
 
-VersionApp = "0.993"
+VersionApp = "0.994"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -45,6 +46,10 @@ REGIONS_FILE   = DATA_DIR / "regions.json"
 
 FRONTEND_DIR = BASE_DIR / "frontend"
 
+# === VK API Rate Limiting & Retry ===
+VK_RATE_LIMIT_DELAY = 0.35  # секунд между запросами к VK API
+_vk_last_request_time: dict[str, float] = {}  # per-token tracking
+
 # === env ===
 from dotenv import load_dotenv
 load_dotenv("/opt/auto_ads/.env")
@@ -66,6 +71,81 @@ _VK_SUBSEGMENT_NAMES = {"positive subsegment", "negative subsegment"}
 def _is_vk_subsegment(item: dict) -> bool:
     name = str(item.get("name", "")).strip().lower()
     return name in _VK_SUBSEGMENT_NAMES
+
+def vk_request_with_retry(
+    method: str,
+    url: str,
+    headers: dict,
+    max_retries: int = 3,
+    timeout: int = 30,
+    **kwargs
+) -> requests.Response:
+    """
+    Выполняет запрос к VK API с:
+    - Rate limiting (задержка между запросами)
+    - Retry при ошибках 429/5xx
+    - Exponential backoff
+    """
+    token = headers.get("Authorization", "")
+    
+    # Rate limiting per token
+    now = time.monotonic()
+    last_time = _vk_last_request_time.get(token, 0)
+    wait = VK_RATE_LIMIT_DELAY - (now - last_time)
+    if wait > 0:
+        time.sleep(wait)
+    
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            _vk_last_request_time[token] = time.monotonic()
+            
+            if method.upper() == "GET":
+                resp = requests.get(url, headers=headers, timeout=timeout, **kwargs)
+            else:
+                resp = requests.post(url, headers=headers, timeout=timeout, **kwargs)
+            
+            # Успех
+            if resp.status_code == 200:
+                return resp
+            
+            # Rate limit или server error - retry
+            if resp.status_code in (429, 500, 502, 503, 504):
+                last_error = f"VK API error {resp.status_code}"
+                
+                # Exponential backoff with jitter
+                delay = (2 ** attempt) + random.uniform(0.1, 0.5)
+                
+                # Для 429 берём Retry-After если есть
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            delay = max(delay, float(retry_after))
+                        except:
+                            pass
+                
+                log_error(f"VK rate limit/error {resp.status_code}, retry {attempt+1}/{max_retries} after {delay:.2f}s")
+                time.sleep(delay)
+                continue
+            
+            # Другие ошибки - не retry
+            return resp
+            
+        except requests.exceptions.Timeout:
+            last_error = "Request timeout"
+            delay = (2 ** attempt) + random.uniform(0.1, 0.5)
+            log_error(f"VK request timeout, retry {attempt+1}/{max_retries} after {delay:.2f}s")
+            time.sleep(delay)
+            
+        except requests.exceptions.RequestException as e:
+            last_error = str(e)
+            delay = (2 ** attempt) + random.uniform(0.1, 0.5)
+            log_error(f"VK request error: {repr(e)}, retry {attempt+1}/{max_retries} after {delay:.2f}s")
+            time.sleep(delay)
+    
+    # Все попытки исчерпаны
+    raise HTTPException(502, f"VK API failed after {max_retries} retries: {last_error}")
 
 # ----------------------------
 
@@ -1093,7 +1173,7 @@ def vk_ad_plans_list(
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
-    """Список кампаний из VK Ads API."""
+    """Список кампаний из VK Ads API с retry."""
     data = ensure_user_structure(user_id)
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
     if not cab or not cab.get("token"):
@@ -1109,11 +1189,13 @@ def vk_ad_plans_list(
         url += f"&sorting={sorting}"
 
     try:
-        resp = requests.get(url, headers=headers, timeout=30)
+        resp = vk_request_with_retry("GET", url, headers=headers, timeout=30)
         if resp.status_code != 200:
             return JSONResponse(status_code=502, content={"items": [], "count": 0, "error": f"VK API error: {resp.status_code}"})
         j = resp.json()
         return {"items": j.get("items", []), "count": j.get("count", 0), "offset": j.get("offset", offset)}
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(status_code=502, content={"items": [], "count": 0, "error": str(e)})
 
@@ -1132,7 +1214,7 @@ def vk_statistics_ad_plans(
     limit: int = Query(200),
     offset: int = Query(0),
 ):
-    """Статистика по кампаниям. goals и cpa берутся из vk подобъекта."""
+    """Статистика по кампаниям с retry."""
     data = ensure_user_structure(user_id)
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
     if not cab or not cab.get("token"):
@@ -1147,7 +1229,7 @@ def vk_statistics_ad_plans(
     url = "https://ads.vk.com/api/v3/statistics/ad_plans/day.json"
 
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=60)
+        resp = vk_request_with_retry("GET", url, headers=headers, params=params, timeout=60)
         if resp.status_code != 200:
             return JSONResponse(status_code=502, content={"items": [], "error": f"VK API error: {resp.status_code}"})
 
@@ -1181,6 +1263,8 @@ def vk_statistics_ad_plans(
             aggregated.sort(key=get_sort_val, reverse=reverse)
 
         return {"items": aggregated}
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(status_code=502, content={"items": [], "error": str(e)})
 
@@ -1453,52 +1537,70 @@ def vk_ad_plans_status(request: Request):
 
 @secure_auto.get("/vk/ad_groups/list")
 @secure_api.get("/vk/ad_groups/list")
-def vk_ad_groups_list(request: Request, user_id: str, cabinet_id: str, limit: int = 200, offset: int = 0, sorting: str = "-created"):
-    """Список групп объявлений"""
+def vk_ad_groups_list(
+    request: Request,
+    user_id: str = Query(...),
+    cabinet_id: str = Query(...),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    sorting: str = Query("-created"),
+):
+    """Список групп объявлений с retry."""
     data = ensure_user_structure(user_id)
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
     if not cab or not cab.get("token"):
-        return JSONResponse(status_code=400, content={"error": "Invalid cabinet"})
+        return JSONResponse(status_code=400, content={"items": [], "error": "Invalid cabinet"})
 
     token = os.getenv(cab["token"])
     if not token:
-        return JSONResponse(status_code=500, content={"error": "Token not found"})
+        return JSONResponse(status_code=500, content={"items": [], "error": "Token not found"})
 
     headers = {"Authorization": f"Bearer {token}"}
     url = f"https://ads.vk.com/api/v2/ad_groups.json?_status__ne=deleted&limit={limit}&offset={offset}&sorting={sorting}&fields=id,name,created,ad_plan_id,budget_limit_day,objective,status"
-    
+
     try:
-        resp = requests.get(url, headers=headers, timeout=30)
+        resp = vk_request_with_retry("GET", url, headers=headers, timeout=30)
         if resp.status_code != 200:
-            return JSONResponse(status_code=502, content={"error": f"VK API error: {resp.status_code}"})
+            return JSONResponse(status_code=502, content={"items": [], "error": f"VK API error: {resp.status_code}"})
         return resp.json()
+    except HTTPException:
+        raise
     except Exception as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
+        return JSONResponse(status_code=502, content={"items": [], "error": str(e)})
 
 
 @secure_auto.get("/vk/banners/list")
 @secure_api.get("/vk/banners/list")
-def vk_banners_list(request: Request, user_id: str, cabinet_id: str, limit: int = 200, offset: int = 0, sorting: str = "-created"):
-    """Список объявлений (баннеров)"""
+def vk_banners_list(
+    request: Request,
+    user_id: str = Query(...),
+    cabinet_id: str = Query(...),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    sorting: str = Query("-created"),
+):
+    """Список объявлений (баннеров) с retry."""
     data = ensure_user_structure(user_id)
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
     if not cab or not cab.get("token"):
-        return JSONResponse(status_code=400, content={"error": "Invalid cabinet"})
+        return JSONResponse(status_code=400, content={"items": [], "error": "Invalid cabinet"})
 
     token = os.getenv(cab["token"])
     if not token:
-        return JSONResponse(status_code=500, content={"error": "Token not found"})
+        return JSONResponse(status_code=500, content={"items": [], "error": "Token not found"})
 
     headers = {"Authorization": f"Bearer {token}"}
     url = f"https://ads.vk.com/api/v2/banners.json?_status__ne=deleted&limit={limit}&offset={offset}&sorting={sorting}&fields=id,name,created,ad_group_id,moderation_status,status"
-    
+
     try:
-        resp = requests.get(url, headers=headers, timeout=30)
+        resp = vk_request_with_retry("GET", url, headers=headers, timeout=30)
         if resp.status_code != 200:
-            return JSONResponse(status_code=502, content={"error": f"VK API error: {resp.status_code}"})
+            return JSONResponse(status_code=502, content={"items": [], "error": f"VK API error: {resp.status_code}"})
         return resp.json()
+    except HTTPException:
+        raise
     except Exception as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
+        return JSONResponse(status_code=502, content={"items": [], "error": str(e)})
 
 
 @secure_auto.get("/vk/statistics/ad_groups")
