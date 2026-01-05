@@ -21,7 +21,7 @@ import time
 
 app = FastAPI()
 
-VersionApp = "0.992"
+VersionApp = "0.993"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1453,7 +1453,7 @@ def vk_ad_plans_status(request: Request):
 
 @secure_auto.get("/vk/ad_groups/list")
 @secure_api.get("/vk/ad_groups/list")
-def vk_ad_groups_list(request: Request, user_id: str, cabinet_id: str, limit: int = 200):
+def vk_ad_groups_list(request: Request, user_id: str, cabinet_id: str, limit: int = 200, offset: int = 0, sorting: str = "-created"):
     """Список групп объявлений"""
     data = ensure_user_structure(user_id)
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
@@ -1465,7 +1465,7 @@ def vk_ad_groups_list(request: Request, user_id: str, cabinet_id: str, limit: in
         return JSONResponse(status_code=500, content={"error": "Token not found"})
 
     headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://ads.vk.com/api/v2/ad_groups.json?_status__ne=deleted&limit={limit}&fields=id,name,created,ad_plan_id,budget_limit_day,objective"
+    url = f"https://ads.vk.com/api/v2/ad_groups.json?_status__ne=deleted&limit={limit}&offset={offset}&sorting={sorting}&fields=id,name,created,ad_plan_id,budget_limit_day,objective,status"
     
     try:
         resp = requests.get(url, headers=headers, timeout=30)
@@ -1478,7 +1478,7 @@ def vk_ad_groups_list(request: Request, user_id: str, cabinet_id: str, limit: in
 
 @secure_auto.get("/vk/banners/list")
 @secure_api.get("/vk/banners/list")
-def vk_banners_list(request: Request, user_id: str, cabinet_id: str, limit: int = 200):
+def vk_banners_list(request: Request, user_id: str, cabinet_id: str, limit: int = 200, offset: int = 0, sorting: str = "-created"):
     """Список объявлений (баннеров)"""
     data = ensure_user_structure(user_id)
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
@@ -1490,7 +1490,7 @@ def vk_banners_list(request: Request, user_id: str, cabinet_id: str, limit: int 
         return JSONResponse(status_code=500, content={"error": "Token not found"})
 
     headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://ads.vk.com/api/v2/banners.json?_status__ne=deleted&limit={limit}&fields=id,name,created,ad_group_id,moderation_status"
+    url = f"https://ads.vk.com/api/v2/banners.json?_status__ne=deleted&limit={limit}&offset={offset}&sorting={sorting}&fields=id,name,created,ad_group_id,moderation_status,status"
     
     try:
         resp = requests.get(url, headers=headers, timeout=30)
@@ -1591,6 +1591,77 @@ def vk_statistics_banners(request: Request, user_id: str, cabinet_id: str, ids: 
             b["cpa"] = str(round(float(b["spent"]) / b["goals"], 2)) if b["goals"] > 0 else "0"
         
         return {"items": list(items_by_id.values())}
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+@secure_auto.post("/vk/ad_groups/status")
+@secure_api.post("/vk/ad_groups/status")
+def vk_ad_groups_status(request: Request):
+    """Изменение статуса группы"""
+    import json
+    body = json.loads(request._body.decode() if hasattr(request, '_body') else '{}')
+    
+    user_id = body.get("userId")
+    cabinet_id = body.get("cabinetId")
+    group_id = body.get("groupId")
+    status = body.get("status")  # "active" или "blocked"
+    
+    if not all([user_id, cabinet_id, group_id, status]):
+        return JSONResponse(status_code=400, content={"error": "Missing parameters"})
+    
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return JSONResponse(status_code=400, content={"error": "Invalid cabinet"})
+
+    token = os.getenv(cab["token"])
+    if not token:
+        return JSONResponse(status_code=500, content={"error": "Token not found"})
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    url = f"https://ads.vk.com/api/v2/ad_groups/{group_id}.json"
+    
+    try:
+        resp = requests.post(url, headers=headers, json={"status": status}, timeout=30)
+        if resp.status_code not in [200, 204]:
+            return JSONResponse(status_code=502, content={"error": f"VK API error: {resp.status_code}"})
+        return {"status": "ok"}
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@secure_auto.post("/vk/banners/status")
+@secure_api.post("/vk/banners/status")
+def vk_banners_status(request: Request):
+    """Изменение статуса объявления"""
+    import json
+    body = json.loads(request._body.decode() if hasattr(request, '_body') else '{}')
+    
+    user_id = body.get("userId")
+    cabinet_id = body.get("cabinetId")
+    banner_id = body.get("bannerId")
+    status = body.get("status")  # "active" или "blocked"
+    
+    if not all([user_id, cabinet_id, banner_id, status]):
+        return JSONResponse(status_code=400, content={"error": "Missing parameters"})
+    
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return JSONResponse(status_code=400, content={"error": "Invalid cabinet"})
+
+    token = os.getenv(cab["token"])
+    if not token:
+        return JSONResponse(status_code=500, content={"error": "Token not found"})
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    url = f"https://ads.vk.com/api/v2/banners/{banner_id}.json"
+    
+    try:
+        resp = requests.post(url, headers=headers, json={"status": status}, timeout=30)
+        if resp.status_code not in [200, 204]:
+            return JSONResponse(status_code=502, content={"error": f"VK API error: {resp.status_code}"})
+        return {"status": "ok"}
     except Exception as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 
