@@ -1170,7 +1170,7 @@ def vk_ad_plans_list(
     user_id: str = Query(...),
     cabinet_id: str = Query(...),
     sorting: str = Query("-created"),
-    limit: int = Query(200, ge=1, le=500),
+    limit: int = Query(200, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     """Список кампаний из VK Ads API с retry."""
