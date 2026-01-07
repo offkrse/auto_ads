@@ -22,7 +22,7 @@ import random
 
 app = FastAPI()
 
-VersionApp = "0.997"
+VersionApp = "0.998"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1438,7 +1438,75 @@ def vk_statistics_banners(
 
     url = "https://ads.vk.com/api/v3/statistics/banners/day.json"
 
-vk_statistics_banners
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=60)
+        if resp.status_code != 200:
+            log_error(f"vk/statistics/banners VK error: {resp.status_code} {resp.text[:300]}")
+            return JSONResponse(
+                status_code=502,
+                content={"items": [], "error": f"VK API error: {resp.status_code}"}
+            )
+        
+        j = resp.json()
+        
+        aggregated = []
+        for item in j.get("items", []):
+            item_id = item.get("id")
+            
+            # Пробуем total, потом rows
+            total_data = item.get("total", {})
+            base = total_data.get("base", {})
+            vk = base.get("vk", {})
+            
+            if not base:
+                rows = item.get("rows", [])
+                total = {"shows": 0, "clicks": 0, "goals": 0, "spent": 0.0}
+                for row in rows:
+                    row_base = row.get("base", {})
+                    row_vk = row_base.get("vk", {})
+                    total["shows"] += int(row_base.get("shows", 0) or 0)
+                    total["clicks"] += int(row_base.get("clicks", 0) or 0)
+                    total["goals"] += int(row_vk.get("goals", 0) or 0)
+                    try:
+                        total["spent"] += float(str(row_base.get("spent", "0") or "0"))
+                    except:
+                        pass
+                
+                cpc = total["spent"] / total["clicks"] if total["clicks"] > 0 else 0
+                cpa = total["spent"] / total["goals"] if total["goals"] > 0 else 0
+                
+                aggregated.append({
+                    "id": item_id,
+                    "base": {
+                        "shows": total["shows"],
+                        "clicks": total["clicks"],
+                        "goals": total["goals"],
+                        "spent": f"{total['spent']:.2f}",
+                        "cpc": f"{cpc:.2f}",
+                        "cpa": f"{cpa:.2f}",
+                    }
+                })
+            else:
+                aggregated.append({
+                    "id": item_id,
+                    "base": {
+                        "shows": int(base.get("shows", 0) or 0),
+                        "clicks": int(base.get("clicks", 0) or 0),
+                        "goals": int(vk.get("goals", 0) or 0),
+                        "spent": str(base.get("spent", "0") or "0"),
+                        "cpc": str(base.get("cpc", "0") or "0"),
+                        "cpa": str(vk.get("cpa", "0") or "0"),
+                    }
+                })
+        
+        return {"items": aggregated}
+        
+    except Exception as e:
+        log_error(f"vk/statistics/banners error: {repr(e)}")
+        return JSONResponse(
+            status_code=502,
+            content={"items": [], "error": str(e)}
+        )
 
 @secure_auto.post("/vk/ad_plans/status")
 @secure_api.post("/vk/ad_plans/status")
@@ -3052,6 +3120,100 @@ def get_textsets(user_id: str, cabinet_id: str):
     except Exception as e:
         log_error(f"textsets/get[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+# === SUB1 Settings ===
+@secure_auto.get("/user/settings")
+@secure_api.get("/user/settings")
+def get_user_settings(user_id: str = Query(...)):
+    """Получить настройки пользователя (включая sub1)"""
+    path = USERS_DIR / user_id / f"{user_id}.json"
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {"sub1": data.get("sub1", [])}
+        except:
+            pass
+    return {"sub1": []}
+
+
+@secure_auto.post("/user/settings/sub1")
+@secure_api.post("/user/settings/sub1")
+async def save_user_sub1(request: Request, user_id: str = Query(...)):
+    """Сохранить выбранные sub1"""
+    body = await request.json()
+    sub1_list = body if isinstance(body, list) else []
+    
+    user_dir = USERS_DIR / user_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    
+    path = user_dir / f"{user_id}.json"
+    
+    settings = {}
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+        except:
+            pass
+    
+    settings["sub1"] = sub1_list
+    
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+    
+    return {"ok": True, "sub1": sub1_list}
+
+
+# === Leads Revenue ===
+@secure_auto.get("/leads/revenue")
+@secure_api.get("/leads/revenue")
+def get_leads_revenue(
+    sub1: str = Query(...),
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+):
+    """
+    Получить доход из postback данных.
+    sub1 - через запятую, date_from/date_to - YYYY-MM-DD
+    """
+    sub1_list = [s.strip() for s in sub1.split(",") if s.strip()]
+    
+    try:
+        d_from = datetime.strptime(date_from, "%Y-%m-%d")
+        d_to = datetime.strptime(date_to, "%Y-%m-%d")
+    except:
+        return {"error": "Invalid date format", "revenue": {}}
+    
+    revenue_by_ad: dict[str, float] = {}
+    
+    for s1 in sub1_list:
+        path = Path(f"/opt/leads_postback/data/{s1}.json")
+        if not path.exists():
+            continue
+        
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except:
+            continue
+        
+        for entry in data:
+            day_str = entry.get("day", "")  # "09.12.2025"
+            try:
+                day_dt = datetime.strptime(day_str, "%d.%m.%Y")
+            except:
+                continue
+            
+            if day_dt < d_from or day_dt > d_to:
+                continue
+            
+            day_data = entry.get("data", {})
+            for ad_id, amount in day_data.items():
+                ad_id_str = str(ad_id)
+                revenue_by_ad[ad_id_str] = revenue_by_ad.get(ad_id_str, 0) + float(amount)
+    
+    return {"revenue": revenue_by_ad}
 
 # -------------------------------------
 #   FILE STORAGE (videos/images)
