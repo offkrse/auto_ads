@@ -22,7 +22,7 @@ import random
 
 app = FastAPI()
 
-VersionApp = "0.996"
+VersionApp = "0.997"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1329,51 +1329,55 @@ def vk_statistics_ad_groups(
         
         j = resp.json()
         
-        # Агрегируем так же как для ad_plans
         aggregated = []
         for item in j.get("items", []):
             item_id = item.get("id")
-            rows = item.get("rows", [])
             
-            total = {"shows": 0, "clicks": 0, "goals": 0, "spent": 0.0}
+            # Пробуем total, потом rows
+            total_data = item.get("total", {})
+            base = total_data.get("base", {})
+            vk = base.get("vk", {})
             
-            for row in rows:
-                base = row.get("base", {})
-                total["shows"] += int(base.get("shows", 0) or 0)
-                total["clicks"] += int(base.get("clicks", 0) or 0)
-                total["goals"] += int(base.get("goals", 0) or 0)
-                try:
-                    total["spent"] += float(str(base.get("spent", "0") or "0"))
-                except:
-                    pass
-            
-            cpc = total["spent"] / total["clicks"] if total["clicks"] > 0 else 0
-            cpa = total["spent"] / total["goals"] if total["goals"] > 0 else 0
-            
-            aggregated.append({
-                "id": item_id,
-                "base": {
-                    "shows": total["shows"],
-                    "clicks": total["clicks"],
-                    "goals": total["goals"],
-                    "spent": f"{total['spent']:.2f}",
-                    "cpc": f"{cpc:.2f}",
-                    "cpa": f"{cpa:.2f}",
-                }
-            })
-        
-        if sort_by and sort_by.startswith("base."):
-            field = sort_by.replace("base.", "")
-            reverse = (d == "desc")
-            
-            def get_sort_val(item):
-                val = item.get("base", {}).get(field, 0)
-                try:
-                    return float(val)
-                except:
-                    return 0
-            
-            aggregated.sort(key=get_sort_val, reverse=reverse)
+            if not base:
+                rows = item.get("rows", [])
+                total = {"shows": 0, "clicks": 0, "goals": 0, "spent": 0.0}
+                for row in rows:
+                    row_base = row.get("base", {})
+                    row_vk = row_base.get("vk", {})
+                    total["shows"] += int(row_base.get("shows", 0) or 0)
+                    total["clicks"] += int(row_base.get("clicks", 0) or 0)
+                    total["goals"] += int(row_vk.get("goals", 0) or 0)
+                    try:
+                        total["spent"] += float(str(row_base.get("spent", "0") or "0"))
+                    except:
+                        pass
+                
+                cpc = total["spent"] / total["clicks"] if total["clicks"] > 0 else 0
+                cpa = total["spent"] / total["goals"] if total["goals"] > 0 else 0
+                
+                aggregated.append({
+                    "id": item_id,
+                    "base": {
+                        "shows": total["shows"],
+                        "clicks": total["clicks"],
+                        "goals": total["goals"],
+                        "spent": f"{total['spent']:.2f}",
+                        "cpc": f"{cpc:.2f}",
+                        "cpa": f"{cpa:.2f}",
+                    }
+                })
+            else:
+                aggregated.append({
+                    "id": item_id,
+                    "base": {
+                        "shows": int(base.get("shows", 0) or 0),
+                        "clicks": int(base.get("clicks", 0) or 0),
+                        "goals": int(vk.get("goals", 0) or 0),
+                        "spent": str(base.get("spent", "0") or "0"),
+                        "cpc": str(base.get("cpc", "0") or "0"),
+                        "cpa": str(vk.get("cpa", "0") or "0"),
+                    }
+                })
         
         return {"items": aggregated}
         
@@ -1434,70 +1438,7 @@ def vk_statistics_banners(
 
     url = "https://ads.vk.com/api/v3/statistics/banners/day.json"
 
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=60)
-        if resp.status_code != 200:
-            log_error(f"vk/statistics/banners VK error: {resp.status_code} {resp.text[:300]}")
-            return JSONResponse(
-                status_code=502,
-                content={"items": [], "error": f"VK API error: {resp.status_code}"}
-            )
-        
-        j = resp.json()
-        
-        aggregated = []
-        for item in j.get("items", []):
-            item_id = item.get("id")
-            rows = item.get("rows", [])
-            
-            total = {"shows": 0, "clicks": 0, "goals": 0, "spent": 0.0}
-            
-            for row in rows:
-                base = row.get("base", {})
-                total["shows"] += int(base.get("shows", 0) or 0)
-                total["clicks"] += int(base.get("clicks", 0) or 0)
-                total["goals"] += int(base.get("goals", 0) or 0)
-                try:
-                    total["spent"] += float(str(base.get("spent", "0") or "0"))
-                except:
-                    pass
-            
-            cpc = total["spent"] / total["clicks"] if total["clicks"] > 0 else 0
-            cpa = total["spent"] / total["goals"] if total["goals"] > 0 else 0
-            
-            aggregated.append({
-                "id": item_id,
-                "base": {
-                    "shows": total["shows"],
-                    "clicks": total["clicks"],
-                    "goals": total["goals"],
-                    "spent": f"{total['spent']:.2f}",
-                    "cpc": f"{cpc:.2f}",
-                    "cpa": f"{cpa:.2f}",
-                }
-            })
-        
-        if sort_by and sort_by.startswith("base."):
-            field = sort_by.replace("base.", "")
-            reverse = (d == "desc")
-            
-            def get_sort_val(item):
-                val = item.get("base", {}).get(field, 0)
-                try:
-                    return float(val)
-                except:
-                    return 0
-            
-            aggregated.sort(key=get_sort_val, reverse=reverse)
-        
-        return {"items": aggregated}
-        
-    except Exception as e:
-        log_error(f"vk/statistics/banners error: {repr(e)}")
-        return JSONResponse(
-            status_code=502,
-            content={"items": [], "error": str(e)}
-        )
+vk_statistics_banners
 
 @secure_auto.post("/vk/ad_plans/status")
 @secure_api.post("/vk/ad_plans/status")
