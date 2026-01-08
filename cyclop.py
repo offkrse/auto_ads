@@ -6,7 +6,7 @@ import time
 import re
 import random
 import urllib.request
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit, quote
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.46"
+VersionCyclop = "1.47"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -598,6 +598,192 @@ def _dump_vk_validation(err_json: Dict[str, Any]) -> None:
     except Exception as ex:
         log.error("VALIDATION: dump failed: %s", ex)
 
+# ---------- НОВЫЕ/ОБНОВЛЁННЫЕ УТИЛИТЫ ДЛЯ {day} / {*} -------------
+_day_token_re = re.compile(r"\{day(?:\(([^\}]*)\))?(?:-([+-]?\d+))?\}", flags=re.I)
+_day_token_ru_re = re.compile(r"\{день(?:-([+-]?\d+))?\}", flags=re.I)  # старый рус.: число, поддержка -1 fallback
+_wildcard_re = re.compile(r"\{\*\}")
+
+def _parse_day_token(match: re.Match) -> Tuple[Optional[str], int]:
+    """
+    Парсит матч {day(format)-N}:
+      group(1) = формат (строка) или None
+      group(2) = смещение в днях как строка или None
+    Возвращает (fmt_raw, offset_int)
+    """
+    fmt_raw = match.group(1)  # может быть None
+    offset_raw = match.group(2)
+    offset = int(offset_raw) if offset_raw else 0
+    return fmt_raw, offset
+
+def _format_day_for_token(base_date: datetime.date, fmt_raw: Optional[str]) -> str:
+    """
+    Преобразует 'fmt_raw' вроде 'DD:MM:YYYY' в datetime.strftime формат.
+    Поддерживаем токены: DD, MM, YYYY, YY
+    По умолчанию -> 'DD.MM.YYYY'
+    """
+    if not fmt_raw:
+        fmt_raw = "DD.MM.YYYY"
+    # заменяем токены на strftime
+    fmt = fmt_raw
+    fmt = fmt.replace("DD", "%d")
+    fmt = fmt.replace("MM", "%m")
+    fmt = fmt.replace("YYYY", "%Y")
+    fmt = fmt.replace("YY", "%y")
+    # оставшиеся символы (разделители) остаются как есть
+    try:
+        return base_date.strftime(fmt)
+    except Exception:
+        # при ошибке — fallback
+        return base_date.strftime("%d.%m.%Y")
+
+def _replace_day_tokens_in_name(name: str, *, now_local: datetime) -> List[str]:
+    """
+    Ищем все {day(...)-N} и {день-N} в строке и возвращаем список вариантов
+    (учитываем смещения и fallback для {день}).
+    Возвращаем список candidate строк (в порядке предпочтения).
+    Примеры:
+      "Base {day}" -> ["Base 08.01.2026"]
+      "Seg {day-1}" -> ["Seg 07.01.2026"]
+      "Num {день}" -> ["Num 123", "Num 122"]  <-- второй вариант для fallback (день-1)
+    """
+    candidates = [name]
+
+    # 1) Обработаем англ. {day(...)-N}
+    if _day_token_re.search(name):
+        # заменим каждое вхождение на рассчитанное значение (поддерживаем несколько токенов в строке)
+        # но если вхождений несколько — в общем случае комбинаторика, мы реализуем простой подход:
+        # делаем одну замену для каждого токена последовательно, сохраняя только один вариант (offset применён).
+        def repl_day(m: re.Match) -> str:
+            fmt_raw, offset = _parse_day_token(m)
+            base_date = (now_local + timedelta(hours=SERVER_SHIFT_HOURS)).date()
+            base_date = base_date + timedelta(days=offset)
+            return _format_day_for_token(base_date, fmt_raw)
+        replaced = _day_token_re.sub(repl_day, name)
+        candidates = [replaced]
+        return candidates
+
+    # 2) Обработаем русск. {день} — старое поведение: число (compute_day_number)
+    # Здесь возвращаем 2 варианта: основной и variant-1 (для попытки, если не найдено).
+    if _day_token_ru_re.search(name):
+        # вычислим базовый день-номер
+        base_dn = compute_day_number(now_local)
+        # подставим base и base-1
+        v0 = _day_token_ru_re.sub(str(base_dn), name)
+        v1 = _day_token_ru_re.sub(str(base_dn - 1), name)
+        # порядок: сначала текущий, потом -1
+        return [v0, v1]
+
+    # 3) Нет day-токенов — возвращаем оригинал
+    return candidates
+
+def _wildcard_to_regex(name_with_wildcard: str) -> Optional[re.Pattern]:
+    """
+    Преобразует строку с { * } в регулярное выражение.
+    Экранирует обычные символы и заменяет { * } -> '.*'
+    Если нет wildcard — возвращает None
+    """
+    if not _wildcard_re.search(name_with_wildcard):
+        return None
+    # экранируем всю строку, потом заменим экранированный \{\*\} на .*
+    # проще: разбить по вхождению {*} и экранировать части
+    parts = _wildcard_re.split(name_with_wildcard)
+    regex_parts = [re.escape(p) for p in parts]
+    # соединяем через '.*'
+    regex = ".*".join(regex_parts)
+    # полное совпадение (можно использовать search, но лучше ^...$ чтобы чётко матчить)
+    try:
+        return re.compile(rf"^{regex}$", flags=re.IGNORECASE)
+    except re.error:
+        return None
+
+def _try_lookup_segment_by_name_and_filter(tokens: List[str], raw_search_name: str) -> List[int]:
+    """
+    Выполняет запрос к /api/v2/remarketing/segments.json с корректным параметром:
+      - если в raw_search_name есть {*}  -> используем _name__startswith=<prefix_before_{*}>
+      - если raw_search_name начинается с %ALL% -> используем _name__startswith=<rest> и вернём все найденные (после фильтрации)
+      - иначе -> используем _name=<exact_name>
+
+    После получения items:
+      - если был {*} -> локально фильтруем по регексу, соответствующему шаблону (Base{*}(сентябрь) -> ^Base.*\(сентябрь\)$)
+      - если %ALL% -> возвращаем все отфильтрованные id (в порядке ответа)
+      - иначе -> возвращаем только первый найденный id (как вы хотели: если несколько — берем первый)
+    """
+    s_raw = str(raw_search_name or "")
+    if not s_raw:
+        return []
+
+    all_flag = False
+    s = s_raw
+
+    # detect %ALL% prefix (case-sensitive as literal)
+    if s.startswith("%ALL%"):
+        all_flag = True
+        s = s[len("%ALL%"):]
+
+    has_wc = bool(_wildcard_re.search(s))
+
+    # decide param and query value
+    if has_wc:
+        # take prefix before first {*} for startswith query
+        prefix = _wildcard_re.split(s)[0].strip()
+        param = "_name__startswith"
+        q = quote(prefix, safe="")
+        endpoint = f"{API_BASE}/api/v2/remarketing/segments.json?{param}={q}"
+    else:
+        if all_flag:
+            # %ALL% without {*} -> startswith using remaining string
+            param = "_name__startswith"
+            q = quote(s.strip(), safe="")
+            endpoint = f"{API_BASE}/api/v2/remarketing/segments.json?{param}={q}"
+        else:
+            # exact name search
+            param = "_name"
+            q = quote(s.strip(), safe="")
+            endpoint = f"{API_BASE}/api/v2/remarketing/segments.json?{param}={q}"
+
+    try:
+        resp = with_retries("GET", endpoint, tokens)
+    except Exception as e:
+        log.warning("abstractAudience lookup failed for '%s' (endpoint=%s): %s", raw_search_name, endpoint, e)
+        return []
+
+    items = (resp or {}).get("items") or []
+    if not items:
+        return []
+
+    # если был wildcard — применим локальную фильтрацию по регулярке, иначе — всё что пришло
+    filtered_ids: List[int] = []
+    if has_wc:
+        regex = _wildcard_to_regex(s)
+        if regex:
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                nm = (it.get("name") or "")
+                if isinstance(nm, str) and regex.search(nm):
+                    if "id" in it:
+                        try:
+                            filtered_ids.append(int(it["id"]))
+                        except Exception:
+                            pass
+        else:
+            # если регекс не скомпилировался — fallback: взять все id
+            filtered_ids = [int(it["id"]) for it in items if isinstance(it, dict) and "id" in it]
+    else:
+        # без {*} — берем все найденные (при all_flag это нужно; если not all_flag — мы потом возьмём только первый)
+        filtered_ids = [int(it["id"]) for it in items if isinstance(it, dict) and "id" in it]
+
+    if not filtered_ids:
+        return []
+
+    # если %ALL% — возвращаем все найденные (уникализируем, сохраняя порядок)
+    if all_flag:
+        return list(dict.fromkeys(filtered_ids))
+
+    # иначе — возвращаем только первый вариант (как вы просили)
+    return [filtered_ids[0]]
+
+
 def compute_day_number(now_ref: datetime) -> int:
     """
     {день} = BASE_NUMBER + (сегодня - BASE_DATE).days
@@ -610,41 +796,89 @@ def compute_day_number(now_ref: datetime) -> int:
     
 def expand_abstract_names(abs_names: List[str], day_number: int) -> List[str]:
     """Возвращает человеко-читаемые названия аудиторий из abstractAudiences,
-    подставляя {день} -> day_number. Без запросов к API.
+    подставляя старый {день} -> day_number и поддержкой {day(...)}.
     """
     out: List[str] = []
+    # сформируем now_local для форматирования {day}
+    now_local = datetime.now(LOCAL_TZ)
     for raw in abs_names or []:
-        name = str(raw).replace("{день}", str(day_number))
-        if name:
-            out.append(name)
-    # уникализируем, сохраняя порядок
+        s = str(raw)
+        # Поддерживаем старую подстановку {день}
+        if "{день" in s:
+            # простая замена (без fancy) — оставляем как раньше: строка с числом
+            # но тут мы используем именно day_number (не compute снова)
+            name = s.replace("{день}", str(day_number))
+            if name:
+                out.append(name)
+            continue
+
+        # Для {day(...)} используем более точный рендер через _replace_day_tokens_in_name
+        if "{day" in s.lower():
+            variants = _replace_day_tokens_in_name(s, now_local=now_local)
+            out.extend([v for v in variants if v])
+            continue
+
+        # иначе — обычная строка
+        if s:
+            out.append(s)
+
+    # уникализируем порядок
     return list(dict.fromkeys(out))
 
 def resolve_abstract_audiences(tokens: List[str], names: List[str], day_number: int) -> List[int]:
     """
-    Для каждого имени в names подставляем {день} -> day_number,
-    зовём GET /api/v2/remarketing/segments.json?_name=<name>,
-    берём items[].id (все найденные) и возвращаем список ID.
+    Обновлённая логика резолва abstractAudiences:
+      - использует _try_lookup_segment_by_name_and_filter (который выбирает между _name и _name__startswith)
+      - для старого {день} пробует сначала day_number, затем day_number-1 (fallback)
+      - для {day(...)} использует _replace_day_tokens_in_name -> варианты (обычно 1)
+      - если найдено — в зависимости от %ALL% либо берёт все найденные, либо первый
     """
     ids: List[int] = []
+    now_local = datetime.now(LOCAL_TZ)
+
     for raw in names or []:
-        name = str(raw).replace("{день}", str(day_number))
-        from urllib.parse import quote
-        endpoint = f"{API_BASE}/api/v2/remarketing/segments.json?_name={quote(name, safe='')}"
-        try:
-            resp = with_retries("GET", endpoint, tokens)
-        except Exception as e:
-            log.warning("abstractAudience '%s' lookup failed: %s", name, e)
+        raw = str(raw or "").strip()
+        if not raw:
             continue
 
-        items = (resp or {}).get("items") or []
-        found = [int(it["id"]) for it in items if isinstance(it, dict) and "id" in it]
+        # 1) старый русский {день} — пробуем два варианта (day, day-1)
+        if "{день" in raw:
+            cand0 = raw.replace("{день}", str(day_number))
+            cand1 = raw.replace("{день}", str(day_number - 1))
+            for cand in (cand0, cand1):
+                found = _try_lookup_segment_by_name_and_filter(tokens, cand)
+                if found:
+                    log.info("abstractAudience '%s' -> segment_ids=%s", cand, found)
+                    ids.extend(found)
+                    break
+                else:
+                    log.debug("abstractAudience '%s' not found, trying fallback", cand)
+            continue
+
+        # 2) англ. {day(...)} или {day-1} и т.п. — _replace_day_tokens_in_name возвращает варианты
+        if "{day" in raw.lower():
+            variants = _replace_day_tokens_in_name(raw, now_local=now_local)
+            found_any = False
+            for v in variants:
+                found = _try_lookup_segment_by_name_and_filter(tokens, v)
+                if found:
+                    log.info("abstractAudience '%s' -> segment_ids=%s", v, found)
+                    ids.extend(found)
+                    found_any = True
+                    break
+            if not found_any:
+                log.debug("abstractAudience variants for '%s' not found: %s", raw, variants)
+            continue
+
+        # 3) общий случай — может содержать {*} или %ALL% или простое имя
+        found = _try_lookup_segment_by_name_and_filter(tokens, raw)
         if found:
-            log.info("abstractAudience '%s' -> segment_ids=%s", name, found)
+            log.info("abstractAudience '%s' -> segment_ids=%s", raw, found)
             ids.extend(found)
         else:
-            log.warning("abstractAudience '%s' not found", name)
-    # уникализируем
+            log.warning("abstractAudience '%s' not found", raw)
+
+    # уникализируем, сохраняя порядок
     return list(dict.fromkeys(ids))
 
 def save_debug_payload(user_id: str, cabinet_id: str, name: str, payload: Dict[str, Any]) -> None:
