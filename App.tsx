@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { CabinetSelect } from "./components/CabinetSelect";
-import { IconCampaign, IconAudience3 } from "./components/Icons.tsx";
+import { IconCampaign, IconAudience3, IconMoney } from "./components/Icons.tsx";
 import {
   IconCreatives,
   IconLogo,
@@ -222,6 +222,8 @@ const DEFAULT_COMPANIES_COLUMNS: CompaniesColumnConfig[] = [
   { id: "goals", label: "Результат", width: 100, visible: true, sortable: true, sortField: "base.goals", isStatField: true },
   { id: "cpa", label: "Цена за результат, ₽", width: 160, visible: true, sortable: true, sortField: "base.cpa", isStatField: true },
   { id: "spent", label: "Потрачено всего, ₽", width: 160, visible: true, sortable: true, sortField: "base.spent", isStatField: true },
+  { id: "revenue", label: "Доход", width: 100, visible: true, sortable: true, sortField: "revenue" },
+  { id: "profit", label: "Чистый", width: 100, visible: true, sortable: true, sortField: "profit" },
   { id: "clicks", label: "Клики", width: 80, visible: true, sortable: true, sortField: "base.clicks", isStatField: true },
   { id: "cpc", label: "eCPC, ₽", width: 100, visible: true, sortable: true, sortField: "base.cpc", isStatField: true },
   { id: "shows", label: "Показы", width: 100, visible: true, sortable: true, sortField: "base.shows", isStatField: true },
@@ -241,11 +243,14 @@ interface GroupsColumnConfig {
 const DEFAULT_GROUPS_COLUMNS: GroupsColumnConfig[] = [
   { id: "companyName", label: "Название компании", width: 200, visible: true, sortable: false },
   { id: "name", label: "Название группы", width: 250, visible: true, sortable: true, sortField: "name" },
+  { id: "groupId", label: "ID группы", width: 100, visible: true, sortable: true, sortField: "id" },
   { id: "status", label: "Статус", width: 130, visible: true, sortable: true, sortField: "status" },
   { id: "budget", label: "Бюджет", width: 120, visible: true, sortable: true, sortField: "budget_limit_day" },
   { id: "goals", label: "Результат", width: 100, visible: true, sortable: true, sortField: "base.goals", isStatField: true },
   { id: "cpa", label: "Цена за рез.", width: 140, visible: true, sortable: true, sortField: "base.cpa", isStatField: true },
   { id: "spent", label: "Потрачено", width: 140, visible: true, sortable: true, sortField: "base.spent", isStatField: true },
+  { id: "revenue", label: "Доход", width: 100, visible: true, sortable: true, sortField: "revenue" },
+  { id: "profit", label: "Чистый", width: 100, visible: true, sortable: true, sortField: "profit" },
   { id: "clicks", label: "Клики", width: 80, visible: true, sortable: true, sortField: "base.clicks", isStatField: true },
   { id: "shows", label: "Показы", width: 100, visible: true, sortable: true, sortField: "base.shows", isStatField: true },
   { id: "created", label: "Дата создания", width: 130, visible: true, sortable: true, sortField: "created" },
@@ -265,10 +270,13 @@ const DEFAULT_ADS_COLUMNS: AdsColumnConfig[] = [
   { id: "companyName", label: "Название компании", width: 180, visible: true, sortable: false },
   { id: "groupName", label: "Название группы", width: 180, visible: true, sortable: false },
   { id: "name", label: "Название объявления", width: 250, visible: true, sortable: true, sortField: "name" },
+  { id: "adId", label: "ID объявления", width: 110, visible: true, sortable: true, sortField: "id" },
   { id: "status", label: "Статус", width: 130, visible: true, sortable: true, sortField: "moderation_status" },
   { id: "goals", label: "Результат", width: 100, visible: true, sortable: true, sortField: "base.goals", isStatField: true },
   { id: "cpa", label: "Цена за рез.", width: 140, visible: true, sortable: true, sortField: "base.cpa", isStatField: true },
   { id: "spent", label: "Потрачено", width: 140, visible: true, sortable: true, sortField: "base.spent", isStatField: true },
+  { id: "revenue", label: "Доход", width: 100, visible: true, sortable: true, sortField: "revenue" },
+  { id: "profit", label: "Чистый", width: 100, visible: true, sortable: true, sortField: "profit" },
   { id: "clicks", label: "Клики", width: 80, visible: true, sortable: true, sortField: "base.clicks", isStatField: true },
   { id: "shows", label: "Показы", width: 100, visible: true, sortable: true, sortField: "base.shows", isStatField: true },
   { id: "created", label: "Дата создания", width: 130, visible: true, sortable: true, sortField: "created" },
@@ -277,6 +285,7 @@ const DEFAULT_ADS_COLUMNS: AdsColumnConfig[] = [
 const API_BASE = "/auto_ads/api";
 
 
+const AVAILABLE_SUB1 = ["krolik", "insta", "nalichkinrf", "1russ", "karakoz_karas", "utkavalutkarf", "vydavayka"];
 const CTA_OPTIONS: {label: string; value: string}[] = [
   { label: "Перейти",             value: "visitSite"   },
   { label: "Написать",            value: "write"       },
@@ -518,6 +527,13 @@ const formatMoney = (val: string | number | undefined): string => {
   const num = typeof val === "string" ? parseFloat(val) : val;
   if (isNaN(num)) return "0,00 ₽";
   return num.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " ₽";
+};
+
+const formatMoneyInt = (val: string | number | undefined): string => {
+  if (val === undefined || val === null || val === "") return "0 ₽";
+  const num = typeof val === "string" ? parseFloat(val) : val;
+  if (isNaN(num)) return "0 ₽";
+  return Math.round(num).toLocaleString("ru-RU") + " ₽";
 };
 
 const formatNumber = (val: number | undefined): string => {
@@ -3088,6 +3104,21 @@ const App: React.FC = () => {
     return d.toISOString().slice(0, 10);
   });
 
+  // Закрытие меню колонок при клике вне
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.columns-menu') && !target.closest('.sq-dark-button')) {
+        setCompaniesColumnsMenuOpen(false);
+        setGroupsColumnsMenuOpen(false);
+        setAdsColumnsMenuOpen(false);
+      }
+    };
+    
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, []);
+
   const [companiesDateTo, setCompaniesDateTo] = useState<string>(() => {
     const saved = localStorage.getItem("companiesDateTo");
     if (saved) return saved;
@@ -3105,8 +3136,42 @@ const App: React.FC = () => {
 
   const [datePickerOpen, setDatePickerOpen] = useState(false);
 
-  // Вычисление комбинированного статуса для сортировки
-  const getEntityStatusInfo = (entityStatus: string, modStatus: string): { text: string; className: string; sortOrder: number } => {
+  const [companiesColumnsMenuOpen, setCompaniesColumnsMenuOpen] = useState(false);
+  const [groupsColumnsMenuOpen, setGroupsColumnsMenuOpen] = useState(false);
+  const [adsColumnsMenuOpen, setAdsColumnsMenuOpen] = useState(false);
+
+  // Sub1 settings
+  const [userSub1, setUserSub1] = useState<string[]>([]);
+  const [sub1ModalOpen, setSub1ModalOpen] = useState(false);
+  const [sub1Search, setSub1Search] = useState("");
+  const [sub1Selected, setSub1Selected] = useState<string[]>([]);
+
+  // VK Groups данные
+  const [vkGroups, setVkGroups] = useState<VkGroup[]>([]);
+  const [vkGroupsStats, setVkGroupsStats] = useState<Record<number, VkGroupStats>>({});
+  const [vkGroupsLoading, setVkGroupsLoading] = useState(false);
+
+  // VK Ads данные
+  const [vkAds, setVkAds] = useState<VkAd[]>([]);
+  const [vkAdsStats, setVkAdsStats] = useState<Record<number, VkAdStats>>({});
+  const [vkAdsLoading, setVkAdsLoading] = useState(false);
+
+  // Revenue data from postback
+  const [revenueData, setRevenueData] = useState<Record<string, number>>({});
+
+  const getEntityStatusInfo = (
+    entityStatus: string, 
+    modStatus: string,
+    hasActiveAds?: boolean // новый параметр
+  ): { text: string; className: string; sortOrder: number } => {
+    // Если entity активна, но нет активных объявлений
+    if (entityStatus === "active" && hasActiveAds === false) {
+      return { text: "Остановлена", className: "status-stopped", sortOrder: 2 };
+    }
+    // Если нет активных объявлений (для групп через modStatus)
+    if (modStatus === "stopped_no_active_ads") {
+      return { text: "Остановлена", className: "status-stopped", sortOrder: 2 };
+    }
     // Если entity остановлена пользователем (blocked) но модерация прошла (allowed)
     if (entityStatus === "blocked" && modStatus === "allowed") {
       return { text: "Остановлена", className: "status-stopped", sortOrder: 2 };
@@ -3117,17 +3182,17 @@ const App: React.FC = () => {
     }
     // Модерация не пройдена
     if (modStatus === "blocked") {
-      return { text: "Отклонено", className: "status-rejected", sortOrder: 4 };
+      return { text: "Отклонена", className: "status-rejected", sortOrder: 4 };
     }
     if (modStatus === "banned") {
-      return { text: "Заблокировано", className: "status-banned", sortOrder: 5 };
+      return { text: "Отклонена", className: "status-banned", sortOrder: 5 };
     }
     if (modStatus === "pending" || modStatus === "in_progress") {
       return { text: "На модерации", className: "status-pending", sortOrder: 3 };
     }
     return { text: modStatus || "Неизвестно", className: "status-unknown", sortOrder: 6 };
   };
-
+  
   // Companies totals
   const companiesTotals = useMemo(() => {
     let shows = 0, clicks = 0, goals = 0, spent = 0;
@@ -3144,16 +3209,6 @@ const App: React.FC = () => {
     const cpa = goals > 0 ? spent / goals : 0;
     return { shows, clicks, goals, spent, cpc, cpa };
   }, [vkCompanies, vkCompaniesStats]);
-
-  // VK Groups данные
-  const [vkGroups, setVkGroups] = useState<VkGroup[]>([]);
-  const [vkGroupsStats, setVkGroupsStats] = useState<Record<number, VkGroupStats>>({});
-  const [vkGroupsLoading, setVkGroupsLoading] = useState(false);
-
-  // VK Ads данные
-  const [vkAds, setVkAds] = useState<VkAd[]>([]);
-  const [vkAdsStats, setVkAdsStats] = useState<Record<number, VkAdStats>>({});
-  const [vkAdsLoading, setVkAdsLoading] = useState(false);
 
   // Связи для иерархии
   const [groupsByCompany, setGroupsByCompany] = useState<Record<number, VkGroup[]>>({});
@@ -3179,14 +3234,127 @@ const App: React.FC = () => {
     setAdsByGroup(map);
   }, [vkAds]);
 
+  // Проверка есть ли активные объявления в компании
+  const companyHasActiveAds = (companyId: number): boolean => {
+    const companyGroups = vkGroups.filter(g => g.ad_plan_id === companyId);
+    for (const group of companyGroups) {
+      const groupAds = adsByGroup[group.id] || [];
+      if (groupAds.some(a => a.status === "active" && a.moderation_status === "allowed")) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // === Revenue & Profit helpers ===
+  const getAdRevenue = (adId: number): number => {
+    return Math.round(revenueData[String(adId)] || 0);
+  };
+
+  const getGroupRevenue = (groupId: number): number => {
+    const groupAds = vkAds.filter(ad => ad.ad_group_id === groupId);
+    return Math.round(groupAds.reduce((sum, ad) => sum + (revenueData[String(ad.id)] || 0), 0));
+  };
+
+  const getCompanyRevenue = (companyId: number): number => {
+    const companyGroups = vkGroups.filter(g => g.ad_plan_id === companyId);
+    const groupIds = new Set(companyGroups.map(g => g.id));
+    const companyAds = vkAds.filter(ad => groupIds.has(ad.ad_group_id));
+    return Math.round(companyAds.reduce((sum, ad) => sum + (revenueData[String(ad.id)] || 0), 0));
+  };
+
+  const getAdProfit = (adId: number): number => {
+    const revenue = getAdRevenue(adId);
+    const spent = parseFloat(vkAdsStats[adId]?.base?.spent || "0");
+    return Math.round(revenue - spent);
+  };
+
+  const getGroupProfit = (groupId: number): number => {
+    const revenue = getGroupRevenue(groupId);
+    const spent = parseFloat(vkGroupsStats[groupId]?.base?.spent || "0");
+    return Math.round(revenue - spent);
+  };
+
+  const getCompanyProfit = (companyId: number): number => {
+    const revenue = getCompanyRevenue(companyId);
+    const spent = parseFloat(vkCompaniesStats[companyId]?.base?.spent || "0");
+    return Math.round(revenue - spent);
+  };
+
+  // === Sorted VK Companies ===
+  const sortedVkCompanies = useMemo(() => {
+    const items = [...vkCompanies];
+    const { field, dir } = companiesSorting;
+    
+    items.sort((a, b) => {
+      let aVal: any, bVal: any;
+      
+      if (field.startsWith("base.")) {
+        const statField = field.replace("base.", "");
+        const aStats = vkCompaniesStats[a.id]?.base || {};
+        const bStats = vkCompaniesStats[b.id]?.base || {};
+        aVal = parseFloat((aStats as any)[statField] || "0") || 0;
+        bVal = parseFloat((bStats as any)[statField] || "0") || 0;
+      } else if (field === "created") {
+        aVal = a.created || "";
+        bVal = b.created || "";
+      } else if (field === "status") {
+        const aHasActive = companyHasActiveAds(a.id);
+        const bHasActive = companyHasActiveAds(b.id);
+        
+        const getOrder = (status: string, hasActive: boolean) => {
+          if (status === "active" && hasActive) return 1;
+          if (status === "active" && !hasActive) return 2;
+          if (status === "blocked") return 3;
+          return 4;
+        };
+        
+        aVal = getOrder(a.status, aHasActive);
+        bVal = getOrder(b.status, bHasActive);
+      } else if (field === "name") {
+        aVal = (a.name || "").toLowerCase();
+        bVal = (b.name || "").toLowerCase();
+      } else if (field === "id") {
+        aVal = a.id;
+        bVal = b.id;
+      } else if (field === "revenue") {
+        aVal = getCompanyRevenue(a.id);
+        bVal = getCompanyRevenue(b.id);
+      } else if (field === "profit") {
+        aVal = getCompanyProfit(a.id);
+        bVal = getCompanyProfit(b.id);
+      } else {
+        aVal = (a as any)[field];
+        bVal = (b as any)[field];
+      }
+      
+      let cmp = 0;
+      if (typeof aVal === "number" && typeof bVal === "number") {
+        cmp = aVal - bVal;
+      } else {
+        cmp = String(aVal).localeCompare(String(bVal));
+      }
+      
+      return dir === "asc" ? cmp : -cmp;
+    });
+    
+    return items;
+  }, [vkCompanies, vkCompaniesStats, companiesSorting, revenueData, vkGroups, vkAds, adsByGroup]);
+
   // Вычисление статусов групп на основе объявлений
   const getGroupModerationStatus = (groupId: number): string => {
     const ads = adsByGroup[groupId] || [];
     if (ads.length === 0) return "unknown";
     
+    // Проверяем есть ли хоть одно активное объявление
+    const hasActiveAd = ads.some(a => a.status === "active" && a.moderation_status === "allowed");
+    
     const hasBanned = ads.some(a => a.moderation_status === "banned");
     const hasPending = ads.some(a => a.moderation_status === "pending");
     const hasAllowed = ads.some(a => a.moderation_status === "allowed");
+    
+    // Если нет активных объявлений - считаем остановленной
+    if (!hasActiveAd && hasAllowed) return "stopped_no_active_ads";
     
     if (ads.every(a => a.moderation_status === "banned")) return "banned";
     if (ads.every(a => a.moderation_status === "pending")) return "pending";
@@ -3245,48 +3413,127 @@ const App: React.FC = () => {
   // Отфильтрованные и отсортированные группы
   const filteredGroups = useMemo(() => {
     let groups = [...vkGroups];
+    const { field, dir } = groupsSorting;
     
-    // Локальная сортировка по статусу (учитываем status + moderation)
-    if (groupsSorting.field === "status") {
-      groups.sort((a, b) => {
+    groups.sort((a, b) => {
+      let aVal: any, bVal: any;
+      
+      if (field === "status") {
         const aModStatus = getGroupModerationStatus(a.id);
         const bModStatus = getGroupModerationStatus(b.id);
         const aInfo = getEntityStatusInfo(a.status, aModStatus);
         const bInfo = getEntityStatusInfo(b.status, bModStatus);
-        
-        const diff = aInfo.sortOrder - bInfo.sortOrder;
-        return groupsSorting.dir === "asc" ? diff : -diff;
-      });
-    }
+        // Инвертируем порядок сортировки статуса
+        return dir === "asc" ? bInfo.sortOrder - aInfo.sortOrder : aInfo.sortOrder - bInfo.sortOrder;
+      }
+      
+      if (field.startsWith("base.")) {
+        const statField = field.replace("base.", "");
+        const aStats = vkGroupsStats[a.id]?.base || {};
+        const bStats = vkGroupsStats[b.id]?.base || {};
+        aVal = parseFloat((aStats as any)[statField] || "0") || 0;
+        bVal = parseFloat((bStats as any)[statField] || "0") || 0;
+      } else if (field === "created") {
+        aVal = a.created || "";
+        bVal = b.created || "";
+      } else if (field === "budget_limit_day") {
+        aVal = a.budget_limit_day || 0;
+        bVal = b.budget_limit_day || 0;
+      } else if (field === "name") {
+        aVal = (a.name || "").toLowerCase();
+        bVal = (b.name || "").toLowerCase();
+      } else if (field === "id") {
+        aVal = a.id;
+        bVal = b.id;
+      } else if (field === "revenue") {
+        aVal = getGroupRevenue(a.id);
+        bVal = getGroupRevenue(b.id);
+      } else if (field === "profit") {
+        aVal = getGroupProfit(a.id);
+        bVal = getGroupProfit(b.id);
+      } else {
+        aVal = (a as any)[field];
+        bVal = (b as any)[field];
+      }
+      
+      let cmp = 0;
+      if (typeof aVal === "number" && typeof bVal === "number") {
+        cmp = aVal - bVal;
+      } else {
+        cmp = String(aVal).localeCompare(String(bVal));
+      }
+      
+      return dir === "asc" ? cmp : -cmp;
+    });
     
     return groups;
-  }, [vkGroups, groupsSorting, vkGroupsStats, adsByGroup]);
+  }, [vkGroups, vkGroupsStats, groupsSorting, adsByGroup, revenueData, vkAds]);
 
   // Отфильтрованные и отсортированные объявления
   const filteredAds = useMemo(() => {
     let ads = [...vkAds];
+    const { field, dir } = adsSorting;
     
-    // Локальная сортировка по статусу
-    if (adsSorting.field === "moderation_status" || adsSorting.field === "status") {
-      ads.sort((a, b) => {
+    ads.sort((a, b) => {
+      let aVal: any, bVal: any;
+      
+      if (field === "moderation_status" || field === "status") {
         const aInfo = getEntityStatusInfo(a.status, a.moderation_status);
         const bInfo = getEntityStatusInfo(b.status, b.moderation_status);
-        
-        const diff = aInfo.sortOrder - bInfo.sortOrder;
-        return adsSorting.dir === "asc" ? diff : -diff;
-      });
-    }
+        // Инвертируем порядок сортировки статуса
+        return dir === "asc" ? bInfo.sortOrder - aInfo.sortOrder : aInfo.sortOrder - bInfo.sortOrder;
+      }
+      
+      if (field.startsWith("base.")) {
+        const statField = field.replace("base.", "");
+        const aStats = vkAdsStats[a.id]?.base || {};
+        const bStats = vkAdsStats[b.id]?.base || {};
+        aVal = parseFloat((aStats as any)[statField] || "0") || 0;
+        bVal = parseFloat((bStats as any)[statField] || "0") || 0;
+      } else if (field === "created") {
+        aVal = a.created || "";
+        bVal = b.created || "";
+      } else if (field === "name") {
+        aVal = (a.name || "").toLowerCase();
+        bVal = (b.name || "").toLowerCase();
+      } else if (field === "id") {
+        aVal = a.id;
+        bVal = b.id;
+      } else if (field === "revenue") {
+        aVal = getAdRevenue(a.id);
+        bVal = getAdRevenue(b.id);
+      } else if (field === "profit") {
+        aVal = getAdProfit(a.id);
+        bVal = getAdProfit(b.id);
+      } else {
+        aVal = (a as any)[field];
+        bVal = (b as any)[field];
+      }
+      
+      let cmp = 0;
+      if (typeof aVal === "number" && typeof bVal === "number") {
+        cmp = aVal - bVal;
+      } else {
+        cmp = String(aVal).localeCompare(String(bVal));
+      }
+      
+      return dir === "asc" ? cmp : -cmp;
+    });
     
     return ads;
-  }, [vkAds, adsSorting]);
+  }, [vkAds, vkAdsStats, adsSorting, revenueData]);
 
   // Totals для групп (только активные)
   const groupsTotals = useMemo(() => {
     let shows = 0, clicks = 0, goals = 0, spent = 0, budget = 0;
     for (const group of filteredGroups) {
-      // Бюджет считаем только для активных групп
+      // Бюджет считаем только для групп с активными объявлениями
       if (group.status === "active") {
-        budget += group.budget_limit_day || 0;
+        const groupAds = adsByGroup[group.id] || [];
+        const hasActiveAd = groupAds.some(a => a.status === "active" && a.moderation_status === "allowed");
+        if (hasActiveAd) {
+          budget += group.budget_limit_day || 0;
+        }
       }
       const stats = vkGroupsStats[group.id];
       if (stats?.base) {
@@ -3299,7 +3546,7 @@ const App: React.FC = () => {
     const cpc = clicks > 0 ? spent / clicks : 0;
     const cpa = goals > 0 ? spent / goals : 0;
     return { shows, clicks, goals, spent, cpc, cpa, budget };
-  }, [filteredGroups, vkGroupsStats]);
+  }, [filteredGroups, vkGroupsStats, adsByGroup]);
 
   // Totals для объявлений
   const adsTotals = useMemo(() => {
@@ -3660,83 +3907,38 @@ const App: React.FC = () => {
     localStorage.setItem("companiesColumns", JSON.stringify(companiesColumns));
   }, [companiesColumns]);
 
-  // === FETCH VK COMPANIES ===
-  const fetchVkCompanies = async (forceRefresh = false) => {
+  // Заменить fetchVkCompanies на:
+  const fetchVkCompanies = async (_forceRefresh = false) => {
     if (!userId || !selectedCabinetId || selectedCabinetId === "all") return;
-
-    const cacheKey = `vkCompanies_${selectedCabinetId}_${companiesSorting.field}_${companiesSorting.dir}`;
-
-    if (!forceRefresh) {
-      try {
-        const cached = sessionStorage.getItem(cacheKey);
-        if (cached) {
-          const data = JSON.parse(cached);
-          if (Date.now() - data.timestamp < 5 * 60 * 1000) {
-            setVkCompanies(data.items);
-            setVkCompaniesTotal(data.count);
-            setVkCompaniesStats(data.stats || {});
-            return;
-          }
-        }
-      } catch {}
-    }
 
     setVkCompaniesLoading(true);
 
     try {
-      const isStatSort = companiesSorting.field.startsWith("base.");
-      let items: VkCompany[] = [];
-      let count = 0;
-      let statsMap: Record<number, VkCompanyStats> = {};
-
-      if (!isStatSort) {
-        const sortParam = companiesSorting.dir === "desc" ? `-${companiesSorting.field}` : companiesSorting.field;
-        const response = await apiJson(
-          `${API_BASE}/vk/ad_plans/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&sorting=${sortParam}&limit=200`
-        );
-        items = response?.items || [];
-        count = response?.count || 0;
-      } else {
-        const listResponse = await apiJson(
-          `${API_BASE}/vk/ad_plans/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200`
-        );
-        items = listResponse?.items || [];
-        count = listResponse?.count || 0;
-
-        if (items.length > 0) {
-          const ids = items.map(it => it.id).join(",");
-          const dateFrom = companiesDateFrom;
-          const dateTo = companiesDateTo;
-
-          const statsResponse = await apiJson(
-            `${API_BASE}/vk/statistics/ad_plans?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&ids=${ids}&date_from=${dateFrom}&date_to=${dateTo}&sort_by=${companiesSorting.field}&d=${companiesSorting.dir}&limit=200`
+      // Сначала узнаём общее количество
+      const firstPage = await apiJson(
+        `${API_BASE}/vk/ad_plans/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=0`
+      );
+      
+      let items: VkCompany[] = firstPage?.items || [];
+      const count = firstPage?.count || 0;
+      
+      // Если есть ещё - загружаем остальные страницы
+      if (count > 200) {
+        const pages = Math.ceil(count / 200);
+        for (let page = 1; page < pages && page < 10; page++) { // максимум 10 страниц = 2000 записей
+          const nextPage = await apiJson(
+            `${API_BASE}/vk/ad_plans/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=${page * 200}`
           );
-
-          for (const stat of (statsResponse?.items || [])) {
-            statsMap[stat.id] = stat;
-          }
-          setVkCompaniesStats(statsMap);
-
-          if (statsResponse?.items?.length) {
-            const orderMap = new Map<number, number>();
-            statsResponse.items.forEach((s: VkCompanyStats, idx: number) => orderMap.set(s.id, idx));
-            items.sort((a, b) => (orderMap.get(a.id) ?? 999999) - (orderMap.get(b.id) ?? 999999));
-          }
+          items = [...items, ...(nextPage?.items || [])];
         }
       }
-
+      
       setVkCompanies(items);
       setVkCompaniesTotal(count);
 
-      sessionStorage.setItem(cacheKey, JSON.stringify({
-        items,
-        count,
-        stats: statsMap,
-        timestamp: Date.now()
-      }));
-
-      if (!isStatSort && items.length > 0) {
-        fetchVkCompaniesStats(items.map(it => it.id));
+      // Загружаем статистику для всех
+      if (items.length > 0) {
+        await fetchVkCompaniesStats(items.map(it => it.id));
       }
     } catch (e) {
       console.error("fetchVkCompanies error:", e);
@@ -3746,26 +3948,48 @@ const App: React.FC = () => {
     }
   };
 
-  const fetchVkCompaniesStats = async (ids: number[]) => {
+  const fetchVkCompaniesStats = async (ids: number[], dateFrom?: string, dateTo?: string) => {
+    const from = dateFrom || companiesDateFrom;
+    const to = dateTo || companiesDateTo;
     if (!userId || !selectedCabinetId || selectedCabinetId === "all" || ids.length === 0) return;
 
-    try {
-      const idsStr = ids.join(",");
-      const dateFrom = companiesDateFrom;
-      const dateTo = companiesDateTo;
+    const statsMap: Record<number, VkCompanyStats> = {};
+    
+    const chunkSize = 200;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      const idsStr = chunk.join(",");
 
-      const response = await apiJson(
-        `${API_BASE}/vk/statistics/ad_plans?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&ids=${idsStr}&date_from=${dateFrom}&date_to=${dateTo}&metrics=base&limit=200`
-      );
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      while (attempts < maxAttempts) {
+        try {
+          const response = await apiJson(
+            `${API_BASE}/vk/statistics/ad_plans?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&ids=${idsStr}&date_from=${from}&date_to=${to}&metrics=base&limit=200`
+          );
 
-      const statsMap: Record<number, VkCompanyStats> = {};
-      for (const stat of (response?.items || [])) {
-        statsMap[stat.id] = stat;
+          for (const stat of (response?.items || [])) {
+            statsMap[stat.id] = stat;
+          }
+          break;
+        } catch (e: any) {
+          attempts++;
+          const errorMsg = e?.message || "";
+          
+          if (errorMsg.includes("429") && attempts < maxAttempts) {
+            console.log(`Rate limit hit, waiting before retry ${attempts}/${maxAttempts}...`);
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+            continue;
+          }
+          
+          console.error("fetchVkCompaniesStats error:", e);
+          break;
+        }
       }
-      setVkCompaniesStats(prev => ({ ...prev, ...statsMap }));
-    } catch (e) {
-      console.error("fetchVkCompaniesStats error:", e);
     }
+    
+    setVkCompaniesStats(statsMap);
   };
 
   const fetchVkGroups = async (_forceRefresh = false) => {
@@ -3774,16 +3998,29 @@ const App: React.FC = () => {
     setVkGroupsLoading(true);
 
     try {
-      const sortParam = groupsSorting.dir === "desc" ? `-${groupsSorting.field}` : groupsSorting.field;
-      const response = await apiJson(
-        `${API_BASE}/vk/ad_groups/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=0&sorting=${sortParam}`
+      // Первая страница
+      const firstPage = await apiJson(
+        `${API_BASE}/vk/ad_groups/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=0`
       );
       
-      const items: VkGroup[] = response?.items || [];
+      let items: VkGroup[] = firstPage?.items || [];
+      const count = firstPage?.count || 0;
+      
+      // Загружаем остальные страницы
+      if (count > 200) {
+        const pages = Math.ceil(count / 200);
+        for (let page = 1; page < pages && page < 10; page++) {
+          const nextPage = await apiJson(
+            `${API_BASE}/vk/ad_groups/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=${page * 200}`
+          );
+          items = [...items, ...(nextPage?.items || [])];
+        }
+      }
+      
       setVkGroups(items);
 
       if (items.length > 0) {
-        fetchVkGroupsStats(items.map(it => it.id));
+        await fetchVkGroupsStats(items.map(it => it.id));
       }
     } catch (e) {
       console.error("fetchVkGroups error:", e);
@@ -3793,23 +4030,48 @@ const App: React.FC = () => {
     }
   };
 
-  const fetchVkGroupsStats = async (ids: number[]) => {
+  const fetchVkGroupsStats = async (ids: number[], dateFrom?: string, dateTo?: string) => {
+    const from = dateFrom || companiesDateFrom;
+    const to = dateTo || companiesDateTo;
     if (!userId || !selectedCabinetId || selectedCabinetId === "all" || ids.length === 0) return;
 
-    try {
-      const idsStr = ids.join(",");
-      const response = await apiJson(
-        `${API_BASE}/vk/statistics/ad_groups?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&ids=${idsStr}&date_from=${companiesDateFrom}&date_to=${companiesDateTo}&metrics=base&limit=200`
-      );
+    const statsMap: Record<number, VkGroupStats> = {};
+    
+    const chunkSize = 200;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      const idsStr = chunk.join(",");
 
-      const statsMap: Record<number, VkGroupStats> = {};
-      for (const stat of (response?.items || [])) {
-        statsMap[stat.id] = stat;
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      while (attempts < maxAttempts) {
+        try {
+          const response = await apiJson(
+            `${API_BASE}/vk/statistics/ad_groups?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&ids=${idsStr}&date_from=${from}&date_to=${to}&metrics=base&limit=200`
+          );
+
+          for (const stat of (response?.items || [])) {
+            statsMap[stat.id] = stat;
+          }
+          break;
+        } catch (e: any) {
+          attempts++;
+          const errorMsg = e?.message || "";
+          
+          if (errorMsg.includes("429") && attempts < maxAttempts) {
+            console.log(`Rate limit hit, waiting before retry ${attempts}/${maxAttempts}...`);
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+            continue;
+          }
+          
+          console.error("fetchVkGroupsStats error:", e);
+          break;
+        }
       }
-      setVkGroupsStats(prev => ({ ...prev, ...statsMap }));
-    } catch (e) {
-      console.error("fetchVkGroupsStats error:", e);
     }
+    
+    setVkGroupsStats(statsMap);
   };
 
   // === FETCH VK ADS ===
@@ -3819,16 +4081,29 @@ const App: React.FC = () => {
     setVkAdsLoading(true);
 
     try {
-      const sortParam = adsSorting.dir === "desc" ? `-${adsSorting.field}` : adsSorting.field;
-      const response = await apiJson(
-        `${API_BASE}/vk/banners/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=0&sorting=${sortParam}`
+      // Первая страница
+      const firstPage = await apiJson(
+        `${API_BASE}/vk/banners/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=0`
       );
       
-      const items: VkAd[] = response?.items || [];
+      let items: VkAd[] = firstPage?.items || [];
+      const count = firstPage?.count || 0;
+      
+      // Загружаем остальные страницы
+      if (count > 200) {
+        const pages = Math.ceil(count / 200);
+        for (let page = 1; page < pages && page < 10; page++) {
+          const nextPage = await apiJson(
+            `${API_BASE}/vk/banners/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=${page * 200}`
+          );
+          items = [...items, ...(nextPage?.items || [])];
+        }
+      }
+      
       setVkAds(items);
 
       if (items.length > 0) {
-        fetchVkAdsStats(items.map(it => it.id));
+        await fetchVkAdsStats(items.map(it => it.id));
       }
     } catch (e) {
       console.error("fetchVkAds error:", e);
@@ -3838,24 +4113,97 @@ const App: React.FC = () => {
     }
   };
 
-  const fetchVkAdsStats = async (ids: number[]) => {
+  const fetchVkAdsStats = async (ids: number[], dateFrom?: string, dateTo?: string) => {
+    const from = dateFrom || companiesDateFrom;
+    const to = dateTo || companiesDateTo;
     if (!userId || !selectedCabinetId || selectedCabinetId === "all" || ids.length === 0) return;
 
-    try {
-      const idsStr = ids.join(",");
-      const response = await apiJson(
-        `${API_BASE}/vk/statistics/banners?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&ids=${idsStr}&date_from=${companiesDateFrom}&date_to=${companiesDateTo}&metrics=base&limit=200`
-      );
+    const statsMap: Record<number, VkAdStats> = {};
+    
+    const chunkSize = 200;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      const idsStr = chunk.join(",");
 
-      const statsMap: Record<number, VkAdStats> = {};
-      for (const stat of (response?.items || [])) {
-        statsMap[stat.id] = stat;
+      // Retry logic
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      while (attempts < maxAttempts) {
+        try {
+          const response = await apiJson(
+            `${API_BASE}/vk/statistics/banners?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&ids=${idsStr}&date_from=${from}&date_to=${to}&metrics=base&limit=200`
+          );
+
+          for (const stat of (response?.items || [])) {
+            statsMap[stat.id] = stat;
+          }
+          break; // Успех - выходим из while
+        } catch (e: any) {
+          attempts++;
+          const errorMsg = e?.message || "";
+          
+          // Если это 429 (flood limit) - ждём и пробуем снова
+          if (errorMsg.includes("429") && attempts < maxAttempts) {
+            console.log(`Rate limit hit, waiting before retry ${attempts}/${maxAttempts}...`);
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempts)); // 2s, 4s, 6s
+            continue;
+          }
+          
+          // Другие ошибки или исчерпаны попытки
+          console.error("fetchVkAdsStats error:", e);
+          break;
+        }
       }
-      setVkAdsStats(prev => ({ ...prev, ...statsMap }));
+    }
+    
+    setVkAdsStats(statsMap);
+  };
+
+  // === SUB1 & REVENUE ===
+  const fetchUserSettings = async () => {
+    if (!userId) return;
+    try {
+      const res = await apiJson(`${API_BASE}/user/settings?user_id=${encodeURIComponent(userId)}`);
+      setUserSub1(res?.sub1 || []);
     } catch (e) {
-      console.error("fetchVkAdsStats error:", e);
+      console.error("fetchUserSettings error:", e);
     }
   };
+
+  const saveUserSub1 = async (sub1List: string[]) => {
+    if (!userId) return;
+    try {
+      await fetchSecured(`${API_BASE}/user/settings/sub1?user_id=${encodeURIComponent(userId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sub1List),
+      });
+      setUserSub1(sub1List);
+      // После сохранения перезагружаем данные revenue
+      fetchRevenueData(sub1List);
+    } catch (e) {
+      console.error("saveUserSub1 error:", e);
+    }
+  };
+
+  const fetchRevenueData = async (sub1List?: string[]) => {
+    const subs = sub1List || userSub1;
+    if (subs.length === 0 || !companiesDateFrom || !companiesDateTo) {
+      setRevenueData({});
+      return;
+    }
+    try {
+      const res = await apiJson(
+        `${API_BASE}/leads/revenue?sub1=${encodeURIComponent(subs.join(","))}&date_from=${companiesDateFrom}&date_to=${companiesDateTo}`
+      );
+      setRevenueData(res?.revenue || {});
+    } catch (e) {
+      console.error("fetchRevenueData error:", e);
+      setRevenueData({});
+    }
+  };
+
 
   // Загрузка данных при переключении вкладок и сортировки
   useEffect(() => {
@@ -3872,7 +4220,37 @@ const App: React.FC = () => {
         fetchVkAds();
       }
     }
-  }, [activeTab, campaignsSubTab, companiesViewTab, selectedCabinetId, companiesSorting, groupsSorting, adsSorting, companiesDateFrom, companiesDateTo]);
+  }, [activeTab, campaignsSubTab, companiesViewTab, selectedCabinetId, companiesDateFrom, companiesDateTo]);
+
+  // Загрузка настроек пользователя (sub1)
+  useEffect(() => {
+    if (userId) {
+      fetchUserSettings();
+    }
+  }, [userId]);
+
+  // Обновление только статистики при смене дат (без перезагрузки списков)
+  useEffect(() => {
+    if (activeTab === "campaigns" && selectedCabinetId && selectedCabinetId !== "all" && campaignsSubTab === "companies") {
+      // Перезагружаем только статистику с новыми датами
+      if (vkCompanies.length > 0) {
+        fetchVkCompaniesStats(vkCompanies.map(c => c.id), companiesDateFrom, companiesDateTo);
+      }
+      if (vkGroups.length > 0) {
+        fetchVkGroupsStats(vkGroups.map(g => g.id), companiesDateFrom, companiesDateTo);
+      }
+      if (vkAds.length > 0) {
+        fetchVkAdsStats(vkAds.map(a => a.id), companiesDateFrom, companiesDateTo);
+      }
+    }
+  }, [companiesDateFrom, companiesDateTo]);
+
+  // Загрузка revenue при изменении sub1 или дат
+  useEffect(() => {
+    if (userSub1.length > 0 && companiesDateFrom && companiesDateTo) {
+      fetchRevenueData();
+    }
+  }, [userSub1, companiesDateFrom, companiesDateTo]);
 
   // Обновление истории при переключении на вкладку
   useEffect(() => {
@@ -5494,6 +5872,21 @@ const App: React.FC = () => {
 
       <div className="header-right">
         <div className="header-cabinet-row">
+          {/* Кнопка выбора sub1 */}
+          <button 
+            className="icon-button"
+            onClick={() => {
+              setSub1Selected(userSub1);
+              setSub1Search("");
+              setSub1ModalOpen(true);
+            }}
+            title="Выбрать sub1"
+            style={{ marginRight: 8, position: "relative", marginBottom: 7, borderRadius: 10 }}
+          >
+            <IconMoney className="header-icon" size={25} />
+
+          </button>
+          
           <CabinetSelect
             cabinets={cabinets}
             value={selectedCabinetId}
@@ -5755,8 +6148,8 @@ const App: React.FC = () => {
   // === RENDER COMPANIES TABLE ===
   const renderCompaniesTable = () => {
     const visibleColumns = companiesColumns.filter(c => c.visible);
-    const allSelected = vkCompanies.length > 0 && selectedCompanyIds.size === vkCompanies.length;
-    const someSelected = selectedCompanyIds.size > 0 && selectedCompanyIds.size < vkCompanies.length;
+    const allSelected = sortedVkCompanies.length > 0 && selectedCompanyIds.size === sortedVkCompanies.length;
+    const someSelected = selectedCompanyIds.size > 0 && selectedCompanyIds.size < sortedVkCompanies.length;
 
     return (
       <div className="companies-table-wrapper">
@@ -5785,10 +6178,61 @@ const App: React.FC = () => {
             </button>
           </div>
           
-          <div className="companies-toolbar-right">
-            <button className="icon-button sq-dark-button" style={{borderRadius:7}} title="Настройки таблицы">
+          <div className="companies-toolbar-right" style={{ position: "relative" }}>
+            <button 
+              className="icon-button sq-dark-button" 
+              style={{borderRadius:7}} 
+              title="Настройки таблицы"
+              onClick={() => setCompaniesColumnsMenuOpen(!companiesColumnsMenuOpen)}
+            >
               <IconSettings className="icon" />
             </button>
+            
+            {companiesColumnsMenuOpen && 
+              createPortal(
+                <div 
+                  className="columns-menu glass"
+                  style={{
+                    position: "absolute",
+                    top: 190,
+                    right: 100,
+                    marginTop: 8,
+                    padding: 12,
+                    borderRadius: 12,
+                    minWidth: 200,
+                    zIndex: 100,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>Столбцы</div>
+                  {companiesColumns.map(col => (
+                    <label 
+                      key={col.id} 
+                      style={{ 
+                        display: "flex", 
+                        alignItems: "center", 
+                        gap: 8, 
+                        cursor: "pointer",
+                        fontSize: 13,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={col.visible}
+                        onChange={() => {
+                          setCompaniesColumns(prev => 
+                            prev.map(c => c.id === col.id ? { ...c, visible: !c.visible } : c)
+                          );
+                        }}
+                      />
+                      {col.label}
+                    </label>
+                  ))}
+                </div>,
+              document.body
+            )}
           </div>
         </div>
 
@@ -5839,9 +6283,12 @@ const App: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {vkCompanies.map(company => {
+                {sortedVkCompanies.map(company => {
                   const stats = vkCompaniesStats[company.id];
-                  const statusInfo = formatVkStatus(company.status);
+                  const hasActiveAds = companyHasActiveAds(company.id);
+                  const statusInfo = company.status === "active" && !hasActiveAds 
+                    ? { text: "Остановлена", className: "status-stopped" }
+                    : formatVkStatus(company.status);
                   const isSelected = selectedCompanyIds.has(company.id);
                   const isToggling = companyTogglingIds.has(company.id);
                   const isActive = company.status === "active";
@@ -5904,10 +6351,10 @@ const App: React.FC = () => {
                             content = formatNumber(stats?.base?.goals);
                             break;
                           case "cpa":
-                            content = formatMoney(stats?.base?.cpa);
+                            content = formatMoneyInt(stats?.base?.cpa);
                             break;
                           case "spent":
-                            content = formatMoney(stats?.base?.spent);
+                            content = formatMoneyInt(stats?.base?.spent);
                             break;
                           case "clicks":
                             content = formatNumber(stats?.base?.clicks);
@@ -5921,6 +6368,20 @@ const App: React.FC = () => {
                           case "created":
                             content = formatVkCreated(company.created);
                             break;
+                          case "revenue":
+                            content = formatNumber(getCompanyRevenue(company.id));
+                            break;
+                          case "profit": {
+                            const profit = getCompanyProfit(company.id);
+                            content = (
+                              <span style={{ 
+                                color: profit > 0 ? "#4caf50" : profit < 0 ? "#f44336" : "#888" 
+                              }}>
+                                {formatNumber(profit)}
+                              </span>
+                            );
+                            break;
+                          }
                         }
 
                         return (
@@ -5948,7 +6409,7 @@ const App: React.FC = () => {
                         content = <strong>{formatNumber(companiesTotals.goals)}</strong>;
                         break;
                       case "spent":
-                        content = <strong>{formatMoney(companiesTotals.spent)}</strong>;
+                        content = <strong>{formatMoneyInt(companiesTotals.spent)}</strong>;
                         break;
                       case "clicks":
                         content = <strong>{formatNumber(companiesTotals.clicks)}</strong>;
@@ -5957,11 +6418,27 @@ const App: React.FC = () => {
                         content = <strong>{formatMoney(companiesTotals.cpc)}</strong>;
                         break;
                       case "cpa":
-                        content = <strong>{formatMoney(companiesTotals.cpa)}</strong>;
+                        content = <strong>{formatMoneyInt(companiesTotals.cpa)}</strong>;
                         break;
                       case "shows":
                         content = <strong>{formatNumber(companiesTotals.shows)}</strong>;
                         break;
+                      case "revenue": {
+                        const totalRevenue = sortedVkCompanies.reduce((sum, c) => sum + getCompanyRevenue(c.id), 0);
+                        content = <strong>{formatNumber(totalRevenue)}</strong>;
+                        break;
+                      }
+                      case "profit": {
+                        const totalProfit = sortedVkCompanies.reduce((sum, c) => sum + getCompanyProfit(c.id), 0);
+                        content = (
+                          <strong style={{ 
+                            color: totalProfit > 0 ? "#4caf50" : totalProfit < 0 ? "#f44336" : "#888" 
+                          }}>
+                            {formatNumber(totalProfit)}
+                          </strong>
+                        );
+                        break;
+                      }
                     }
 
                     return (
@@ -6008,10 +6485,59 @@ const App: React.FC = () => {
             </button>
           </div>
           
-          <div className="companies-toolbar-right">
-            <button className="icon-button" title="Настройки таблицы">
+          <div className="companies-toolbar-right" style={{ position: "relative" }}>
+            <button 
+              className="icon-button sq-dark-button" 
+              style={{borderRadius:7}} 
+              title="Настройки таблицы"
+              onClick={() => setGroupsColumnsMenuOpen(!groupsColumnsMenuOpen)}
+            >
               <IconSettings className="icon" />
             </button>
+            
+            {groupsColumnsMenuOpen && (
+              <div 
+                className="columns-menu glass"
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  right: 0,
+                  marginTop: 8,
+                  padding: 12,
+                  borderRadius: 12,
+                  minWidth: 200,
+                  zIndex: 100,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                }}
+              >
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Столбцы</div>
+                {groupsColumns.map(col => (
+                  <label 
+                    key={col.id} 
+                    style={{ 
+                      display: "flex", 
+                      alignItems: "center", 
+                      gap: 8, 
+                      cursor: "pointer",
+                      fontSize: 13,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={col.visible}
+                      onChange={() => {
+                        setGroupsColumns(prev => 
+                          prev.map(c => c.id === col.id ? { ...c, visible: !c.visible } : c)
+                        );
+                      }}
+                    />
+                    {col.label}
+                  </label>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -6126,10 +6652,10 @@ const App: React.FC = () => {
                             content = formatNumber(stats?.base?.goals);
                             break;
                           case "cpa":
-                            content = formatMoney(stats?.base?.cpa);
+                            content = formatMoneyInt(stats?.base?.cpa);
                             break;
                           case "spent":
-                            content = formatMoney(stats?.base?.spent);
+                            content = formatMoneyInt(stats?.base?.spent);
                             break;
                           case "clicks":
                             content = formatNumber(stats?.base?.clicks);
@@ -6140,6 +6666,23 @@ const App: React.FC = () => {
                           case "created":
                             content = formatVkCreated(group.created);
                             break;
+                          case "groupId":
+                            content = group.id;
+                            break;
+                          case "revenue":
+                            content = formatNumber(getGroupRevenue(group.id));
+                            break;
+                          case "profit": {
+                            const profit = getGroupProfit(group.id);
+                            content = (
+                              <span style={{ 
+                                color: profit > 0 ? "#4caf50" : profit < 0 ? "#f44336" : "#888" 
+                              }}>
+                                {formatNumber(profit)}
+                              </span>
+                            );
+                            break;
+                          }
                         }
 
                         return (
@@ -6170,10 +6713,10 @@ const App: React.FC = () => {
                         content = <strong>{formatNumber(groupsTotals.goals)}</strong>;
                         break;
                       case "cpa":
-                        content = <strong>{formatMoney(groupsTotals.cpa)}</strong>;
+                        content = <strong>{formatMoneyInt(groupsTotals.cpa)}</strong>;
                         break;
                       case "spent":
-                        content = <strong>{formatMoney(groupsTotals.spent)}</strong>;
+                        content = <strong>{formatMoneyInt(groupsTotals.spent)}</strong>;
                         break;
                       case "clicks":
                         content = <strong>{formatNumber(groupsTotals.clicks)}</strong>;
@@ -6181,6 +6724,22 @@ const App: React.FC = () => {
                       case "shows":
                         content = <strong>{formatNumber(groupsTotals.shows)}</strong>;
                         break;
+                      case "revenue": {
+                        const totalRevenue = filteredGroups.reduce((sum, g) => sum + getGroupRevenue(g.id), 0);
+                        content = <strong>{formatNumber(totalRevenue)}</strong>;
+                        break;
+                      }
+                      case "profit": {
+                        const totalProfit = filteredGroups.reduce((sum, g) => sum + getGroupProfit(g.id), 0);
+                        content = (
+                          <strong style={{ 
+                            color: totalProfit > 0 ? "#4caf50" : totalProfit < 0 ? "#f44336" : "#888" 
+                          }}>
+                            {formatNumber(totalProfit)}
+                          </strong>
+                        );
+                        break;
+                      }
                     }
 
                     return (
@@ -6234,10 +6793,59 @@ const App: React.FC = () => {
             </button>
           </div>
           
-          <div className="companies-toolbar-right">
-            <button className="icon-button" title="Настройки таблицы">
+          <div className="companies-toolbar-right" style={{ position: "relative" }}>
+            <button 
+              className="icon-button sq-dark-button" 
+              style={{borderRadius:7}} 
+              title="Настройки таблицы"
+              onClick={() => setAdsColumnsMenuOpen(!adsColumnsMenuOpen)}
+            >
               <IconSettings className="icon" />
             </button>
+            
+            {adsColumnsMenuOpen && (
+              <div 
+                className="columns-menu glass"
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  right: 0,
+                  marginTop: 8,
+                  padding: 12,
+                  borderRadius: 12,
+                  minWidth: 200,
+                  zIndex: 100,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                }}
+              >
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Столбцы</div>
+                {adsColumns.map(col => (
+                  <label 
+                    key={col.id} 
+                    style={{ 
+                      display: "flex", 
+                      alignItems: "center", 
+                      gap: 8, 
+                      cursor: "pointer",
+                      fontSize: 13,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={col.visible}
+                      onChange={() => {
+                        setAdsColumns(prev => 
+                          prev.map(c => c.id === col.id ? { ...c, visible: !c.visible } : c)
+                        );
+                      }}
+                    />
+                    {col.label}
+                  </label>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -6357,10 +6965,10 @@ const App: React.FC = () => {
                             content = formatNumber(stats?.base?.goals);
                             break;
                           case "cpa":
-                            content = formatMoney(stats?.base?.cpa);
+                            content = formatMoneyInt(stats?.base?.cpa);
                             break;
                           case "spent":
-                            content = formatMoney(stats?.base?.spent);
+                            content = formatMoneyInt(stats?.base?.spent);
                             break;
                           case "clicks":
                             content = formatNumber(stats?.base?.clicks);
@@ -6371,6 +6979,23 @@ const App: React.FC = () => {
                           case "created":
                             content = formatVkCreated(ad.created);
                             break;
+                          case "adId":
+                            content = ad.id;
+                            break;
+                          case "revenue":
+                            content = formatNumber(getAdRevenue(ad.id));
+                            break;
+                          case "profit": {
+                            const profit = getAdProfit(ad.id);
+                            content = (
+                              <span style={{ 
+                                color: profit > 0 ? "#4caf50" : profit < 0 ? "#f44336" : "#888" 
+                              }}>
+                                {formatNumber(profit)}
+                              </span>
+                            );
+                            break;
+                          }
                         }
 
                         return (
@@ -6398,10 +7023,10 @@ const App: React.FC = () => {
                         content = <strong>{formatNumber(adsTotals.goals)}</strong>;
                         break;
                       case "cpa":
-                        content = <strong>{formatMoney(adsTotals.cpa)}</strong>;
+                        content = <strong>{formatMoneyInt(adsTotals.cpa)}</strong>;
                         break;
                       case "spent":
-                        content = <strong>{formatMoney(adsTotals.spent)}</strong>;
+                        content = <strong>{formatMoneyInt(adsTotals.spent)}</strong>;
                         break;
                       case "clicks":
                         content = <strong>{formatNumber(adsTotals.clicks)}</strong>;
@@ -6409,6 +7034,22 @@ const App: React.FC = () => {
                       case "shows":
                         content = <strong>{formatNumber(adsTotals.shows)}</strong>;
                         break;
+                      case "revenue": {
+                        const totalRevenue = filteredAds.reduce((sum, a) => sum + getAdRevenue(a.id), 0);
+                        content = <strong>{formatNumber(totalRevenue)}</strong>;
+                        break;
+                      }
+                      case "profit": {
+                        const totalProfit = filteredAds.reduce((sum, a) => sum + getAdProfit(a.id), 0);
+                        content = (
+                          <strong style={{ 
+                            color: totalProfit > 0 ? "#4caf50" : totalProfit < 0 ? "#f44336" : "#888" 
+                          }}>
+                            {formatNumber(totalProfit)}
+                          </strong>
+                        );
+                        break;
+                      }
                     }
 
                     return (
@@ -6447,7 +7088,7 @@ const App: React.FC = () => {
               className={`companies-view-tab ${companiesViewTab === "campaigns" ? "active" : ""}`}
               onClick={() => setCompaniesViewTab("campaigns")}
             >
-              Кампании {selectedCounts.companies > 0 && <span className="tab-count">{selectedCounts.companies}</span>}
+              Компании {selectedCounts.companies > 0 && <span className="tab-count">{selectedCounts.companies}</span>}
             </button>
             <button
               className={`companies-view-tab ${companiesViewTab === "groups" ? "active" : ""}`}
@@ -7965,6 +8606,83 @@ const App: React.FC = () => {
     );
   };
 
+  // === Render Sub1 Modal ===
+  const renderSub1Modal = () => {
+    if (!sub1ModalOpen) return null;
+
+    const filtered = AVAILABLE_SUB1.filter(s =>
+      s.toLowerCase().includes(sub1Search.toLowerCase())
+    );
+
+    const toggleSub1 = (s: string) => {
+      setSub1Selected(prev =>
+        prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]
+      );
+    };
+
+    const handleSave = () => {
+      saveUserSub1(sub1Selected);
+      setSub1ModalOpen(false);
+    };
+
+    return (
+      <div className="popup-overlay" onClick={() => setSub1ModalOpen(false)}>
+        <div 
+          className="popup-window glass" 
+          onClick={e => e.stopPropagation()} 
+          style={{ width: 400, padding: 20 }}
+        >
+          <h3 style={{ margin: "0 0 16px" }}>Выберите sub1</h3>
+
+          <input
+            type="text"
+            placeholder="Поиск..."
+            value={sub1Search}
+            onChange={e => setSub1Search(e.target.value)}
+            style={{ width: "100%", marginBottom: 12 }}
+          />
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 300, overflowY: "auto" }}>
+            {filtered.map(s => (
+              <label 
+                key={s} 
+                style={{ 
+                  display: "flex", 
+                  alignItems: "center", 
+                  gap: 10, 
+                  cursor: "pointer",
+                  padding: "8px 12px",
+                  borderRadius: 8,
+                  background: sub1Selected.includes(s) ? "var(--accent-soft)" : "transparent",
+                  border: sub1Selected.includes(s) ? "1px solid var(--accent)" : "1px solid var(--border-soft)",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={sub1Selected.includes(s)}
+                  onChange={() => toggleSub1(s)}
+                />
+                <span style={{ fontWeight: sub1Selected.includes(s) ? 600 : 400 }}>{s}</span>
+              </label>
+            ))}
+            {filtered.length === 0 && (
+              <div className="hint">Ничего не найдено</div>
+            )}
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginTop: 16, justifyContent: "flex-end" }}>
+            <button className="outline-button" onClick={() => setSub1ModalOpen(false)}>
+              Отмена
+            </button>
+            <button className="primary-button" onClick={handleSave}>
+              Сохранить
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderImageCropModal = () => {
     if (!cropModalOpen || !currentCropTask || !cropPreviewUrl) return null;
 
@@ -8106,6 +8824,7 @@ const App: React.FC = () => {
           </div>
         </div>
       )}
+      {renderSub1Modal()}
       {pixelDialog.open && createPortal(
         <div className="popup-overlay" style={{ zIndex: 1000 }}>
           <div className="confirm-window glass">
