@@ -22,7 +22,7 @@ import random
 
 app = FastAPI()
 
-VersionApp = "0.998"
+VersionApp = "0.999"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1510,15 +1510,17 @@ def vk_statistics_banners(
 
 @secure_auto.post("/vk/ad_plans/status")
 @secure_api.post("/vk/ad_plans/status")
-def vk_ad_plans_status(request: Request):
+async def vk_ad_plans_status(request: Request):
     """Изменение статуса кампании (active/blocked)"""
-    import json
-    body = json.loads(request.body())
+    body = await request.json()
     
     user_id = body.get("userId")
     cabinet_id = body.get("cabinetId")
     company_id = body.get("companyId")
     status = body.get("status")  # "active" или "blocked"
+    
+    if not all([user_id, cabinet_id, company_id, status]):
+        return JSONResponse(status_code=400, content={"error": "Missing parameters"})
     
     data = ensure_user_structure(user_id)
     cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
@@ -1640,10 +1642,9 @@ def vk_banners_list(
 
 @secure_auto.post("/vk/ad_groups/status")
 @secure_api.post("/vk/ad_groups/status")
-def vk_ad_groups_status(request: Request):
+async def vk_ad_groups_status(request: Request):
     """Изменение статуса группы"""
-    import json
-    body = json.loads(request._body.decode() if hasattr(request, '_body') else '{}')
+    body = await request.json()
     
     user_id = body.get("userId")
     cabinet_id = body.get("cabinetId")
@@ -1676,10 +1677,9 @@ def vk_ad_groups_status(request: Request):
 
 @secure_auto.post("/vk/banners/status")
 @secure_api.post("/vk/banners/status")
-def vk_banners_status(request: Request):
+async def vk_banners_status(request: Request):
     """Изменение статуса объявления"""
-    import json
-    body = json.loads(request._body.decode() if hasattr(request, '_body') else '{}')
+    body = await request.json()
     
     user_id = body.get("userId")
     cabinet_id = body.get("cabinetId")
