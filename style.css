@@ -80,6 +80,10 @@ body,
   align-items: center;
   padding: 10px 18px;
   gap: 16px;
+  border-radius: 0px;
+  width: 100%;
+  flex: 0 0 auto;   /* чтобы хедер никогда не сжимался по высоте */
+  min-height: 58px; /* фикс от “ужимается” */
 }
 
 .header-left,
@@ -200,7 +204,7 @@ body,
 
 .sidebar-tab:hover {
   background: rgba(15, 23, 42, 0.7);
-  transform: translateX(2px);
+  transform: translate3d(2px, 0, 0);
 }
 
 :root[data-theme="light"] .sidebar-tab:hover {
@@ -345,7 +349,23 @@ body,
 
 .preset-name {
   font-weight: 600;
+  min-height: 33px;
   font-size: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.preset-title-text {
+  font-size: 14px;
+  line-height: 1.2;
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .preset-meta {
@@ -353,6 +373,7 @@ body,
   gap: 10px;
   font-size: 12px;
   color: var(--fg-muted);
+  margin-top: auto;
 }
 
 .split-card {
@@ -370,15 +391,6 @@ body,
   );
   border-radius: 12px;
   border: 1px solid var(--border-color);
-}
-.split-card::before{
-  /* диагональная линия-разделитель */
-  content:"";
-  position:absolute;
-  inset:0;
-  background:
-    linear-gradient(135deg, transparent 49.5%, var(--border-color) 49.5%, var(--border-color) 50.5%, transparent 50.5%);
-  pointer-events:none;
 }
 .split-area{
   height: auto;
@@ -410,11 +422,14 @@ body,
   grid-template-columns: 260px minmax(0, 1fr);
   gap: 14px;
   padding: 14px;
+  min-height: 0;
 }
 
 .preset-editor-left {
   border-right: 1px dashed rgba(148, 163, 184, 0.4);
   padding-right: 14px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .preset-editor-right {
@@ -422,7 +437,8 @@ body,
   display: flex;
   flex-direction: column;
   gap: 16px;
-  overflow: hidden;
+  overflow: auto;
+  min-height: 0;
 }
 
 /* База: одна колонка и без переполнений */
@@ -495,6 +511,15 @@ body,
   gap: 6px;
 }
 
+.structure-group-header .structure-item {
+  flex: 1 1 auto;
+}
+
+.preset-editor.fast .structure-group-header .structure-item {
+  width: 100%;
+  flex: 1 1 100%;
+}
+
 .structure-actions {
   display: flex;
   gap: 4px;
@@ -504,8 +529,12 @@ body,
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px 16px;
+}
+
+.form-grid.two-col {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 700px;
 }
 
 .form-field {
@@ -556,17 +585,19 @@ textarea:focus {
 
 .icon-button {
   border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.4);
-  background: rgba(15, 23, 42, 0.7);
+  background: rgb(79 85 93 / 54%);
   color: var(--fg-muted);
   cursor: pointer;
-  padding: 4px 8px;
+  padding: 5px 5px;
   font-size: 13px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   transition: background var(--transition), color var(--transition),
     transform var(--transition-fast), border-color var(--transition);
+}
+.header-cabinet-row .icon-button  {
+  background: linear-gradient(135deg, var(--glass-a), var(--glass-b));
 }
 
 :root[data-theme="light"] .icon-button {
@@ -578,6 +609,28 @@ textarea:focus {
   color: var(--accent);
   border-color: var(--accent);
   transform: translateY(-1px);
+}
+
+:root[data-theme="dark"] .sq-dark-button {
+  border: 1px solid #7b7b7b3b;
+  border-radius: 7px;
+  background: #4f555d00;
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+  stroke: currentColor;
+  fill: none;
+}
+
+.header-icon {
+  width: 21px;
+  height: 21px;
+  display: block;
+  stroke: currentColor;
+  fill: none;
 }
 
 .primary-button,
@@ -594,7 +647,7 @@ textarea:focus {
 .primary-button {
   background: linear-gradient(135deg, #0ea5e9, #38bdf8);
   color: white;
-  box-shadow: 0 14px 30px rgba(56, 189, 248, 0.5);
+  box-shadow: 0 5px 30px rgba(56, 189, 248, 0.5);
 }
 
 .primary-button:hover {
@@ -639,7 +692,7 @@ textarea:focus {
   padding: 5px 10px;
   font-size: 12px;
   border: 1px solid var(--border-soft);
-  background: rgba(15, 23, 42, 0.7);
+  background: rgb(48, 49, 52, 0.7);
   color: var(--fg-muted);
   cursor: pointer;
   transition: background var(--transition), border-color var(--transition),
@@ -741,6 +794,7 @@ textarea:focus {
   flex-direction: column;
   gap: 10px;
   height: 100%;
+  min-height: 0;
 }
 
 .creative-set-header {
@@ -760,7 +814,7 @@ textarea:focus {
   padding: 8px 12px;
   font-size: 13px;
   border: 1px dashed var(--border-soft);
-  background: rgba(15, 23, 42, 0.8);
+  background: rgb(48, 49, 52, 0.8);
   cursor: pointer;
   color: var(--fg-muted);
   transition: border-color var(--transition), background var(--transition),
@@ -791,6 +845,7 @@ textarea:focus {
   grid-template-columns: repeat(auto-fill, 120px);
   gap: 8px;
   overflow-y: auto;
+  min-height: 0;
 }
 
 .creative-card {
@@ -1247,6 +1302,11 @@ textarea:focus {
   position: relative;
 }
 
+.columns-menu {
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
 .history-card.ok {
   border-color: rgba(46, 204, 113, .35);
   box-shadow: inset 0 0 0 1px rgba(46, 204, 113, .15);
@@ -1534,13 +1594,50 @@ textarea:focus {
   align-items: center;
 }
 
+/* Стрелка */
+/* кнопка-стрелка для сворачивания/разворачивания в деревьях */
+.tree-toggle {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 
+  color: var(--text-color);
+  opacity: 0.85;
+  transition: background 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
+}
+
+.tree-toggle:hover {
+  opacity: 1;
+  background: var(--bg-muted);
+}
+
+.tree-toggle:active {
+  transform: scale(0.96);
+}
+
+.tree-toggle:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
+}
+
+/* чтобы svg/иконка нормально наследовала цвет */
+.tree-toggle svg {
+  display: block;
+}
 /* «шапка» списков — липкая */
 .users-lists-top {
   position: sticky;
-  top: -20px;
+  top: 0;
   z-index: 5;
-  background: #f8fafc;
+  background: var(--bg);
+  padding-top: 8px;
   padding-bottom: 8px;
 }
 
@@ -1633,6 +1730,11 @@ code {
   backdrop-filter: blur(10px);
   max-width: 410px;
 }
+
+:root[data-theme="dark"] .aud-ms-menu{
+  background-image: linear-gradient(137deg, #53565c, #2a2b2d);
+}
+
 /* столбик по всей ширине контейнера */
 .pill-select.column {
   display: flex;
@@ -1710,4 +1812,2469 @@ code {
     transform: translateX(0);
     opacity: 1;
   }
+}
+
+/* =========================================================
+   THEME: LIGHT — NEUMORPHISM PACK
+   Вставь в самый конец style.css
+   ========================================================= */
+
+/* 0) Fallback-переменные (у тебя местами используются другие имена) */
+:root[data-theme="light"]{
+  --text-color: var(--fg);
+  --border-color: var(--border-soft);
+  --accent-color: var(--accent);
+}
+
+/* 1) Токены neumorphism */
+:root[data-theme="light"]{
+  /* базовый нейтральный фон как на референсе */
+  --bg: #e7eaef;
+  --bg-2: #eef1f6;
+
+  --fg: #111827;
+  --fg-muted: #6b7280;
+
+  /* акцент оставляем голубым, но делаем мягче */
+  --accent: #2aa8f2;
+  --accent-soft: rgba(42, 168, 242, 0.16);
+
+  /* neumorphism shadows */
+  --neu-shadow-out: 10px 10px 22px rgba(163, 177, 198, 0.65),
+                    -10px -10px 22px rgba(255, 255, 255, 0.95);
+  --neu-shadow-out-sm: 6px 6px 14px rgba(163, 177, 198, 0.55),
+                       -6px -6px 14px rgba(255, 255, 255, 0.92);
+
+  --neu-shadow-in: inset 6px 6px 12px rgba(163, 177, 198, 0.55),
+                   inset -6px -6px 12px rgba(255, 255, 255, 0.92);
+
+  --neu-shadow-in-sm: inset 4px 4px 10px rgba(163, 177, 198, 0.50),
+                      inset -4px -4px 10px rgba(255, 255, 255, 0.90);
+
+  --radius-xl: 20px;
+}
+
+/* 2) Фон страницы: ровный, “молочный”, без цветных радиалок */
+:root[data-theme="light"] html,
+:root[data-theme="light"] body,
+:root[data-theme="light"] #root{
+  background: radial-gradient(1200px 700px at 20% 10%, #f7f9fc 0%, transparent 60%),
+              radial-gradient(900px 600px at 80% 75%, #f3f6fb 0%, transparent 65%),
+              linear-gradient(180deg, var(--bg-2), var(--bg));
+  color: var(--fg);
+}
+
+/* 3) “Стекло” превращаем в neumorphism surface */
+:root[data-theme="light"] .glass,
+:root[data-theme="light"] .sidebar,
+:root[data-theme="light"] .app-main,
+:root[data-theme="light"] .mobile-card,
+:root[data-theme="light"] .creative-set-content,
+:root[data-theme="light"] .creative-sets-list{
+  background: var(--bg) !important;
+  border: 0 !important;
+  box-shadow: var(--neu-shadow-out) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-radius: var(--radius-xl) !important;
+}
+
+/* 4) Header: чуть “поднятый”, но спокойный */
+:root[data-theme="light"] .app-header{
+  background: var(--bg) !important;
+  box-shadow: var(--neu-shadow-out-sm) !important;
+  border: 0 !important;
+}
+
+:root[data-theme="light"] .app-title{
+  color: rgba(17,24,39,.9);
+  letter-spacing: .10em;
+}
+
+/* 5) Tabs / list items: hover — приподнято, active — “вдавлено” */
+:root[data-theme="light"] .sidebar-tab{
+  color: rgba(17,24,39,.60) !important;
+}
+
+:root[data-theme="light"] .sidebar-tab:hover{
+  background: var(--bg) !important;
+  box-shadow: var(--neu-shadow-out-sm);
+  transform: translateX(2px);
+}
+
+:root[data-theme="light"] .sidebar-tab.active{
+  color: var(--accent) !important;
+  background: var(--bg) !important;
+  box-shadow: var(--neu-shadow-in) !important;
+}
+
+:root[data-theme="light"] .sidebar-tab.active::before{
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(42,168,242,.14);
+}
+
+/* 6) Карточки пресетов: neumorphism */
+:root[data-theme="light"] .preset-card{
+  background: var(--bg) !important;
+  border: 0 !important;
+  box-shadow: var(--neu-shadow-out-sm) !important;
+}
+
+:root[data-theme="light"] .preset-card:hover{
+  box-shadow: 14px 14px 30px rgba(163, 177, 198, 0.70),
+             -14px -14px 30px rgba(255, 255, 255, 0.98) !important;
+  border-color: transparent !important;
+}
+
+/* “Add-card” тоже в стиле neumorphism */
+:root[data-theme="light"] .preset-card.add-card{
+  background: var(--bg) !important;
+  box-shadow: var(--neu-shadow-in) !important;
+}
+
+/* Fast карточка: не жёлтая “плашка”, а мягкий акцент */
+:root[data-theme="light"] .preset-card.fast{
+  background: linear-gradient(180deg, rgba(42,168,242,.10), var(--bg)) !important;
+  box-shadow: var(--neu-shadow-out-sm) !important;
+}
+
+/* 7) Инпуты/селекты: “вдавленные” поля */
+:root[data-theme="light"] input,
+:root[data-theme="light"] select,
+:root[data-theme="light"] textarea,
+:root[data-theme="light"] .cabinet-select select{
+  background: var(--bg) !important;
+  border: 0 !important;
+  box-shadow: var(--neu-shadow-in-sm) !important;
+  color: var(--fg) !important;
+}
+
+:root[data-theme="light"] input:focus,
+:root[data-theme="light"] select:focus,
+:root[data-theme="light"] textarea:focus{
+  box-shadow: var(--neu-shadow-in-sm), 0 0 0 3px rgba(42,168,242,.16) !important;
+}
+
+/* 8) Кнопки */
+:root[data-theme="light"] .icon-button,
+:root[data-theme="light"] .outline-button{
+  background: var(--bg) !important;
+  border: 0 !important;
+  box-shadow: var(--neu-shadow-out-sm) !important;
+  color: rgba(17,24,39,.60) !important;
+}
+
+:root[data-theme="light"] .icon-button:hover,
+:root[data-theme="light"] .outline-button:hover{
+  color: var(--accent) !important;
+}
+
+:root[data-theme="light"] .icon-button:active,
+:root[data-theme="light"] .outline-button:active{
+  box-shadow: var(--neu-shadow-in-sm) !important;
+  transform: translateY(1px);
+}
+
+:root[data-theme="light"] .primary-button{
+  border: 0 !important;
+  background: linear-gradient(145deg, rgba(42,168,242,.95), rgba(14,165,233,.85)) !important;
+  color: #fff !important;
+  box-shadow: 10px 10px 24px rgba(42,168,242,.25),
+             -10px -10px 24px rgba(255,255,255,.95) !important;
+}
+
+:root[data-theme="light"] .primary-button:active{
+  filter: saturate(0.98);
+  transform: translateY(1px);
+}
+
+/* 9) Pills: обычные — поднятые, active — вдавленные */
+:root[data-theme="light"] .pill{
+  background: var(--bg) !important;
+  border: 0 !important;
+  box-shadow: var(--neu-shadow-out-sm) !important;
+  color: rgba(17,24,39,.62) !important;
+}
+
+:root[data-theme="light"] .pill.active{
+  box-shadow: var(--neu-shadow-in-sm) !important;
+  color: var(--accent) !important;
+}
+
+/* 10) Table / users-lists: тоже neumorphism */
+:root[data-theme="light"] .users-lists-top{
+  background: transparent !important;
+}
+
+:root[data-theme="light"] .users-lists-table{
+  background: var(--bg) !important;
+  border: 0 !important;
+  box-shadow: var(--neu-shadow-out) !important;
+}
+
+:root[data-theme="light"] .users-lists-header{
+  background: var(--bg) !important;
+  box-shadow: var(--neu-shadow-in-sm) !important;
+}
+
+:root[data-theme="light"] .users-lists-row:nth-child(odd){
+  background: rgba(255,255,255,.35) !important;
+}
+
+/* 11) Context menu — чтобы не было “чужого белого” */
+:root[data-theme="light"] .context-menu{
+  background: var(--bg) !important;
+  border: 0 !important;
+  box-shadow: var(--neu-shadow-out) !important;
+}
+
+:root[data-theme="light"] .context-menu-item:hover{
+  background: rgba(255,255,255,.55) !important;
+}
+
+/* 12) Мелочь: чуть приятнее рендер текста */
+:root[data-theme="light"] body,
+:root[data-theme="light"] button,
+:root[data-theme="light"] input,
+:root[data-theme="light"] select,
+:root[data-theme="light"] textarea{
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+/* =========================================================
+   DARK THEME — GLASS MORPHISM tuned for DARK LOW-POLY BG
+   Вставь в самый конец style.css
+   ========================================================= */
+
+:root[data-theme="dark"]{
+  /* подставь свою картинку (пример) */
+  --bg-image: none;
+
+  /* базовые цвета */
+  --fg: rgba(255,255,255,.92);
+  --fg-muted: rgba(255,255,255,.60);
+
+  /* акцент (ледяной cyan хорошо сочетается с графитом) */
+  --accent: #38bdf8;
+  --accent-soft: rgba(56,189,248,.16);
+
+  /* “smoky glass” — чуть светлее, чтобы отделялось от чёрного low-poly */
+  --glass-a: rgba(255,255,255,.09);
+  --glass-b: rgba(255,255,255,.045);
+  --glass-c: rgba(255,255,255,.03);
+
+  --border-soft: rgba(255,255,255,.16);
+  --border-strong: rgba(255,255,255,.24);
+
+  --shadow-glass: 0 22px 60px rgba(0,0,0,.60);
+  --shadow-soft: 0 14px 34px rgba(0,0,0,.50);
+
+  --blur: 20px;
+  --sat: 130%;
+  --radius-xl: 18px;
+
+  /* фолбэки для твоих var(...) */
+  --text-color: var(--fg);
+  --border-color: var(--border-soft);
+  --accent-color: var(--accent);
+  --bg-muted: rgba(255,255,255,.06);
+}
+
+/* Фон: картинка + ровный оверлей (важно для читабельности) */
+:root[data-theme="dark"] html,
+:root[data-theme="dark"] body,
+:root[data-theme="dark"] #root{
+  background:
+    /* ровное затемнение, чтобы стекло читалось */
+    linear-gradient(180deg, rgba(0,0,0,.55), rgba(0,0,0,.72)),
+    /* мягкая виньетка */
+    radial-gradient(900px 520px at 50% 0%, rgba(255,255,255,.05), transparent 65%),
+    var(--bg-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+
+  color: var(--fg);
+}
+
+/* Единый “настоящий” glass для крупных контейнеров */
+:root[data-theme="dark"] .sidebar,
+:root[data-theme="dark"] .app-main,
+:root[data-theme="dark"] .drawer,
+:root[data-theme="dark"] .users-lists-table,
+:root[data-theme="dark"] .popup-window,
+:root[data-theme="dark"] .confirm-window{
+  background: linear-gradient(135deg, var(--glass-a), var(--glass-b)) !important;
+  border: 1px solid var(--border-soft) !important;
+  box-shadow: var(--shadow-glass) !important;
+
+  backdrop-filter: blur(var(--blur)) saturate(var(--sat)) brightness(1.05);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat)) brightness(1.05);
+
+  border-radius: var(--radius-xl) !important;
+  position: relative;
+  overflow: hidden;
+}
+
+:root[data-theme="dark"] .glass {
+  background: linear-gradient(135deg, var(--glass-a), var(--glass-b));
+  border: 1px solid var(--border-soft) !important;
+  box-shadow: var(--shadow-glass) !important;
+
+  backdrop-filter: blur(var(--blur)) saturate(var(--sat)) brightness(1.05);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat)) brightness(1.05);
+
+  border-radius: var(--radius-xl) !important;
+  position: relative;
+  overflow: hidden;
+}
+
+
+/* Блик + внутренняя линия */
+:root[data-theme="dark"] .glass::before,
+:root[data-theme="dark"] .sidebar::before,
+:root[data-theme="dark"] .app-main::before,
+:root[data-theme="dark"] .drawer::before,
+:root[data-theme="dark"] .users-lists-table::before{
+  content:"";
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  background:
+    radial-gradient(700px 280px at 18% 10%, rgba(255,255,255,.16), transparent 60%),
+    radial-gradient(520px 260px at 88% 0%, rgba(56,189,248,.10), transparent 62%);
+  opacity:.85;
+}
+
+:root[data-theme="dark"] .glass::after,
+:root[data-theme="dark"] .sidebar::after,
+:root[data-theme="dark"] .app-main::after,
+:root[data-theme="dark"] .drawer::after,
+:root[data-theme="dark"] .users-lists-table::after{
+  content:"";
+  position:absolute;
+  inset:1px;
+  border-radius: calc(var(--radius-xl) - 1px);
+  pointer-events:none;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.10);
+  opacity:.9;
+}
+
+/* Header — чуть плотнее стекла */
+:root[data-theme="dark"] .app-header{
+  background: linear-gradient(135deg, rgba(255,255,255,.10), rgba(255,255,255,.05)) !important;
+  border-bottom: 1px solid rgba(255,255,255,.14) !important;
+  box-shadow: var(--shadow-soft) !important;
+  backdrop-filter: blur(calc(var(--blur) + 6px)) saturate(var(--sat)) brightness(1.05);
+  -webkit-backdrop-filter: blur(calc(var(--blur) + 6px)) saturate(var(--sat)) brightness(1.05);
+}
+
+/* Карточки (чуть легче/тоньше, чтобы не перегружать) */
+:root[data-theme="dark"] .preset-card,
+:root[data-theme="dark"] .creative-card,
+:root[data-theme="dark"] .drawer-item,
+:root[data-theme="dark"] .history-card,
+:root[data-theme="dark"] .tree-card{
+  background: linear-gradient(135deg, rgba(255,255,255,.075), rgba(255,255,255,.03)) !important;
+  border: 1px solid rgba(255,255,255,.14) !important;
+  box-shadow: 0 12px 34px rgba(0,0,0,.45) !important;
+  backdrop-filter: blur(16px) saturate(125%) brightness(1.04);
+  -webkit-backdrop-filter: blur(16px) saturate(125%) brightness(1.04);
+}
+
+:root[data-theme="dark"] .preset-card:hover,
+:root[data-theme="dark"] .creative-card:hover,
+:root[data-theme="dark"] .drawer-item:hover,
+:root[data-theme="dark"] .history-card:hover{
+  border-color: rgba(56,189,248,.42) !important;
+  box-shadow: 0 16px 44px rgba(0,0,0,.55), 0 0 0 1px rgba(56,189,248,.12) inset !important;
+}
+
+/* Inputs */
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea,
+:root[data-theme="dark"] .cabinet-select select{
+  background: rgba(255,255,255,.05) !important;
+  border: 1px solid rgba(255,255,255,.16) !important;
+  color: rgba(255,255,255,.92) !important;
+  backdrop-filter: blur(14px) saturate(120%) brightness(1.03);
+  -webkit-backdrop-filter: blur(14px) saturate(120%) brightness(1.03);
+}
+
+:root[data-theme="dark"] input:focus,
+:root[data-theme="dark"] select:focus,
+:root[data-theme="dark"] textarea:focus{
+  border-color: rgba(56,189,248,.70) !important;
+  box-shadow: 0 0 0 3px rgba(56,189,248,.14) !important;
+}
+
+/* Context menu (чтобы не был белым) */
+:root[data-theme="dark"] .context-menu{
+  background: rgba(10,12,16,.72) !important;
+  border: 1px solid rgba(255,255,255,.16) !important;
+  color: rgba(255,255,255,.92) !important;
+  box-shadow: var(--shadow-glass) !important;
+  backdrop-filter: blur(18px) saturate(120%);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
+}
+:root[data-theme="dark"] .context-menu-item:hover{
+  background: rgba(255,255,255,.06) !important;
+}
+
+/* Backdrops */
+:root[data-theme="dark"] .drawer-backdrop,
+:root[data-theme="dark"] .popup-overlay,
+:root[data-theme="dark"] .crop-modal-backdrop{
+  background: rgba(0,0,0,.55) !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* =========================================================
+   DARK — GLASS (NO GLOW / NO HIGHLIGHTS)
+   оставляем серые прозрачные контейнеры, убираем подсветки
+   ========================================================= */
+
+/* 1) Убираем “блики” на стекле (пятна) */
+:root[data-theme="dark"] .glass::before,
+:root[data-theme="dark"] .sidebar::before,
+:root[data-theme="dark"] .app-main::before,
+:root[data-theme="dark"] .drawer::before,
+:root[data-theme="dark"] .users-lists-table::before{
+  content: none !important;
+}
+
+/* 2) Убираем внутреннюю подсветку-рамку и делаем чистую тонкую линию */
+:root[data-theme="dark"] .glass::after,
+:root[data-theme="dark"] .sidebar::after,
+:root[data-theme="dark"] .app-main::after,
+:root[data-theme="dark"] .drawer::after,
+:root[data-theme="dark"] .users-lists-table::after{
+  content: none !important;
+}
+
+:root[data-theme="dark"] .glass,
+:root[data-theme="dark"] .sidebar,
+:root[data-theme="dark"] .app-main,
+:root[data-theme="dark"] .drawer,
+:root[data-theme="dark"] .users-lists-table,
+:root[data-theme="dark"] .popup-window,
+:root[data-theme="dark"] .confirm-window{
+  box-shadow:
+    var(--shadow-glass),
+    inset 0 0 0 1px rgba(255,255,255,.10) !important;
+}
+
+/* 3) Убираем неон на hover у карточек/строк — только аккуратная тень */
+:root[data-theme="dark"] .preset-card:hover,
+:root[data-theme="dark"] .creative-card:hover,
+:root[data-theme="dark"] .drawer-item:hover,
+:root[data-theme="dark"] .history-card:hover{
+  border-color: rgba(255,255,255,.18) !important;
+  box-shadow: 0 14px 38px rgba(0,0,0,.55) !important;
+}
+
+/* selected без “свечения” */
+:root[data-theme="dark"] .drawer-item.selected{
+  border-color: rgba(56,189,248,.35) !important;
+  background: rgba(56,189,248,.10) !important;
+  box-shadow: 0 14px 38px rgba(0,0,0,.55) !important;
+  transform: none !important;
+}
+
+/* 4) Фокус инпутов без glow-ореола */
+:root[data-theme="dark"] input:focus,
+:root[data-theme="dark"] select:focus,
+:root[data-theme="dark"] textarea:focus{
+  box-shadow: none !important;
+  border-color: rgba(255,255,255,.26) !important; /* просто чуть четче */
+}
+
+/* 5) Активная точка в табах — без “свечения” */
+:root[data-theme="dark"] .sidebar-tab.active::before{
+  box-shadow: none !important;
+}
+
+/* 6) Loading overlay — убираем грязный радиальный блик */
+:root[data-theme="dark"] .loading-overlay{
+  background: transparent !important;
+}
+
+/* =========================================================
+   DARK THEME — CLEAN GLASS (без четких рамок) + layout fixes
+   Вставь в конец style.css
+   ========================================================= */
+
+:root[data-theme="dark"]{
+  /* чуть мягче стекло, без “подсветок” */
+  --glass-a: rgba(255,255,255,.075);
+  --glass-b: rgba(255,255,255,.030);
+
+  /* границы делаем почти невидимыми */
+  --border-soft: rgba(255,255,255,.06);
+
+  /* тени оставляем как разделение вместо рамок */
+  --shadow-glass: 0 22px 60px rgba(0,0,0,.58);
+  --shadow-soft:  0 12px 28px rgba(0,0,0,.48);
+}
+
+/* 1) Убираем четкие рамки/границы (и внутренние линии/блики) */
+:root[data-theme="dark"] .glass,
+:root[data-theme="dark"] .sidebar,
+:root[data-theme="dark"] .app-main,
+:root[data-theme="dark"] .drawer,
+:root[data-theme="dark"] .users-lists-table,
+:root[data-theme="dark"] .popup-window,
+:root[data-theme="dark"] .confirm-window{
+  border: none !important;                /* нет четкой рамки */
+  outline: none !important;
+  box-shadow: var(--shadow-glass) !important;  /* разделяем тенью */
+}
+
+/* если у тебя включены “блики” через ::before/::after — отключаем */
+:root[data-theme="dark"] .glass::before,
+:root[data-theme="dark"] .sidebar::before,
+:root[data-theme="dark"] .app-main::before,
+:root[data-theme="dark"] .drawer::before,
+:root[data-theme="dark"] .users-lists-table::before,
+:root[data-theme="dark"] .glass::after,
+:root[data-theme="dark"] .sidebar::after,
+:root[data-theme="dark"] .app-main::after,
+:root[data-theme="dark"] .drawer::after,
+:root[data-theme="dark"] .users-lists-table::after{
+  display: none !important;
+}
+
+/* 2) Левый сайдбар “прибить” к краю + убрать внешние отступы */
+:root[data-theme="dark"] .app-root{
+  padding: 0 !important;   /* убираем отступы от краев окна */
+  gap: 0 !important;       /* header и body соприкасаются */
+}
+
+/* 3) Header и Sidebar квадратные и соприкасаются */
+:root[data-theme="dark"] .app-header{
+  margin: 0 !important;
+  border-radius: 0 !important;
+}
+
+:root[data-theme="dark"] .app-body{
+  gap: 0 !important; /* чтобы sidebar и main стояли вплотную */
+}
+
+:root[data-theme="dark"] .sidebar{
+  border-radius: 0 !important;  /* квадратный */
+  /* чтобы был “прибит” к левому краю — без внешних отступов */
+  margin: 0 !important;
+}
+
+/* если хочешь, чтобы только главный контент имел “воздух” */
+:root[data-theme="dark"] .app-main{
+  border-radius: 14px !important; /* можно оставить округление у контента */
+  margin: 12px !important;        /* отступ от краев/сайдбара */
+}
+
+/* 4) Убрать диагональную полоску на карточке (split-card) */
+:root[data-theme="dark"] .split-card{
+  background: linear-gradient(135deg, rgba(255,255,255,.06), rgba(255,255,255,.03)) !important;
+  border: none !important;
+  box-shadow: 0 12px 34px rgba(0,0,0,.45) !important;
+}
+
+:root[data-theme="dark"] .split-card::before{
+  display: none !important; /* это и есть диагональная линия-разделитель */
+}
+
+:root[data-theme="dark"] .split-right{
+  border-left: none !important; /* убираем четкую вертикальную границу */
+}
+
+/* ИКОНКИ */
+
+.header-cabinet-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.header-user {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 14px;
+}
+
+.header-user-icon {
+  width: 20px;
+  height: 20px;
+  opacity: 0.9;
+}
+
+.sidebar-tab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tab-icon {
+  width: 18px;
+  height: 18px;
+  opacity: 0.9;
+}
+
+/* CabinetSelect styles */
+.cabinet-dd-label {
+  font-size: 12px;
+  opacity: 0.75;
+  margin-bottom: 6px;
+}
+
+.cabinet-dd-trigger {
+  width: 260px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  cursor: pointer;
+}
+
+.cabinet-dd-trigger.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.cabinet-dd-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.cabinet-dd-menu {
+  border-radius: 16px;
+  border: 1px solid var(--border-color);
+}
+
+.cabinet-dd-search {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  outline: none;
+}
+
+.cabinet-dd-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  max-height: 40px;
+}
+
+.cabinet-dd-item.active {
+  border-color: var(--border-color);
+}
+
+.cabinet-dd-item .id {
+  font-size: 12px;
+  opacity: 0.65;
+}
+
+/* --- Sidebar: remove active dot --- */
+.sidebar-tab::before,
+.sidebar-tab.active::before{
+  content: none !important;
+  display: none !important;
+}
+
+/* --- Sidebar collapse (grid-based) --- */
+.app-body{
+  --sidebar-w: 230px; /* открытый */
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  transition: grid-template-columns 180ms ease;
+}
+
+/* свернутый сайдбар */
+.app-body.sidebar-collapsed{
+  --sidebar-w: 64px;
+}
+
+/* зона слева для авто-раскрытия */
+.sidebar-hover-zone{
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  z-index: 50; /* если не срабатывает — подними до 500 */
+  background: transparent;
+}
+
+/* сайдбар занимает ширину колонки грида */
+.sidebar{
+  width: 100%;
+  overflow: hidden;
+  transition: padding 180ms ease;
+}
+
+.app-body.sidebar-collapsed .sidebar{
+  padding: 14px 8px;
+}
+
+
+/* убираем сдвиг hover в collapsed (чтобы не дергалось) */
+.app-body.sidebar-collapsed .sidebar-tab:hover{
+  transform: none;
+}
+
+
+
+/* 2) Иконка никогда не сжимается */
+.sidebar-tab .tab-icon{
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 18px;
+}
+.sidebar-tab .tab-icon svg{
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+
+/* 6) Чтобы hover не дёргал при наведении в collapsed */
+.app-body.sidebar-collapsed .sidebar-tab:hover{
+  transform: none;
+}
+
+/* FIX: одинаковый размер кнопок всегда */
+.sidebar-tab{
+  box-sizing: border-box;
+  height: 40px;
+  padding: 0 12px;
+  min-height: 40px;
+  line-height: normal;
+}
+
+/* если у тебя внутри текст/иконка — лучше без line-height на контейнере */
+.sidebar-tab{
+  line-height: normal;        /* оставь normal если влияет на вертикаль */
+}
+
+/* FIX: в collapsed НЕ трогаем padding/height */
+.app-body.sidebar-collapsed .sidebar-tab{
+  padding: 0 12px !important; /* главное */
+  height: 40px !important;
+  min-height: 40px !important;
+}
+
+/* collapsed: схлопываем место под текст, но не меняем размер кнопки */
+.app-body.sidebar-collapsed .sidebar-tab{
+  grid-template-columns: 18px 0fr;
+  column-gap: 0;
+  justify-content: center;
+}
+
+/* Иконка не должна влиять на высоту строки */
+.sidebar-tab .tab-icon,
+.sidebar-tab .tab-icon svg{
+  width: 18px;
+  height: 18px;
+  display: block;
+  flex: 0 0 18px;
+}
+
+/* Collapsed: не меняем padding/height, только прячем текст */
+.app-body.sidebar-collapsed .sidebar-tab{
+  justify-content: center;
+  gap: 0;
+  padding: 0 12px !important;
+  height: 40px !important;
+}
+
+
+/* ===== FINAL SIDEBAR TAB FIX (оставить только это) ===== */
+
+.sidebar-tab{
+  appearance: none;
+  -webkit-appearance: none;
+
+  margin: 0;
+  border: 0;
+  box-sizing: border-box;
+
+  height: 40px;
+  min-height: 40px;
+  padding: 0 12px;
+
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  font: inherit;
+  line-height: 1;            /* убирает baseline-скачки */
+  vertical-align: middle;
+
+  background: transparent;
+  cursor: pointer;
+
+  transition: background var(--transition),
+              color var(--transition),
+              transform var(--transition-fast);
+  will-change: transform;
+}
+
+.sidebar-tab .tab-icon,
+.sidebar-tab .tab-icon svg{
+  width: 18px;
+  height: 18px;
+  display: block;
+  flex: 0 0 18px;
+}
+
+.sidebar-tab .tab-label{
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* collapsed — геометрию не меняем */
+.app-body.sidebar-collapsed .sidebar-tab{
+  justify-content: center;
+  gap: 0;
+  padding: 0 12px;
+  height: 40px;
+  min-height: 40px;
+}
+
+/* прячем текст без width:0 */
+.app-body.sidebar-collapsed .sidebar-tab .tab-label{
+  opacity: 0;
+  -webkit-mask-size: 0% 100%;
+          mask-size: 0% 100%;
+  pointer-events: none;
+}
+
+/* чтобы в collapsed hover не дёргал */
+.app-body.sidebar-collapsed .sidebar-tab:hover{
+  transform: none;
+}
+
+/* чтобы overflow:auto реально работал внутри грида */
+.app-body { min-height: 0; }
+
+.sidebar,
+.app-main {
+  min-height: 0;
+}
+
+/* на всякий — часто контент внутри тоже должен уметь сжиматься */
+.content-section {
+  min-height: 0;
+}
+
+/* Chrome / Edge */
+*::-webkit-scrollbar{ width: 10px; height: 10px; }
+*::-webkit-scrollbar-track{ background: transparent; }
+*::-webkit-scrollbar-thumb{
+  background: rgba(255,255,255,.22);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+/* важное: вся цепочка должна уметь сжиматься */
+.content-section { min-height: 0; }
+.creative-layout { min-height: 0; height: 100%; }
+
+/* левый список наборов — если длинный, пусть скроллится */
+.creative-sets-list{
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ПРАВАЯ ПАНЕЛЬ: тут должен быть скролл */
+.creative-set-content{
+  min-height: 0;
+  overflow-y: auto;   /* <- вместо hidden */
+  overflow-x: hidden;
+}
+
+/* внутренности не фиксируем по высоте, чтобы не клипалось */
+.creative-set-inner{
+  height: auto;       /* если где-то было height:100% */
+  min-height: 0;
+}
+
+/* grid НЕ скроллим, он просто растёт внутри .creative-set-content */
+.creative-grid{
+  overflow: visible !important;
+  min-height: auto;
+  align-content: start;
+}
+
+/* 1) ВАЖНО: main не скроллим */
+.app-main{
+  overflow: hidden !important;
+  min-height: 0;
+}
+
+/* 2) Контент секции тоже не скроллим — отдаём высоту внутрь */
+.content-section{
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden !important;
+}
+
+/* 3) А вот здесь — скролл для Аудитории */
+.users-lists-root{
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+/* 4) Если у тебя таблица “внутри” отдельного блока — можно так */
+.users-lists-table{
+  min-height: 0;
+}
+
+/* Страницы/секции должны уметь скроллиться */
+.content-section.glass{
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  min-height: 0;
+}
+
+/* вернуть прокрутку главной области */
+:root[data-theme="dark"] .app-main{
+  overflow: auto !important;
+  min-height: 0;
+}
+
+/* и разрешить скролл именно секции страницы (где таблица/аудитории) */
+:root[data-theme="dark"] .content-section.glass{
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  min-height: 0;
+}
+
+
+/* LISTS: контейнер вкладки занимает остаток высоты секции */
+.users-lists-root{
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* верхняя панель не сжимается */
+.users-lists-top{
+  flex: 0 0 auto;
+}
+
+/* ВОТ ЗДЕСЬ СКРОЛЛ */
+.users-lists-table{
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto !important;   /* вместо overflow: hidden */
+}
+
+/* ---- Tabs (Audiences page) ---- */
+.audiences-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+}
+
+.aud-tabs{
+  display:flex;
+  gap:6px;
+  padding:4px;
+  border-radius:14px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border-color);
+  margin-top: -14px;
+}
+
+.aud-tab{
+  appearance:none;
+  border:0;
+  background:transparent;
+  color: var(--text-color);
+  padding:8px 12px;
+  border-radius:12px;
+  cursor:pointer;
+  font-weight:600;
+  opacity:.8;
+}
+
+.aud-tab.active{
+  background: rgba(255,255,255,0.10);
+  opacity:1;
+}
+
+.audiences-header-right{
+  display:flex;
+  align-items:center;
+  gap:10px;
+}
+
+/* ---- Users Lists toolbar ---- */
+.users-lists-toolbar{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:10px 0 12px;
+}
+
+.users-lists-toolbar-left{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  min-width: 420px;
+}
+
+.users-lists-pager{
+  display:flex;
+  gap:8px;
+  align-items:center;
+}
+
+.users-lists-toolbar-right{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-left:auto;
+}
+
+.users-lists-mode{
+  height:36px;
+  border-radius:10px;
+  padding:0 10px;
+  border:1px solid var(--border-color);
+  background: var(--bg-muted);
+  color: var(--text-color);
+}
+
+.users-lists-search{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  border:1px solid var(--border-color);
+  background: var(--bg-muted);
+  border-radius:12px;
+  padding:6px 8px;
+  height:36px;
+  min-width: 260px;
+}
+
+.users-lists-search input{
+  border:0;
+  outline:0;
+  background:transparent;
+  color: var(--text-color);
+  width:100%;
+}
+
+.users-lists-kebab{
+  position:relative;
+}
+
+.kebab-menu{
+  position:absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 260px;
+  padding:8px;
+  border-radius:12px;
+  border:1px solid var(--border-color);
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  z-index: 50;
+}
+
+.kebab-item{
+  width:100%;
+  text-align:left;
+  padding:10px 10px;
+  border-radius:10px;
+  border:1px solid var(--border-color);
+  background: rgba(255,255,255,0.06);
+  color: var(--text-color);
+  cursor:pointer;
+}
+
+.kebab-item:disabled{
+  opacity:.5;
+  cursor:not-allowed;
+}
+
+.users-lists-subbar{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  padding: 0 0 10px;
+}
+
+/* ===== Users Lists: page + arrows + kebab in subbar ===== */
+
+.users-lists-page{
+  font-size: 13px;
+  color: var(--fg-muted);
+  padding: 0 4px;
+  user-select: none;
+}
+
+.nav-arrow{
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--fg-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition),
+              transform var(--transition-fast), border-color var(--transition);
+}
+
+.nav-arrow:hover{
+  background: var(--bg-muted);
+  color: var(--accent);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.nav-arrow:disabled{
+  opacity: .45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.users-lists-subbar{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 0 10px;
+}
+
+.users-lists-subbar-left{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* квадратная кнопка “три точки” */
+.kebab-button{
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--fg-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition),
+              transform var(--transition-fast), border-color var(--transition);
+}
+
+.kebab-button:hover{
+  background: var(--bg-muted);
+  color: var(--accent);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.kebab-icon{
+  width: 16px;
+  height: 16px;
+  display: block;
+  fill: currentColor; /* важно для точек */
+}
+
+/* меню оставляем как было, но можно чуть аккуратнее */
+.users-lists-kebab{ position: relative; }
+
+.kebab-menu{
+  position:absolute;
+  top: calc(100% + 8px);
+  left: 0;              /* меню под кнопкой слева */
+  right: auto;
+  min-width: 260px;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 50;
+  position: absolute;
+  background: #313131;
+}
+
+
+
+/* 3) Самое главное — стили для option */
+:root[data-theme="dark"] select option,
+:root[data-theme="dark"] select optgroup {
+  background-color: #1f232b;
+  color: #f2f5fa;
+}
+
+/* History date picker */
+.history-date-picker {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.history-date-picker input[type="date"] {
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-muted);
+  color: var(--fg);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+:root[data-theme="dark"] .history-date-picker input[type="date"] {
+  background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.16);
+  color: rgba(255,255,255,.92);
+}
+
+:root[data-theme="dark"] .history-date-picker input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+}
+
+/* Settings page */
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border-color);
+  width: fit-content;
+}
+
+.settings-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-color);
+  padding: 8px 16px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-weight: 600;
+  opacity: 0.8;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.settings-tab.active {
+  background: rgba(255,255,255,0.10);
+  opacity: 1;
+}
+
+.settings-tab:hover {
+  opacity: 1;
+}
+
+.settings-content {
+  margin-top: 20px;
+}
+
+.settings-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-soft);
+  transition: background 0.15s;
+}
+
+.settings-checkbox:hover {
+  background: rgba(255,255,255,0.08);
+}
+
+.settings-checkbox input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+}
+
+:root[data-theme="light"] .settings-tabs {
+  background: rgba(0,0,0,0.04);
+}
+
+:root[data-theme="light"] .settings-tab.active {
+  background: rgba(0,0,0,0.08);
+}
+
+:root[data-theme="light"] .settings-checkbox {
+  background: rgba(0,0,0,0.02);
+}
+
+:root[data-theme="light"] .settings-checkbox:hover {
+  background: rgba(0,0,0,0.05);
+}
+
+/* ============================================
+   CSS СТИЛИ ДЛЯ ВКЛАДКИ КОМПАНИИ
+   Добавить в style.css
+   ============================================ */
+
+/* === Подвкладки в сайдбаре === */
+.sidebar-tab-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-subtabs {
+  display: flex;
+  position: relative;
+  flex-direction: column;
+  padding-left: 32px;
+  margin-top: 4px;
+  gap: 2px;
+}
+
+.sidebar-tree {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+
+  color: #8f8f91;
+  pointer-events: none;
+}
+
+.app-body.sidebar-collapsed .sidebar-subtabs {
+  opacity: 1;
+  pointer-events: none;
+}
+
+.sidebar-subtab {
+  display: flex;
+  align-items: center;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  opacity: 0.7;
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, opacity 0.15s;
+  height: 32px;
+  padding: 0 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.app-body.sidebar-collapsed .sidebar-subtab {
+  opacity: 0;
+}
+
+.sidebar-subtab.disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.sidebar-subtab:hover {
+  background: rgba(255, 255, 255, 0.08);
+  opacity: 1;
+}
+
+.sidebar-subtab.active {
+  background: rgba(255, 255, 255, 0.12);
+  opacity: 1;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+:root[data-theme="light"] .sidebar-subtab:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"] .sidebar-subtab.active {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+/* === Таблица компаний === */
+.companies-table-wrapper {
+  width: 100%;
+  overflow: hidden;
+}
+
+.companies-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+}
+
+.companies-count {
+  font-size: 14px;
+  color: var(--fg);
+  opacity: 0.7;
+}
+
+.companies-loading {
+  padding: 40px;
+  text-align: center;
+  color: var(--fg);
+  opacity: 0.6;
+}
+
+.companies-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.companies-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  table-layout: fixed;
+}
+
+.companies-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.companies-table th {
+  background: rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--border-soft);
+  padding: 12px 16px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--fg);
+  opacity: 0.9;
+  white-space: nowrap;
+  user-select: none;
+  cursor: default;
+  transition: background 0.15s;
+}
+
+.companies-table th.sortable {
+  cursor: pointer;
+}
+
+.companies-table th.sortable:hover {
+  background: rgba(255, 255, 255, 0.10);
+}
+
+.companies-table th.sorted {
+  color: var(--accent);
+}
+
+.companies-table th.dragging {
+  opacity: 0.5;
+  background: rgba(var(--accent-rgb), 0.15);
+}
+
+.companies-table th .col-label {
+  display: inline;
+}
+
+.companies-table th .sort-icon {
+  margin-left: 6px;
+  font-size: 12px;
+}
+
+.companies-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.companies-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.companies-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Ссылка на название */
+.company-name-text {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Статусы */
+.company-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.company-status.status-active {
+  color: #4caf50;
+}
+
+.company-status.status-blocked {
+  color: #9e9e9e;
+}
+
+.company-status.status-deleted {
+  color: #f44336;
+}
+
+.company-status.status-draft {
+  color: #ff9800;
+}
+
+/* Светлая тема */
+:root[data-theme="light"] .companies-toolbar {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+:root[data-theme="light"] .companies-table-scroll {
+  background: rgba(0, 0, 0, 0.01);
+}
+
+:root[data-theme="light"] .companies-table th {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+:root[data-theme="light"] .companies-table th.sortable:hover {
+  background: rgba(0, 0, 0, 0.07);
+}
+
+:root[data-theme="light"] .companies-table td {
+  border-bottom-color: rgba(0, 0, 0, 0.06);
+}
+
+:root[data-theme="light"] .companies-table tbody tr:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+/* Адаптив для мобильных */
+@media (max-width: 768px) {
+  .companies-table th,
+  .companies-table td {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  
+  .companies-toolbar {
+    flex-wrap: wrap;
+  }
+}
+
+/* === Companies View Tabs === */
+.companies-section {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.companies-view-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 1px;
+  flex-shrink: 0;
+}
+
+.companies-view-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 12px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg);
+  opacity: 0.7;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all 0.15s;
+}
+
+.companies-view-tab:hover {
+  opacity: 1;
+}
+
+.companies-view-tab.active {
+  opacity: 1;
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* === Companies Toolbar === */
+.companies-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+.companies-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.companies-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.companies-create-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 7px;
+  padding: 5px 12px !important;
+}
+
+.companies-create-btn .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.companies-refresh-btn {
+  background: #ffffff00;
+  border-radius: 7px;
+  border: 1px solid #7b7b7b3b;
+}
+
+.companies-refresh-btn .icon {
+  width: 18px;
+  height: 18px;
+  transition: transform 0.3s;
+}
+
+.companies-refresh-btn .icon.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* === Companies Table Container === */
+.companies-table-wrapper {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.companies-table-container {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.companies-table-container.loading .companies-table-scroll {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.companies-loading-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.1);
+  z-index: 10;
+}
+
+.companies-table-scroll {
+  flex: 1;
+  overflow: auto;
+  transition: opacity 0.2s;
+}
+
+/* === Companies Table === */
+.companies-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  table-layout: fixed;
+}
+
+.companies-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.companies-table tfoot {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+}
+
+.companies-table th {
+  background: rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--border-soft);
+  padding: 10px 12px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--fg);
+  opacity: 0.9;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.companies-table th.col-checkbox,
+.companies-table td.col-checkbox {
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  text-align: center;
+  padding: 8px;
+}
+
+.companies-table th.col-toggle,
+.companies-table td.col-toggle {
+  width: 50px;
+  min-width: 50px;
+  max-width: 50px;
+  text-align: center;
+  padding: 8px;
+}
+
+.companies-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.companies-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.companies-table tbody tr.selected {
+  background: rgba(99, 102, 241, 0.1);
+}
+
+/* Totals row */
+.totals-row {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.totals-row td {
+  border-top: 1px solid var(--border-soft);
+  border-bottom: none;
+  padding: 12px;
+  font-size: 13px;
+}
+
+/* === Mini Toggle === */
+.toggle-mini {
+  width: 32px;
+  height: 18px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.15);
+  cursor: pointer;
+  position: relative;
+  transition: background 0.2s;
+}
+
+.toggle-mini.on {
+  background: var(--accent);
+}
+
+.toggle-mini.toggling {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.toggle-mini .toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+  transition: left 0.2s;
+}
+
+.toggle-mini.on .toggle-knob {
+  left: 16px;
+}
+
+/* === Company Name Cell === */
+.company-name-cell {
+  display: flex;
+  align-items: center;
+  position: relative;
+  min-width: 0;
+}
+
+.company-name-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.company-name-actions {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  background: #2c2c2c;
+  padding-left: 13px;
+  gap: 4px;
+}
+
+.companies-table tbody tr:hover .company-name-actions {
+  display: flex;
+}
+
+.icon-button.mini {
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+}
+
+.icon-button.mini .icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* === Light theme === */
+:root[data-theme="light"] .companies-table th {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+:root[data-theme="light"] .companies-table td {
+  border-bottom-color: rgba(0, 0, 0, 0.06);
+}
+
+:root[data-theme="light"] .companies-table tbody tr:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+:root[data-theme="light"] .companies-table tbody tr.selected {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+:root[data-theme="light"] .totals-row {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+:root[data-theme="light"] .toggle-mini {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+:root[data-theme="light"] .company-name-actions {
+  background: linear-gradient(to right, transparent, var(--bg) 20%);
+}
+
+:root[data-theme="light"] .companies-loading-overlay {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+/*компании override*/
+/* === Companies View Tabs Layout === */
+.companies-view-tabs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
+.companies-view-tabs-left {
+  display: flex;
+  gap: 0;
+}
+
+.companies-view-tabs-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* === Table header/footer opacity fix === */
+.companies-table th {
+  opacity: 1 !important;
+}
+
+.totals-row td {
+  opacity: 1 !important;
+}
+
+/* Table header/footer solid bg */
+:root[data-theme="dark"] .companies-table th,
+:root[data-theme="dark"] .totals-row {
+  background: #29292c !important;
+}
+
+:root[data-theme="light"] .companies-table th,
+:root[data-theme="light"] .totals-row {
+  background: rgb(255, 255, 255) !important;
+}
+
+/* === Checkbox styling (круглые) === */
+.companies-table input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-soft);
+  border-radius: 4px;
+  cursor: pointer;
+  position: relative;
+  transition: all 0.15s;
+  background: transparent;
+  padding: 7px 7px;
+}
+
+/* Круглая область клика */
+.companies-table input[type="checkbox"]::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.companies-table input[type="checkbox"]:hover {
+  border-color: var(--accent);
+}
+
+.companies-table input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.companies-table input[type="checkbox"]:checked::after {
+  content: "✓";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: white;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.companies-table input[type="checkbox"]:indeterminate {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.companies-table input[type="checkbox"]:indeterminate::after {
+  content: "−";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: white;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+/* === Date Range Picker === */
+.drp-wrapper {
+  position: relative;
+}
+
+.drp-anchor {
+  position: relative;
+}
+
+.drp-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--bg-muted, rgba(255,255,255,0.06));
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--fg);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.drp-trigger:hover {
+  border-color: var(--accent);
+}
+
+.drp-sep {
+  opacity: 0.5;
+}
+
+.drp-dropdown {
+  position: absolute !important;
+  top: calc(100% + 8px);
+  right: 0;
+  margin-right: 8px;
+  z-index: 10000;
+  display: flex;
+  background: linear-gradient(135deg, #2b2c2e, #272727) !important;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  overflow: visible;
+}
+
+.drp-presets {
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  border-right: 1px solid var(--border-soft);
+  min-width: 160px;
+}
+
+.drp-preset {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 14px;
+  color: var(--fg);
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+
+.drp-preset:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Будущие даты — отключены */
+.drp-day.future {
+  opacity: 0.25;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.drp-day.future:hover {
+  background: transparent;
+}
+/*                           */
+
+.drp-main {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.drp-inputs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.drp-inputs input {
+  width: 120px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  font-size: 14px;
+  text-align: center;
+  background: var(--bg-muted, rgba(255,255,255,0.05));
+  color: var(--fg);
+}
+
+.drp-inputs input.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+.drp-more {
+  margin-left: auto;
+}
+
+.drp-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.drp-nav-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 8px;
+  cursor: pointer;
+  color: var(--fg);
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+
+.drp-nav-btn:hover {
+  opacity: 1;
+}
+
+.drp-nav-btn .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.drp-nav-label {
+  font-size: 16px;
+  font-weight: 600;
+  min-width: 160px;
+  text-align: center;
+}
+
+.drp-calendars {
+  display: flex;
+  gap: 24px;
+}
+
+.drp-calendar {
+  width: 280px;
+}
+
+.drp-month-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  opacity: 0.7;
+  margin-bottom: 12px;
+  text-transform: lowercase;
+}
+
+.drp-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.drp-weekday {
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  opacity: 0.5;
+  padding: 4px;
+}
+
+.drp-days {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.drp-week {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.drp-day {
+  appearance: none;
+  border: none;
+  background: transparent;
+  width: 36px;
+  height: 36px;
+  border-radius: 4px;
+  font-size: 14px;
+  color: var(--fg);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.drp-day:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.drp-day.other-month {
+  opacity: 0.3;
+}
+
+.drp-day.weekend {
+  color: #ef4444;
+}
+
+.drp-day.weekend.other-month {
+  opacity: 0.2;
+}
+
+.drp-day.today {
+  border: none;
+  background: transparent;
+  position: relative;
+}
+
+.drp-day.today.selected::after {
+  background: white;
+}
+
+.drp-day.selected {
+  background: var(--accent);
+  color: white;
+}
+
+.drp-day.today::after {
+  content: "";
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 16px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+
+.drp-day.in-range {
+  background: #5ecdff29;
+  border-radius: 4px;
+}
+
+.drp-day.range-start {
+  border-radius: 30% 0 0 30%;
+}
+
+.drp-day.range-end {
+  border-radius: 0 30% 30% 0;
+}
+
+.drp-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-soft);
+}
+
+/* Light theme overrides */
+:root[data-theme="light"] .drp-dropdown {
+  background: var(--bg, #fff);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+}
+
+:root[data-theme="light"] .drp-preset:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"] .drp-day:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"] .drp-day.in-range {
+  background: rgba(99, 102, 241, 0.15);
+}
+
+:root[data-theme="light"] .company-name-actions {
+  background: #f5f5f5;
+}
+
+/* портал DateRangePicker */
+.drp-portal { 
+  --bg-panel: var(--bg-panel, #fff);
+  --text: var(--text, #111);
+  border: 1px solid rgba(0,0,0,0.06);
+  backdrop-filter: blur(6px);
+}
+
+/* небольшие стили для pill и buttons внутри */
+.drp-portal .pill {
+  background: transparent;
+  border: 1px solid rgba(0,0,0,0.06);
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.drp-portal .pill.active { background: rgba(0,0,0,0.06); }
+
+.drp-portal input[type="date"] {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #ddd);
+}
+
+/* кнопка-анкёр (если нужно) */
+.outline-button[ref] { position: relative; z-index: 10; }
+
+/* fallback на мобильных экранах — показывать как полноэкранный снизу */
+@media (max-width: 640px) {
+  .drp-portal { left: 8px !important; right: 8px !important; top: auto !important; bottom: 12px !important; width: auto !important; }
+}
+
+/* Статусы модерации */
+.company-status.status-pending {
+  color: #f59e0b;
+}
+
+.company-status.status-banned {
+  color: #ef4444;
+}
+
+.company-status.status-mixed {
+  color: #eab308;
+}
+
+/* Вложенные строки */
+.company-name-cell-nested {
+  vertical-align: top;
+  padding-top: 12px !important;
+}
+
+.nested-company-name,
+.nested-group-name {
+  font-weight: 600;
+  font-size: 13px;
+  opacity: 0.85;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nested-group-name {
+  font-weight: 500;
+  opacity: 0.75;
+  padding-left: 8px;
+}
+
+/* Чередование цветов по компаниям */
+.companies-table tbody tr.company-even {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.companies-table tbody tr.company-odd {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.companies-table tbody tr.company-color-0 {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.companies-table tbody tr.company-color-1 {
+  background: rgba(56, 189, 248, 0.04);
+}
+
+:root[data-theme="light"] .companies-table tbody tr.company-even {
+  background: rgba(0, 0, 0, 0.01);
+}
+
+:root[data-theme="light"] .companies-table tbody tr.company-odd {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+:root[data-theme="light"] .companies-table tbody tr.company-color-0 {
+  background: rgba(0, 0, 0, 0.01);
+}
+
+:root[data-theme="light"] .companies-table tbody tr.company-color-1 {
+  background: rgba(56, 189, 248, 0.06);
+}
+
+/* Счётчик на табах */
+.tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  margin-left: 6px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.company-status.status-stopped {
+  color: #9e9e9e;
+}
+.company-status.status-stopped .status-dot {
+  background-color: #9e9e9e;
 }
