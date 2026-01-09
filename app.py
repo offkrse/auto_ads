@@ -22,7 +22,7 @@ import random
 
 app = FastAPI()
 
-VersionApp = "0.999"
+VersionApp = "1.0"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2238,6 +2238,96 @@ async def save_notifications(payload: dict):
     except Exception as e:
         log_error(f"notifications/save[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+# -------------------------------------------------------------------
+# Lead Forms (VK lead_ads -> local cache)
+# -------------------------------------------------------------------
+def leadforms_path(user_id: str) -> Path:
+    p = USERS_DIR / str(user_id) / "others"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "leadforms.json"
+
+@secure_auto.get("/leadforms/get")
+@secure_api.get("/leadforms/get")
+def leadforms_get(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """
+    Возвращает локально сохранённый список лидформ для user_id.
+    Формат: {"leadforms":[{"id":"...", "name":"..."}, ...]}
+    Если файла нет — вернёт {"leadforms": []}
+    """
+    ensure_user_structure(user_id)
+    p = leadforms_path(user_id)
+    if not p.exists():
+        return {"leadforms": []}
+    try:
+        txt = p.read_text(encoding="utf-8").strip()
+        if not txt:
+            return {"leadforms": []}
+        j = json.loads(txt)
+        # допускаем как список, так и объект {items: [...]}
+        if isinstance(j, dict) and isinstance(j.get("items"), list):
+            items = j["items"]
+        elif isinstance(j, list):
+            items = j
+        else:
+            items = []
+        # нормализуем: только id/name
+        out = []
+        for it in items:
+            try:
+                out.append({"id": str(it.get("id")), "name": it.get("name")})
+            except Exception:
+                continue
+        return {"leadforms": out}
+    except Exception as e:
+        log_error(f"leadforms_get[{user_id}] read error: {repr(e)}")
+        return {"leadforms": []}
+
+@secure_auto.get("/vk/lead_forms/fetch")
+@secure_api.get("/vk/lead_forms/fetch")
+def vk_lead_forms_fetch(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """
+    Запрашивает у VK /api/v1/lead_ads/lead_forms.json, сохраняет локально
+    в users/<user_id>/others/leadforms.json и возвращает сокращённый список.
+    """
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        return JSONResponse(status_code=400, content={"leadforms": [], "error": "Invalid cabinet or missing token"})
+    token = os.getenv(cab["token"])
+    if not token:
+        return JSONResponse(status_code=500, content={"leadforms": [], "error": f"Token {cab['token']} not found in .env"})
+
+    headers = {"Authorization": f"Bearer {token}"}
+    # VK endpoint, можно добавить limit/offset при необходимости
+    url = "https://ads.vk.com/api/v1/lead_ads/lead_forms.json?limit=200"
+    try:
+        resp = vk_request_with_retry("GET", url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            log_error(f"vk/lead_forms fetch VK error: {resp.status_code} {resp.text[:400]}")
+            return JSONResponse(status_code=502, content={"leadforms": [], "error": f"VK API error: {resp.status_code}"})
+        j = resp.json()
+        items = j.get("items", []) if isinstance(j, dict) else []
+        out = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            iid = it.get("id")
+            name = it.get("name")
+            if iid and name:
+                out.append({"id": str(iid), "name": name})
+        # сохраняем локально (только список id/name)
+        try:
+            atomic_write_json(leadforms_path(user_id), out)
+        except Exception as e:
+            log_error(f"vk/lead_forms fetch save error user={user_id}: {repr(e)}")
+        return {"leadforms": out, "count": len(out)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"vk/lead_forms fetch exception: {repr(e)}")
+        return JSONResponse(status_code=502, content={"leadforms": [], "error": str(e)})
+
 
 # -------------------------------------
 #   PIXELS
