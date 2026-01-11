@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.47"
+VersionCyclop = "1.48"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1497,7 +1497,12 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             targetings["pads"] = placements
 
         budget_day = int(g.get("budget") or 0)
-        utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
+
+        # Для leadads UTM не включаем в payload (по требованию)
+        if objective == "leadads":
+            utm = None
+        else:
+            utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
 
         banners_payload = [{"name": f"Объявление {g_idx}", "urls": {"primary": {"id": ad_object_id}}}]
         max_price = compute_group_max_price(g)
@@ -1513,9 +1518,13 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
             "date_end": None,
             "age_restrictions": "18+",
             "package_id": package_id,
-            "utm": utm,
+            # "utm": ...  <-- добавляем ниже условно
             "banners": banners_payload,
         }
+
+        # Добавляем utm только если установлен (для leadads не будет)
+        if utm is not None:
+            group_payload["utm"] = utm
 
         pg_group = _build_priced_goal_group(company)
         if pg_group:
@@ -1544,6 +1553,7 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
 
     return payload
 
+
 # ============================ Создание плана ============================
 
 def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
@@ -1557,9 +1567,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     company = preset["company"]
     url = company.get("url")
     if not url:
-        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                           "Отсутствует URL компании (company.url)", "Missing company.url")
-        raise RuntimeError("Missing company.url")
+        # возможно это leadads — обработка ниже
+        pass
 
     # company может содержать дефолты
     company_adv = (company.get("advertiserInfo") or "").strip()
@@ -1568,18 +1577,37 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     company_name_tpl = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
     objective = company.get("targetAction", "socialengagement")
 
-    # Разрешаем URL -> id
-    try:
-        if objective == "site_conversions":
-            norm_url = normalize_site_url(url)
-            ad_object_id = create_url_v2(norm_url, tokens)
-            log.info("site_conversions URL normalized: %s -> %s (ad_object_id=%s)", url, norm_url, ad_object_id)
-        else:
-            ad_object_id = resolve_url_id(url, tokens)
-    except Exception as e:
-        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                           "Не удалось получить ad_object_id по URL", repr(e))
-        raise
+    # special-case: leadads — берем id формы из company.leadform_id и НЕ требуем company.url
+    if objective == "leadads":
+        leadform = company.get("leadform_id")
+        if leadform is None or str(leadform).strip() == "":
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "leadads требует company.leadform_id", "Missing company.leadform_id")
+            raise RuntimeError("Missing company.leadform_id for leadads")
+        try:
+            ad_object_id = int(leadform)
+        except Exception as e:
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "company.leadform_id должен быть числом", repr(e))
+            raise
+    else:
+        # Разрешаем URL -> id (как раньше) — только если не leadads
+        if not url:
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "Отсутствует URL компании (company.url)", "Missing company.url")
+            raise RuntimeError("Missing company.url")
+
+        try:
+            if objective == "site_conversions":
+                norm_url = normalize_site_url(url)
+                ad_object_id = create_url_v2(norm_url, tokens)
+                log.info("site_conversions URL normalized: %s -> %s (ad_object_id=%s)", url, norm_url, ad_object_id)
+            else:
+                ad_object_id = resolve_url_id(url, tokens)
+        except Exception as e:
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "Не удалось получить ad_object_id по URL", repr(e))
+            raise
 
     # --- cache for URL -> id (чтобы не дергать API много раз) ---
     url_id_cache: Dict[str, int] = {}
@@ -1752,7 +1780,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
         cta_text = (ad.get("button") or "visitSite").strip()
 
-        # --- bannerUrl -> url_id для баннера (если нет — используем company.url) ---
+        # --- bannerUrl -> url_id для баннера (если нет — используем company.url or leadform id) ---
         banner_url_raw = (
             (ad.get("bannerUrl") or "").strip()
             or (company.get("bannerUrl") or "").strip()
@@ -1760,7 +1788,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         )
 
         banner_url_id = ad_object_id
-        if banner_url_raw:
+        if objective != "leadads" and banner_url_raw:
             try:
                 banner_url_id = cached_url_id(banner_url_raw)
                 log.info("bannerUrl resolved: %s -> %s", banner_url_raw, banner_url_id)
@@ -1875,6 +1903,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     write_result_success(user_id, cabinet_id, preset_id, preset_name, trigger_time, id_company)
     return results
 
+
 # ============================ FAST ПЛАН ============================
 def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         user_id: str, cabinet_id: str,
@@ -1886,27 +1915,36 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
     """
     company = preset["company"]
     url = company.get("url")
-    if not url:
-        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                           "Отсутствует URL компании (company.url)", "Missing company.url")
-        raise RuntimeError("Missing company.url")
-
     company_adv = (company.get("advertiserInfo") or "").strip()
     company_logo = company.get("logoId")
     company_name_tpl = (company.get("companyName") or "Авто кампания").strip() or "Авто кампания"
     objective = company.get("targetAction", "socialengagement")
 
-    try:
-        if objective == "site_conversions":
-            norm_url = normalize_site_url(url)
-            ad_object_id = create_url_v2(norm_url, tokens)
-            log.info("site_conversions URL normalized: %s -> %s (ad_object_id=%s)", url, norm_url, ad_object_id)
-        else:
-            ad_object_id = resolve_url_id(url, tokens)
-    except Exception as e:
-        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                           "Не удалось получить ad_object_id по URL", repr(e))
-        raise
+    # special-case: leadads
+    if objective == "leadads":
+        leadform = company.get("leadform_id")
+        if leadform is None or str(leadform).strip() == "":
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "leadads требует company.leadform_id", "Missing company.leadform_id")
+            raise RuntimeError("Missing company.leadform_id for leadads")
+        try:
+            ad_object_id = int(leadform)
+        except Exception as e:
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "company.leadform_id должен быть числом", repr(e))
+            raise
+    else:
+        try:
+            if objective == "site_conversions":
+                norm_url = normalize_site_url(url)
+                ad_object_id = create_url_v2(norm_url, tokens)
+                log.info("site_conversions URL normalized: %s -> %s (ad_object_id=%s)", url, norm_url, ad_object_id)
+            else:
+                ad_object_id = resolve_url_id(url, tokens)
+        except Exception as e:
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "Не удалось получить ad_object_id по URL", repr(e))
+            raise
 
     # --- cache for URL -> id ---
     url_id_cache: Dict[str, int] = {}
@@ -2021,6 +2059,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 targetings["pads"] = placements
 
             budget_day = int(g.get("budget") or 0)
+            # Для leadads utm не включаем (см. build_ad_plan_payload логику)
             utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
             max_price_for_group = compute_group_max_price(g)
 
@@ -2046,8 +2085,10 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     or (preset.get("bannerUrl") or "").strip()
                 )
 
+                # По логике: если objective == "leadads" — всегда используем id формы (ad_object_id),
+                # даже если в bannerUrl что-то задано.
                 ad_url_id_for_banner = ad_object_id
-                if banner_url_raw:
+                if objective != "leadads" and banner_url_raw:
                     try:
                         ad_url_id_for_banner = cached_url_id(banner_url_raw)
                         log.info("FAST bannerUrl resolved: %s -> %s", banner_url_raw, ad_url_id_for_banner)
@@ -2314,6 +2355,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
     write_result_success(user_id, cabinet_id, preset_id, preset_name, trigger_time, id_company)
     return results
+
 # ============================ Основной цикл ============================
 
 def process_queue_once() -> None:
