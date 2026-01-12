@@ -22,7 +22,7 @@ import random
 
 app = FastAPI()
 
-VersionApp = "1.0"
+VersionApp = "1.1"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3596,6 +3596,200 @@ async def upload_creative(
         except Exception:
             pass
 
+
+# =====================================
+#   TRIGGERS API ENDPOINTS
+# =====================================
+
+def triggers_dir(user_id: str) -> Path:
+    p = USERS_DIR / str(user_id) / "triggers"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def trigger_presets_dir(user_id: str) -> Path:
+    p = USERS_DIR / str(user_id) / "trigger_presets"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def trigger_queue_path() -> Path:
+    return DATA_DIR / "trigger_queue.json"
+
+def read_trigger_queue() -> list:
+    path = trigger_queue_path()
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def write_trigger_queue(items: list):
+    atomic_write_json(trigger_queue_path(), items)
+
+def upsert_trigger_queue(trigger_id: str, user_id: str, cabinet_ids: list, status: str):
+    queue = read_trigger_queue()
+    existing = None
+    for item in queue:
+        if item.get("trigger_id") == trigger_id:
+            existing = item
+            break
+    if existing:
+        existing["user_id"] = user_id
+        existing["cabinet_ids"] = cabinet_ids
+        existing["status"] = status
+    else:
+        queue.append({"trigger_id": trigger_id, "user_id": user_id, "cabinet_ids": cabinet_ids, "status": status})
+    write_trigger_queue(queue)
+
+def remove_from_trigger_queue(trigger_id: str):
+    queue = read_trigger_queue()
+    queue = [item for item in queue if item.get("trigger_id") != trigger_id]
+    write_trigger_queue(queue)
+
+@secure_api.get("/triggers/list")
+@secure_auto.get("/triggers/list")
+def triggers_list(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    try:
+        ensure_user_structure(str(user_id))
+        tdir = triggers_dir(user_id)
+        triggers = []
+        for file in tdir.glob("trigger_*.json"):
+            try:
+                with open(file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    continue
+                cabinet_ids = data.get("cabinetIds", [])
+                if cabinet_id != "all" and "all" not in cabinet_ids and cabinet_id not in cabinet_ids:
+                    continue
+                mtime = file.stat().st_mtime
+                created_at = datetime.utcfromtimestamp(mtime).isoformat(timespec="seconds") + "Z"
+                triggers.append({
+                    "id": file.stem, "name": data.get("name", ""), "cabinetIds": cabinet_ids,
+                    "when": data.get("when", {}), "action": data.get("action", {}),
+                    "status": data.get("status", "active"), "createdAt": created_at
+                })
+            except Exception as e:
+                log_error(f"triggers/list skip {file}: {repr(e)}")
+        return {"triggers": triggers}
+    except Exception as e:
+        log_error(f"triggers/list FATAL user={user_id}: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+@secure_api.post("/triggers/save")
+@secure_auto.post("/triggers/save")
+async def triggers_save(payload: dict):
+    user_id = payload.get("user_id")
+    trigger_id = payload.get("trigger_id")
+    name = payload.get("name")
+    cabinet_ids = payload.get("cabinetIds", [])
+    when = payload.get("when", {})
+    action = payload.get("action", {})
+    status = payload.get("status", "active")
+    if not user_id or not trigger_id or not name:
+        raise HTTPException(400, "user_id, trigger_id and name required")
+    ensure_user_structure(user_id)
+    tdir = triggers_dir(user_id)
+    trigger_data = {"name": name, "cabinetIds": cabinet_ids, "when": when, "action": action, "status": status}
+    fpath = tdir / f"{trigger_id}.json"
+    atomic_write_json(fpath, trigger_data)
+    upsert_trigger_queue(trigger_id, user_id, cabinet_ids, status)
+    return {"status": "ok", "trigger_id": trigger_id}
+
+@secure_api.delete("/triggers/delete")
+@secure_auto.delete("/triggers/delete")
+def triggers_delete(user_id: str = Query(...), trigger_id: str = Query(...)):
+    ensure_user_structure(user_id)
+    tdir = triggers_dir(user_id)
+    fpath = tdir / f"{trigger_id}.json"
+    if fpath.exists():
+        fpath.unlink()
+    remove_from_trigger_queue(trigger_id)
+    return {"status": "deleted"}
+
+@secure_api.post("/triggers/status")
+@secure_auto.post("/triggers/status")
+async def triggers_status(payload: dict):
+    user_id = payload.get("user_id")
+    trigger_id = payload.get("trigger_id")
+    status = payload.get("status", "active")
+    if not user_id or not trigger_id:
+        raise HTTPException(400, "user_id and trigger_id required")
+    if status not in ("active", "deactive"):
+        raise HTTPException(400, "status must be 'active' or 'deactive'")
+    ensure_user_structure(user_id)
+    tdir = triggers_dir(user_id)
+    fpath = tdir / f"{trigger_id}.json"
+    if not fpath.exists():
+        raise HTTPException(404, "Trigger not found")
+    try:
+        with open(fpath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        raise HTTPException(500, "Cannot read trigger")
+    data["status"] = status
+    atomic_write_json(fpath, data)
+    cabinet_ids = data.get("cabinetIds", [])
+    upsert_trigger_queue(trigger_id, user_id, cabinet_ids, status)
+    return {"status": "ok"}
+
+@secure_api.get("/trigger_presets/list")
+@secure_auto.get("/trigger_presets/list")
+def trigger_presets_list(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    try:
+        ensure_user_structure(str(user_id))
+        tdir = trigger_presets_dir(user_id)
+        trigger_presets = []
+        for file in tdir.glob("trigger_preset_*.json"):
+            try:
+                with open(file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    continue
+                cabinet_ids = data.get("cabinetIds", [])
+                if cabinet_id != "all" and "all" not in cabinet_ids and cabinet_id not in cabinet_ids:
+                    continue
+                mtime = file.stat().st_mtime
+                created_at = datetime.utcfromtimestamp(mtime).isoformat(timespec="seconds") + "Z"
+                trigger_presets.append({
+                    "id": file.stem, "name": data.get("name", ""), "cabinetIds": cabinet_ids,
+                    "when": data.get("when", {}), "createdAt": created_at
+                })
+            except Exception as e:
+                log_error(f"trigger_presets/list skip {file}: {repr(e)}")
+        return {"trigger_presets": trigger_presets}
+    except Exception as e:
+        log_error(f"trigger_presets/list FATAL user={user_id}: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+@secure_api.post("/trigger_presets/save")
+@secure_auto.post("/trigger_presets/save")
+async def trigger_presets_save(payload: dict):
+    user_id = payload.get("user_id")
+    trigger_preset_id = payload.get("trigger_preset_id")
+    name = payload.get("name")
+    cabinet_ids = payload.get("cabinetIds", [])
+    when = payload.get("when", {})
+    if not user_id or not trigger_preset_id or not name:
+        raise HTTPException(400, "user_id, trigger_preset_id and name required")
+    ensure_user_structure(user_id)
+    tdir = trigger_presets_dir(user_id)
+    preset_data = {"name": name, "cabinetIds": cabinet_ids, "when": when}
+    fpath = tdir / f"{trigger_preset_id}.json"
+    atomic_write_json(fpath, preset_data)
+    return {"status": "ok", "trigger_preset_id": trigger_preset_id}
+
+@secure_api.delete("/trigger_presets/delete")
+@secure_auto.delete("/trigger_presets/delete")
+def trigger_presets_delete(user_id: str = Query(...), trigger_preset_id: str = Query(...)):
+    ensure_user_structure(user_id)
+    tdir = trigger_presets_dir(user_id)
+    fpath = tdir / f"{trigger_preset_id}.json"
+    if fpath.exists():
+        fpath.unlink()
+    return {"status": "deleted"}
 
 
 # -------------------------------------
