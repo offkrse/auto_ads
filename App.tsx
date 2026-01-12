@@ -67,6 +67,7 @@ type PresetCompany = {
   placements?: any[];
   siteAction?: string;
   sitePixel?: string;
+  leadform_id?: string;
   targetAction: string;
   trigger: string;
   time?: string;
@@ -797,6 +798,118 @@ const PixelSelect: React.FC<PixelSelectProps> = ({
     </div>
   );
 };
+
+// LeadFormSelect: single-select с поиском и порталом
+const LeadFormSelect: React.FC<{
+  leadForms: { id: string; name: string }[];
+  value: string; // выбранный id
+  disabled?: boolean;
+  placeholder?: string;
+  onSelect: (lf: { id: string; name: string }) => void;
+  onRefresh: () => void;
+}> = ({ leadForms, value, disabled, placeholder = "Выберите лидформу", onSelect, onRefresh }) => {
+  const [open, setOpen] = React.useState(false);
+  const [q, setQ] = React.useState("");
+  const wrapRef = React.useRef<HTMLDivElement | null>(null);
+  const menuRef = React.useRef<HTMLDivElement | null>(null);
+  const portalStyle = usePortalDropdownPosition(wrapRef, open && !disabled, {
+    desiredHeight: 260,
+    zIndex: 200000,
+  });
+  const { onScrollCapture } = usePreserveScroll(menuRef, [open, q, leadForms.length, value]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const handler = (e: PointerEvent) => {
+      const t = e.target as Node;
+      const wrap = wrapRef.current;
+      const menu = menuRef.current;
+      if (!wrap) return;
+      if (wrap.contains(t)) return;
+      if (menu && menu.contains(t)) return;
+      setOpen(false);
+    };
+    document.addEventListener("pointerdown", handler, true);
+    return () => document.removeEventListener("pointerdown", handler, true);
+  }, [open]);
+
+  const selected = leadForms.find(l => l.id === value) || null;
+
+  const list = React.useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return [...leadForms];
+    return leadForms.filter(lf => lf.name.toLowerCase().includes(s) || lf.id.toLowerCase().includes(s));
+  }, [leadForms, q]);
+
+  return (
+    <div ref={wrapRef} className="aud-ms" style={{ position: "relative" }}>
+      <div
+        className="aud-ms-input"
+        onClick={() => !disabled && setOpen(true)}
+        style={{ opacity: disabled ? 0.6 : 1, cursor: disabled ? "not-allowed" : "pointer" }}
+      >
+        <input
+          placeholder={placeholder}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onFocus={() => !disabled && setOpen(true)}
+          disabled={!!disabled}
+        />
+        <div className="tags">
+          {value ? <span className="pill active">{selected ? selected.name : value}</span> : <span className="hint">Не выбрано</span>}
+        </div>
+      </div>
+
+      {open && !disabled && createPortal(
+        <div
+          ref={menuRef}
+          className="aud-ms-menu"
+          onScrollCapture={onScrollCapture}
+          onMouseDown={(e) => e.preventDefault()}
+          style={{ ...portalStyle, padding: 8 }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <strong>Лидформы</strong>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <small style={{ opacity: 0.6 }}>{q ? "Поиск" : `${leadForms.length}`}</small>
+              <button type="button" title="Обновить список лидформ" onMouseDown={(e) => e.preventDefault()} onClick={() => { onRefresh(); }}>
+                ⟳
+              </button>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {list.map(lf => {
+              const active = lf.id === value;
+              return (
+                <div
+                  key={lf.id}
+                  className="glass"
+                  style={{ padding: "8px 10px", borderRadius: 10, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                  onClick={() => { onSelect(lf); setOpen(false); }}
+                >
+                  <button
+                    type="button"
+                    className={`pill ${active ? "active" : ""}`}
+                    style={{ textAlign: "left", flex: 1 }}
+                    onMouseDown={(e) => e.preventDefault()}
+                  >
+                    {lf.name}
+                  </button>
+                </div>
+              );
+            })}
+
+            {list.length === 0 && <div className="hint">Ничего не найдено</div>}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+};
+
+
 // === Компонент выпадающего списка аудиторий ===
 type AudiencesMultiSelectProps = {
   apiBase: string;
@@ -1336,6 +1449,9 @@ const PLACEMENTS_BY_TARGET: Record<string, PlacementNode[]> = {
         { key: "vk_feed", label: "Лента", id: 1265106 },
         { key: "vk_video", label: "В видео", id: 1010345 },
         { key: "vk_stories", label: "В историях", id: 2243453 },
+        { key: "vk_rewarded", label: "Vk mini apps просмотр", id: 1361696 },
+        { key: "vk_miniapps_pre", label: "Vk mini apps перед загрузкой", id: 1985149 },
+        { key: "vk_miniapps_near", label: "Vk mini apps рядом с контентом", id: 2243456 },
       ],
     },
   ],
@@ -1943,6 +2059,7 @@ async function apiJson(url: string, opts?: RequestInit) {
   }
   return json;
 }
+
 
 function buildAuthHeaders(): HeadersInit {
   const tg = (window as any).Telegram?.WebApp;
@@ -3035,6 +3152,7 @@ const App: React.FC = () => {
   } | null>(null);
 
   const [queueStatus, setQueueStatus] = useState<Record<string, "active" | "deactive">>({});
+
   // ----------- AUDIENCE -----------
   const [abstractAudiences, setAbstractAudiences] = useState<{name: string}[]>([]);
   const [newAbstractName, setNewAbstractName] = useState("");
@@ -3076,15 +3194,45 @@ const App: React.FC = () => {
   const [draggedColumnId, setDraggedColumnId] = useState<string | null>(null);
 
   // Groups sorting and columns
-  const [groupsSorting, setGroupsSorting] = useState<{ field: string; dir: "asc" | "desc" }>({ field: "created", dir: "desc" });
-  const [groupsColumns, setGroupsColumns] = useState<GroupsColumnConfig[]>(DEFAULT_GROUPS_COLUMNS);
+  const [groupsSorting, setGroupsSorting] = useState<{ field: string; dir: "asc" | "desc" }>(() => {
+    try {
+      const saved = localStorage.getItem("groupsSorting");
+      return saved ? JSON.parse(saved) : { field: "created", dir: "desc" };
+    } catch {
+      return { field: "created", dir: "desc" };
+    }
+  });
+
+  const [groupsColumns, setGroupsColumns] = useState<GroupsColumnConfig[]>(() => {
+    try {
+      const saved = localStorage.getItem("groupsColumns");
+      return saved ? JSON.parse(saved) : DEFAULT_GROUPS_COLUMNS;
+    } catch {
+      return DEFAULT_GROUPS_COLUMNS;
+    }
+  });
   const [draggedGroupColumnId, setDraggedGroupColumnId] = useState<string | null>(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState<Set<number>>(new Set());
   const [groupTogglingIds, setGroupTogglingIds] = useState<Set<number>>(new Set());
 
   // Ads sorting and columns
-  const [adsSorting, setAdsSorting] = useState<{ field: string; dir: "asc" | "desc" }>({ field: "created", dir: "desc" });
-  const [adsColumns, setAdsColumns] = useState<AdsColumnConfig[]>(DEFAULT_ADS_COLUMNS);
+  const [adsSorting, setAdsSorting] = useState<{ field: string; dir: "asc" | "desc" }>(() => {
+    try {
+      const saved = localStorage.getItem("adsSorting");
+      return saved ? JSON.parse(saved) : { field: "created", dir: "desc" };
+    } catch {
+      return { field: "created", dir: "desc" };
+    }
+  });
+
+  const [adsColumns, setAdsColumns] = useState<AdsColumnConfig[]>(() => {
+    try {
+      const saved = localStorage.getItem("adsColumns");
+      return saved ? JSON.parse(saved) : DEFAULT_ADS_COLUMNS;
+    } catch {
+      return DEFAULT_ADS_COLUMNS;
+    }
+  });
   const [draggedAdColumnId, setDraggedAdColumnId] = useState<string | null>(null);
   const [selectedAdIds, setSelectedAdIds] = useState<Set<number>>(new Set());
   const [adTogglingIds, setAdTogglingIds] = useState<Set<number>>(new Set());
@@ -3809,6 +3957,9 @@ const App: React.FC = () => {
     return !!tgInitData;
   }, [userId, tgInitData]);
 
+  // ===== Lead Forms =====
+  const [leadForms, setLeadForms] = useState<{ id: string; name: string }[]>([]);
+
   const [presets, setPresets] = useState<
     { preset_id: string; data: Preset; created_at?: string }[]
   >([]);
@@ -3825,6 +3976,7 @@ const App: React.FC = () => {
     open: boolean;
     adId: string | null;
   }>({ open: false, adId: null });
+
 
   // ===== Video picker perf: lazy render (ALL sets opened) =====
   const [pickerLimitBySet, setPickerLimitBySet] = useState<Record<string, number>>({});
@@ -3855,6 +4007,68 @@ const App: React.FC = () => {
     },
     []
   );
+
+  const loadLeadForms = async (force = false) => {
+    if (!userId || !selectedCabinetId) return;
+
+    const headers: Record<string, string> = {};
+    if (tgInitData) {
+      headers["x-tg-init-data"] = tgInitData;
+    }
+
+    try {
+      // 1️⃣ Пытаемся взять локальный кеш
+      if (!force) {
+        try {
+          const getUrl =
+            `${API_BASE}/leadforms/get` +
+            `?user_id=${encodeURIComponent(userId)}` +
+            `&cabinet_id=${encodeURIComponent(selectedCabinetId)}`;
+
+          const getResp = await fetch(getUrl, { headers });
+
+          if (getResp.ok) {
+            const getJson = await getResp.json();
+            const list = Array.isArray(getJson?.leadforms)
+              ? getJson.leadforms
+              : [];
+
+            if (list.length > 0) {
+              setLeadForms(list);
+              return;
+            }
+          }
+        } catch (e) {
+          console.warn("leadforms/get failed, fallback to fetch", e);
+        }
+      }
+
+      // 2️⃣ Фоллбек — тянем из VK
+      const fetchUrl =
+        `${API_BASE}/vk/lead_forms/fetch` +
+        `?user_id=${encodeURIComponent(userId)}` +
+        `&cabinet_id=${encodeURIComponent(selectedCabinetId)}`;
+
+      const fetchResp = await fetch(fetchUrl, { headers });
+
+      if (!fetchResp.ok) {
+        const text = await fetchResp.text();
+        throw new Error(`vk fetch failed: ${fetchResp.status} ${text}`);
+      }
+
+      const fetchJson = await fetchResp.json();
+      const list = Array.isArray(fetchJson?.leadforms)
+        ? fetchJson.leadforms
+        : [];
+
+      setLeadForms(list);
+    } catch (e) {
+      console.warn("loadLeadForms failed", e);
+      setLeadForms([]);
+    }
+  };
+
+
 
   // -------- SETTINGS TAB ---------
   // После других useState в App
@@ -3898,6 +4112,15 @@ const App: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (!presetDraft) return;
+
+    if (presetDraft.company?.targetAction === "leadads") {
+      loadLeadForms(false);
+    }
+  }, [presetDraft?.company?.targetAction, userId, selectedCabinetId]);
+
+
   // === SAVE COMPANIES SETTINGS ===
   useEffect(() => {
     localStorage.setItem("companiesSorting", JSON.stringify(companiesSorting));
@@ -3907,14 +4130,50 @@ const App: React.FC = () => {
     localStorage.setItem("companiesColumns", JSON.stringify(companiesColumns));
   }, [companiesColumns]);
 
+  useEffect(() => {
+    localStorage.setItem("groupsSorting", JSON.stringify(groupsSorting));
+  }, [groupsSorting]);
+
+  useEffect(() => {
+    localStorage.setItem("groupsColumns", JSON.stringify(groupsColumns));
+  }, [groupsColumns]);
+
+  useEffect(() => {
+    localStorage.setItem("adsSorting", JSON.stringify(adsSorting));
+  }, [adsSorting]);
+
+  useEffect(() => {
+    localStorage.setItem("adsColumns", JSON.stringify(adsColumns));
+  }, [adsColumns]);
+
+  // Кэш для таблиц VK (только списки, НЕ статистика - статистика зависит от дат)
+  const [vkDataCache, setVkDataCache] = useState<{
+    companies: { data: VkCompany[]; total: number; timestamp: number } | null;
+    groups: { data: VkGroup[]; timestamp: number } | null;
+    ads: { data: VkAd[]; timestamp: number } | null;
+  }>({ companies: null, groups: null, ads: null });
+
+  const CACHE_TTL = 15 * 60 * 1000; // 15 минут
+
   // Заменить fetchVkCompanies на:
-  const fetchVkCompanies = async (_forceRefresh = false) => {
+  const fetchVkCompanies = async (forceRefresh = false) => {
     if (!userId || !selectedCabinetId || selectedCabinetId === "all") return;
+
+    // Проверяем кэш ТОЛЬКО для списка компаний
+    const cached = vkDataCache.companies;
+    if (!forceRefresh && cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      setVkCompanies(cached.data);
+      setVkCompaniesTotal(cached.total);
+      // Статистику ВСЕГДА загружаем заново (зависит от дат)
+      if (cached.data.length > 0) {
+        await fetchVkCompaniesStats(cached.data.map(it => it.id));
+      }
+      return;
+    }
 
     setVkCompaniesLoading(true);
 
     try {
-      // Сначала узнаём общее количество
       const firstPage = await apiJson(
         `${API_BASE}/vk/ad_plans/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=0`
       );
@@ -3922,10 +4181,9 @@ const App: React.FC = () => {
       let items: VkCompany[] = firstPage?.items || [];
       const count = firstPage?.count || 0;
       
-      // Если есть ещё - загружаем остальные страницы
       if (count > 200) {
         const pages = Math.ceil(count / 200);
-        for (let page = 1; page < pages && page < 10; page++) { // максимум 10 страниц = 2000 записей
+        for (let page = 1; page < pages && page < 10; page++) {
           const nextPage = await apiJson(
             `${API_BASE}/vk/ad_plans/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=${page * 200}`
           );
@@ -3936,10 +4194,17 @@ const App: React.FC = () => {
       setVkCompanies(items);
       setVkCompaniesTotal(count);
 
-      // Загружаем статистику для всех
+      // Сохраняем в кэш ТОЛЬКО список
+      setVkDataCache(prev => ({
+        ...prev,
+        companies: { data: items, total: count, timestamp: Date.now() }
+      }));
+
+      // Загружаем статистику
       if (items.length > 0) {
         await fetchVkCompaniesStats(items.map(it => it.id));
       }
+
     } catch (e) {
       console.error("fetchVkCompanies error:", e);
       showPopup("Ошибка загрузки компаний");
@@ -3990,15 +4255,24 @@ const App: React.FC = () => {
     }
     
     setVkCompaniesStats(statsMap);
+    // НЕ сохраняем статистику в кэш - она зависит от дат
   };
 
-  const fetchVkGroups = async (_forceRefresh = false) => {
+  const fetchVkGroups = async (forceRefresh = false) => {
     if (!userId || !selectedCabinetId || selectedCabinetId === "all") return;
+
+    const cached = vkDataCache.groups;
+    if (!forceRefresh && cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      setVkGroups(cached.data);
+      if (cached.data.length > 0) {
+        await fetchVkGroupsStats(cached.data.map(it => it.id));
+      }
+      return;
+    }
 
     setVkGroupsLoading(true);
 
     try {
-      // Первая страница
       const firstPage = await apiJson(
         `${API_BASE}/vk/ad_groups/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=0`
       );
@@ -4006,7 +4280,6 @@ const App: React.FC = () => {
       let items: VkGroup[] = firstPage?.items || [];
       const count = firstPage?.count || 0;
       
-      // Загружаем остальные страницы
       if (count > 200) {
         const pages = Math.ceil(count / 200);
         for (let page = 1; page < pages && page < 10; page++) {
@@ -4018,10 +4291,16 @@ const App: React.FC = () => {
       }
       
       setVkGroups(items);
-
+      
+      setVkDataCache(prev => ({
+        ...prev,
+        groups: { data: items, timestamp: Date.now() }
+      }));
+      
       if (items.length > 0) {
         await fetchVkGroupsStats(items.map(it => it.id));
       }
+
     } catch (e) {
       console.error("fetchVkGroups error:", e);
       showPopup("Ошибка загрузки групп");
@@ -4060,7 +4339,6 @@ const App: React.FC = () => {
           const errorMsg = e?.message || "";
           
           if (errorMsg.includes("429") && attempts < maxAttempts) {
-            console.log(`Rate limit hit, waiting before retry ${attempts}/${maxAttempts}...`);
             await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
             continue;
           }
@@ -4075,13 +4353,21 @@ const App: React.FC = () => {
   };
 
   // === FETCH VK ADS ===
-  const fetchVkAds = async (_forceRefresh = false) => {
+  const fetchVkAds = async (forceRefresh = false) => {
     if (!userId || !selectedCabinetId || selectedCabinetId === "all") return;
+
+    const cached = vkDataCache.ads;
+    if (!forceRefresh && cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      setVkAds(cached.data);
+      if (cached.data.length > 0) {
+        await fetchVkAdsStats(cached.data.map(it => it.id));
+      }
+      return;
+    }
 
     setVkAdsLoading(true);
 
     try {
-      // Первая страница
       const firstPage = await apiJson(
         `${API_BASE}/vk/banners/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}&limit=200&offset=0`
       );
@@ -4089,7 +4375,6 @@ const App: React.FC = () => {
       let items: VkAd[] = firstPage?.items || [];
       const count = firstPage?.count || 0;
       
-      // Загружаем остальные страницы
       if (count > 200) {
         const pages = Math.ceil(count / 200);
         for (let page = 1; page < pages && page < 10; page++) {
@@ -4101,10 +4386,16 @@ const App: React.FC = () => {
       }
       
       setVkAds(items);
-
+      
+      setVkDataCache(prev => ({
+        ...prev,
+        ads: { data: items, timestamp: Date.now() }
+      }));
+      
       if (items.length > 0) {
         await fetchVkAdsStats(items.map(it => it.id));
       }
+
     } catch (e) {
       console.error("fetchVkAds error:", e);
       showPopup("Ошибка загрузки объявлений");
@@ -4125,7 +4416,6 @@ const App: React.FC = () => {
       const chunk = ids.slice(i, i + chunkSize);
       const idsStr = chunk.join(",");
 
-      // Retry logic
       let attempts = 0;
       const maxAttempts = 3;
       
@@ -4138,19 +4428,16 @@ const App: React.FC = () => {
           for (const stat of (response?.items || [])) {
             statsMap[stat.id] = stat;
           }
-          break; // Успех - выходим из while
+          break;
         } catch (e: any) {
           attempts++;
           const errorMsg = e?.message || "";
           
-          // Если это 429 (flood limit) - ждём и пробуем снова
           if (errorMsg.includes("429") && attempts < maxAttempts) {
-            console.log(`Rate limit hit, waiting before retry ${attempts}/${maxAttempts}...`);
-            await new Promise(resolve => setTimeout(resolve, 1000 * attempts)); // 2s, 4s, 6s
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
             continue;
           }
           
-          // Другие ошибки или исчерпаны попытки
           console.error("fetchVkAdsStats error:", e);
           break;
         }
@@ -4159,6 +4446,11 @@ const App: React.FC = () => {
     
     setVkAdsStats(statsMap);
   };
+
+  // Сбрасываем кэш при смене кабинета
+  useEffect(() => {
+    setVkDataCache({ companies: null, groups: null, ads: null });
+  }, [selectedCabinetId]);
 
   // === SUB1 & REVENUE ===
   const fetchUserSettings = async () => {
@@ -4232,16 +4524,39 @@ const App: React.FC = () => {
   // Обновление только статистики при смене дат (без перезагрузки списков)
   useEffect(() => {
     if (activeTab === "campaigns" && selectedCabinetId && selectedCabinetId !== "all" && campaignsSubTab === "companies") {
-      // Перезагружаем только статистику с новыми датами
-      if (vkCompanies.length > 0) {
-        fetchVkCompaniesStats(vkCompanies.map(c => c.id), companiesDateFrom, companiesDateTo);
-      }
-      if (vkGroups.length > 0) {
-        fetchVkGroupsStats(vkGroups.map(g => g.id), companiesDateFrom, companiesDateTo);
-      }
-      if (vkAds.length > 0) {
-        fetchVkAdsStats(vkAds.map(a => a.id), companiesDateFrom, companiesDateTo);
-      }
+      const updateStats = async () => {
+        // Показываем loading только если есть данные
+        const hasCompanies = vkCompanies.length > 0;
+        const hasGroups = vkGroups.length > 0;
+        const hasAds = vkAds.length > 0;
+        
+        if (hasCompanies) setVkCompaniesLoading(true);
+        if (hasGroups) setVkGroupsLoading(true);
+        if (hasAds) setVkAdsLoading(true);
+        
+        try {
+          // Перезагружаем ТОЛЬКО статистику с новыми датами
+          const promises: Promise<void>[] = [];
+          
+          if (hasCompanies) {
+            promises.push(fetchVkCompaniesStats(vkCompanies.map(c => c.id), companiesDateFrom, companiesDateTo));
+          }
+          if (hasGroups) {
+            promises.push(fetchVkGroupsStats(vkGroups.map(g => g.id), companiesDateFrom, companiesDateTo));
+          }
+          if (hasAds) {
+            promises.push(fetchVkAdsStats(vkAds.map(a => a.id), companiesDateFrom, companiesDateTo));
+          }
+          
+          await Promise.all(promises);
+        } finally {
+          setVkCompaniesLoading(false);
+          setVkGroupsLoading(false);
+          setVkAdsLoading(false);
+        }
+      };
+      
+      updateStats();
     }
   }, [companiesDateFrom, companiesDateTo]);
 
@@ -6495,48 +6810,50 @@ const App: React.FC = () => {
               <IconSettings className="icon" />
             </button>
             
-            {groupsColumnsMenuOpen && (
-              <div 
-                className="columns-menu glass"
-                style={{
-                  position: "absolute",
-                  top: "100%",
-                  right: 0,
-                  marginTop: 8,
-                  padding: 12,
-                  borderRadius: 12,
-                  minWidth: 200,
-                  zIndex: 100,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                }}
-              >
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>Столбцы</div>
-                {groupsColumns.map(col => (
-                  <label 
-                    key={col.id} 
-                    style={{ 
-                      display: "flex", 
-                      alignItems: "center", 
-                      gap: 8, 
-                      cursor: "pointer",
-                      fontSize: 13,
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={col.visible}
-                      onChange={() => {
-                        setGroupsColumns(prev => 
-                          prev.map(c => c.id === col.id ? { ...c, visible: !c.visible } : c)
-                        );
+            {groupsColumnsMenuOpen && 
+              createPortal(
+                <div 
+                  className="columns-menu glass"
+                  style={{
+                    position: "absolute",
+                    top: 190,
+                    right: 100,
+                    marginTop: 8,
+                    padding: 12,
+                    borderRadius: 12,
+                    minWidth: 200,
+                    zIndex: 100,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>Столбцы</div>
+                  {groupsColumns.map(col => (
+                    <label 
+                      key={col.id} 
+                      style={{ 
+                        display: "flex", 
+                        alignItems: "center", 
+                        gap: 8, 
+                        cursor: "pointer",
+                        fontSize: 13,
                       }}
-                    />
-                    {col.label}
-                  </label>
-                ))}
-              </div>
+                    >
+                      <input
+                        type="checkbox"
+                        checked={col.visible}
+                        onChange={() => {
+                          setGroupsColumns(prev => 
+                            prev.map(c => c.id === col.id ? { ...c, visible: !c.visible } : c)
+                          );
+                        }}
+                      />
+                      {col.label}
+                    </label>
+                  ))}
+                </div>,
+              document.body
             )}
           </div>
         </div>
@@ -6803,48 +7120,50 @@ const App: React.FC = () => {
               <IconSettings className="icon" />
             </button>
             
-            {adsColumnsMenuOpen && (
-              <div 
-                className="columns-menu glass"
-                style={{
-                  position: "absolute",
-                  top: "100%",
-                  right: 0,
-                  marginTop: 8,
-                  padding: 12,
-                  borderRadius: 12,
-                  minWidth: 200,
-                  zIndex: 100,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                }}
-              >
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>Столбцы</div>
-                {adsColumns.map(col => (
-                  <label 
-                    key={col.id} 
-                    style={{ 
-                      display: "flex", 
-                      alignItems: "center", 
-                      gap: 8, 
-                      cursor: "pointer",
-                      fontSize: 13,
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={col.visible}
-                      onChange={() => {
-                        setAdsColumns(prev => 
-                          prev.map(c => c.id === col.id ? { ...c, visible: !c.visible } : c)
-                        );
+            {adsColumnsMenuOpen && 
+              createPortal(
+                <div 
+                  className="columns-menu glass"
+                  style={{
+                    position: "absolute",
+                    top: 190,
+                    right: 100,
+                    marginTop: 8,
+                    padding: 12,
+                    borderRadius: 12,
+                    minWidth: 200,
+                    zIndex: 100,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>Столбцы</div>
+                  {adsColumns.map(col => (
+                    <label 
+                      key={col.id} 
+                      style={{ 
+                        display: "flex", 
+                        alignItems: "center", 
+                        gap: 8, 
+                        cursor: "pointer",
+                        fontSize: 13,
                       }}
-                    />
-                    {col.label}
-                  </label>
-                ))}
-              </div>
+                    >
+                      <input
+                        type="checkbox"
+                        checked={col.visible}
+                        onChange={() => {
+                          setAdsColumns(prev => 
+                            prev.map(c => c.id === col.id ? { ...c, visible: !c.visible } : c)
+                          );
+                        }}
+                      />
+                      {col.label}
+                    </label>
+                  ))}
+                </div>,
+              document.body
             )}
           </div>
         </div>
@@ -7366,15 +7685,26 @@ const App: React.FC = () => {
           <label>Целевое действие</label>
           <select
             value={company.targetAction}
-            onChange={(e) =>
-              updateCompany({ targetAction: e.target.value })
-            }
+            onChange={(e) => {
+              const v = e.target.value;
+
+              // Формируем единый патч: ставим новую цель и при leadads очищаем пиксель/URL
+              const patch: Partial<PresetCompany> = { targetAction: v };
+              if (v === "leadads") {
+                patch.sitePixel = "";
+                patch.url = "";
+                // если хотите — сразу чистим и leadform_id: patch.leadform_id = "";
+              }
+
+              updateCompany(patch);
+            }}
           >
             <option value="">Не выбрано</option>
             <option value="socialengagement">Сообщение в группу</option>
             <option value="site_conversions">На сайт</option>
-            <option value="leadads">Лид</option>
+            <option value="leadads">Лидформа</option>
           </select>
+
         </div>
         {company.targetAction === "site_conversions" && (
           <div className="form-field">
@@ -7461,6 +7791,24 @@ const App: React.FC = () => {
             />
           </div>
         )}
+
+        {company.targetAction === "leadads" && (
+          <div className="form-field">
+            <label>Лидформа</label>
+
+            <LeadFormSelect
+              leadForms={leadForms}
+              value={company.leadform_id ?? ""}
+              disabled={selectedCabinetId === "all"}
+              placeholder={selectedCabinetId === "all" ? "Выберите кабинет (не all)" : "Выберите лидформу"}
+              onSelect={(lf) => {
+                updateCompany({ leadform_id: lf.id, url: "" });
+              }}
+              onRefresh={() => loadLeadForms(true)}
+            />
+          </div>
+        )}
+
         <div className="form-field">
           <label>Триггер</label>
           <select
@@ -7557,14 +7905,16 @@ const App: React.FC = () => {
             onChange={(e) => updateGroup({ budget: e.target.value })}
           />
         </div>
-        <div className="form-field">
-          <label>UTM</label>
-          <input
-            type="text"
-            value={group.utm}
-            onChange={(e) => updateGroup({ utm: e.target.value })}
-          />
-        </div>
+        {companyTarget !== "leadads" && (
+          <div className="form-field">
+            <label>UTM</label>
+            <input
+              type="text"
+              value={group.utm}
+              onChange={(e) => updateGroup({ utm: e.target.value })}
+            />
+          </div>
+        )}
         <div className="form-field">
           <label>Регионы</label>
           <RegionsTreeSelect
