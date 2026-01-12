@@ -7,7 +7,9 @@ import {
   IconLogo,
   IconHistory,
   IconSettings,
+  IconMisc,
 } from "./components/icons/SidebarIcons";
+import { TriggersPage } from "./components/TriggersPage";
 
 
 declare global {
@@ -393,7 +395,7 @@ async function cropImageToBlob(
   });
 }
 
-type TabId = "campaigns" | "creatives" | "audiences" | "logo" | "history" | "settings";
+type TabId = "campaigns" | "creatives" | "audiences" | "logo" | "history" | "settings" | "misc";
 type CampaignsSubTab = "presets" | "companies";
 type CompaniesViewTab = "campaigns" | "groups" | "ads";
 
@@ -3960,6 +3962,11 @@ const App: React.FC = () => {
   // ===== Lead Forms =====
   const [leadForms, setLeadForms] = useState<{ id: string; name: string }[]>([]);
 
+  // ===== Trigger Presets for preset editor =====
+  const [triggerPresets, setTriggerPresets] = useState<
+    { id: string; name: string }[]
+  >([]);
+
   const [presets, setPresets] = useState<
     { preset_id: string; data: Preset; created_at?: string }[]
   >([]);
@@ -5088,6 +5095,24 @@ const App: React.FC = () => {
             const fallback: Record<string,"active"|"deactive"> = {};
             (Array.isArray(pJson.presets) ? pJson.presets : []).forEach((p:any) => fallback[p.preset_id] = "active");
             setQueueStatus(fallback);
+          }
+        })(),
+
+        // Загрузка trigger presets для dropdown в редакторе пресета
+        (async () => {
+          try {
+            const tpResp = await fetchSecured(
+              `${API_BASE}/trigger_presets/list?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(cabId)}`,
+              { signal }
+            );
+            const tpJson = await tpResp.json();
+            setTriggerPresets(
+              Array.isArray(tpJson.trigger_presets)
+                ? tpJson.trigger_presets.map((tp: any) => ({ id: tp.id, name: tp.name }))
+                : []
+            );
+          } catch {
+            setTriggerPresets([]);
           }
         })(),
       
@@ -6387,6 +6412,18 @@ const App: React.FC = () => {
           >
             <IconSettings className="tab-icon" />
             <span className="tab-label">Настройки</span>
+          </button>
+
+          {/* Разное с подвкладками Триггер и Триггер пресета */}
+          <button
+            className={`sidebar-tab ${activeTab === "misc" ? "active" : ""}`}
+            onClick={() => {
+              setActiveTab("misc");
+              setView({ type: "home" });
+            }}
+          >
+            <IconMisc className="tab-icon" />
+            <span className="tab-label">Разное</span>
           </button>
         </div>
       </aside>
@@ -7813,11 +7850,25 @@ const App: React.FC = () => {
           <label>Триггер</label>
           <select
             value={company.trigger}
-            onChange={(e) =>
-              updateCompany({ trigger: e.target.value })
-            }
+            onChange={(e) => {
+              const val = e.target.value;
+              if (val.startsWith("trigger_preset_")) {
+                updateCompany({ trigger: val, time: "custom" });
+              } else {
+                updateCompany({ trigger: val });
+              }
+            }}
           >
             <option value="time">Время</option>
+            {triggerPresets.length > 0 && (
+              <optgroup label="Пользовательские триггеры">
+                {triggerPresets.map((tp) => (
+                  <option key={tp.id} value={tp.id}>
+                    {tp.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
         </div>
         {company.trigger === "time" && (
@@ -7828,6 +7879,13 @@ const App: React.FC = () => {
               value={company.time || ""}
               onChange={(e) => updateCompany({ time: e.target.value })}
             />
+          </div>
+        )}
+        {company.trigger?.startsWith("trigger_preset_") && (
+          <div className="form-field">
+            <div className="hint" style={{ marginTop: 4 }}>
+              Используется пользовательский триггер: {triggerPresets.find(tp => tp.id === company.trigger)?.name || company.trigger}
+            </div>
           </div>
         )}
         <div className="form-field">
@@ -9130,6 +9188,15 @@ const App: React.FC = () => {
     if (activeTab === "logo") return renderLogoPage();
     if (activeTab === "history") return renderHistoryPage();
     if (activeTab === "settings") return renderSettingsPage();
+    if (activeTab === "misc") return (
+      <TriggersPage
+        apiBase={API_BASE}
+        userId={userId || ""}
+        cabinetId={cabinetId}
+        cabinets={cabinets}
+        fetchSecured={fetchSecured}
+      />
+    );
     return null;
   };
 
