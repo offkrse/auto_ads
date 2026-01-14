@@ -22,7 +22,7 @@ import random
 
 app = FastAPI()
 
-VersionApp = "1.1"
+VersionApp = "1.2"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3668,7 +3668,7 @@ def triggers_list(user_id: str = Query(...), cabinet_id: str = Query(...)):
                 created_at = datetime.utcfromtimestamp(mtime).isoformat(timespec="seconds") + "Z"
                 triggers.append({
                     "id": file.stem, "name": data.get("name", ""), "cabinetIds": cabinet_ids,
-                    "when": data.get("when", {}), "action": data.get("action", {}),
+                    "conditions": data.get("conditions", []), "actions": data.get("actions", []),
                     "status": data.get("status", "active"), "createdAt": created_at
                 })
             except Exception as e:
@@ -3685,14 +3685,14 @@ async def triggers_save(payload: dict):
     trigger_id = payload.get("trigger_id")
     name = payload.get("name")
     cabinet_ids = payload.get("cabinetIds", [])
-    when = payload.get("when", {})
-    action = payload.get("action", {})
+    conditions = payload.get("conditions", [])
+    actions = payload.get("actions", [])
     status = payload.get("status", "active")
     if not user_id or not trigger_id or not name:
         raise HTTPException(400, "user_id, trigger_id and name required")
     ensure_user_structure(user_id)
     tdir = triggers_dir(user_id)
-    trigger_data = {"name": name, "cabinetIds": cabinet_ids, "when": when, "action": action, "status": status}
+    trigger_data = {"name": name, "cabinetIds": cabinet_ids, "conditions": conditions, "actions": actions, "status": status}
     fpath = tdir / f"{trigger_id}.json"
     atomic_write_json(fpath, trigger_data)
     upsert_trigger_queue(trigger_id, user_id, cabinet_ids, status)
@@ -3755,7 +3755,7 @@ def trigger_presets_list(user_id: str = Query(...), cabinet_id: str = Query(...)
                 created_at = datetime.utcfromtimestamp(mtime).isoformat(timespec="seconds") + "Z"
                 trigger_presets.append({
                     "id": file.stem, "name": data.get("name", ""), "cabinetIds": cabinet_ids,
-                    "when": data.get("when", {}), "createdAt": created_at
+                    "conditions": data.get("conditions", []), "createdAt": created_at
                 })
             except Exception as e:
                 log_error(f"trigger_presets/list skip {file}: {repr(e)}")
@@ -3771,12 +3771,12 @@ async def trigger_presets_save(payload: dict):
     trigger_preset_id = payload.get("trigger_preset_id")
     name = payload.get("name")
     cabinet_ids = payload.get("cabinetIds", [])
-    when = payload.get("when", {})
+    conditions = payload.get("conditions", [])
     if not user_id or not trigger_preset_id or not name:
         raise HTTPException(400, "user_id, trigger_preset_id and name required")
     ensure_user_structure(user_id)
     tdir = trigger_presets_dir(user_id)
-    preset_data = {"name": name, "cabinetIds": cabinet_ids, "when": when}
+    preset_data = {"name": name, "cabinetIds": cabinet_ids, "conditions": conditions}
     fpath = tdir / f"{trigger_preset_id}.json"
     atomic_write_json(fpath, preset_data)
     return {"status": "ok", "trigger_preset_id": trigger_preset_id}
@@ -3790,6 +3790,30 @@ def trigger_presets_delete(user_id: str = Query(...), trigger_preset_id: str = Q
     if fpath.exists():
         fpath.unlink()
     return {"status": "deleted"}
+
+# VK Checker filters API
+@secure_api.get("/vk_checker/filters")
+@secure_auto.get("/vk_checker/filters")
+def vk_checker_filters(user_id: str = Query(...)):
+    """Get VK Checker filters from /opt/vk_checker/v4/users/<user_id>/filters.json"""
+    try:
+        filters_path = Path(f"/opt/vk_checker/v4/users/{user_id}/filters.json")
+        if not filters_path.exists():
+            return {"templates": []}
+        with open(filters_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        templates = data.get("templates", [])
+        # Add id if not present
+        result = []
+        for idx, t in enumerate(templates):
+            result.append({
+                "id": t.get("id", str(idx)),
+                "name": t.get("name", f"Filter {idx}")
+            })
+        return {"templates": result}
+    except Exception as e:
+        log_error(f"vk_checker/filters error: {repr(e)}")
+        return {"templates": []}
 
 
 # -------------------------------------
