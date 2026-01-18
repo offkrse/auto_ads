@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.12"
+VERSION = "1.13"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -187,10 +187,19 @@ def vk_api_get(endpoint: str, token: str, params: Optional[Dict] = None) -> Dict
                 time.sleep(2 ** attempt)
     return {}
 
-def check_campaign_status(token: str, campaign_id: str) -> Optional[str]:
+def check_campaign_status(token: str, campaign_id: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Проверяет статус кампании.
-    Возвращает: "BANNED", "ACTIVE", или None если ошибка.
+    Возвращает кортеж (status, major_status).
+    
+    Пример ответа:
+    {
+      "vkads_status": {
+        "codes": ["BANNED"],
+        "major_status": "BANNED",
+        "status": "ACTIVE"
+      }
+    }
     """
     params = {
         "_id__in": campaign_id,
@@ -200,14 +209,15 @@ def check_campaign_status(token: str, campaign_id: str) -> Optional[str]:
     
     items = data.get("items", [])
     if not items:
-        return None
+        return None, None
     
     item = items[0]
     vkads_status = item.get("vkads_status", {})
     status = vkads_status.get("status", "")
+    major_status = vkads_status.get("major_status", "")
     
-    log.info("Campaign %s status: %s", campaign_id, status)
-    return status
+    log.info("Campaign %s status: %s, major_status: %s", campaign_id, status, major_status)
+    return status, major_status
 
 def get_ad_groups_issues(token: str, group_ids: List[str]) -> Dict[str, List[Dict]]:
     """
@@ -862,15 +872,16 @@ def process_moderation_file(filepath: Path) -> bool:
     
     # Проверяем каждую кампанию
     for company_id in company_ids:
-        status = check_campaign_status(token, company_id)
+        status, major_status = check_campaign_status(token, company_id)
         
-        if not status:
+        if status is None:
             log.warning("Could not get status for campaign %s", company_id)
             should_delete = False  # Не удаляем, попробуем позже
             continue
         
+        # Кампания полностью забанена
         if status == "BANNED":
-            log.info("Campaign %s is BANNED", company_id)
+            log.info("Campaign %s is BANNED (status=BANNED)", company_id)
             
             # Обрабатываем каждую группу объявлений
             for ag_info in ad_groups_ids:
@@ -880,6 +891,47 @@ def process_moderation_file(filepath: Path) -> bool:
                         ag_id, ad_data, sets, objective,
                         is_no_allowed_banners=False
                     )
+        
+        # major_status=BANNED но status не BANNED - проверяем каждую группу
+        elif major_status == "BANNED":
+            log.info("Campaign %s has major_status=BANNED, checking each group", company_id)
+            
+            # Получаем все group_ids
+            group_ids = []
+            for ag_info in ad_groups_ids:
+                for ag_id in ag_info.keys():
+                    group_ids.append(ag_id)
+            
+            if not group_ids:
+                log.warning("No group_ids found for campaign %s", company_id)
+                continue
+            
+            # Проверяем issues групп
+            issues_by_group = get_ad_groups_issues(token, group_ids)
+            
+            groups_with_problems = []
+            
+            for ag_id, issues in issues_by_group.items():
+                for issue in issues:
+                    if issue.get("code") == "NO_ALLOWED_BANNERS":
+                        groups_with_problems.append(ag_id)
+                        log.info("Group %s has NO_ALLOWED_BANNERS", ag_id)
+            
+            if groups_with_problems:
+                # Обрабатываем группы с проблемами
+                for ag_info in ad_groups_ids:
+                    for ag_id, ad_data in ag_info.items():
+                        if ag_id in groups_with_problems:
+                            process_banned_group(
+                                token, user_id, cabinet_id, preset_id, preset,
+                                ag_id, ad_data, sets, objective,
+                                is_no_allowed_banners=True
+                            )
+                # Не удаляем файл, так как есть проблемы
+                should_delete = False
+            else:
+                log.warning("Campaign %s has major_status=BANNED but no groups with NO_ALLOWED_BANNERS", company_id)
+                should_delete = False
         
         elif status == "ACTIVE":
             log.info("Campaign %s is ACTIVE, checking groups for NO_ALLOWED_BANNERS", company_id)
