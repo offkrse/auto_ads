@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.48"
+VersionCyclop = "1.5"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -97,12 +97,31 @@ def package_id_for_objective(obj: str) -> int:
     return {
         "socialengagement": 3127,
         "site_conversions": 3229,
+        "leadads": 3215,
     }.get(obj, 3127)
 
 # Площадки (pads), разрешённые для пакета 3127 (примерный список)
 PADS_FOR_PACKAGE: Dict[int, List[int]] = {
     3127: [102641, 1254386, 111756, 1265106, 1010345, 2243453],
 }
+
+# Площадки для leadads (пакет 3215)
+# ВК: Лента, В клипах, В историях, В видео, VK mini apps перед загрузкой,
+#     VK mini apps рядом с контентом, VK mini apps за просмотр, Боковая колонка, Нативная реклама
+# Одноклассники: Лента, OK mini apps перед загрузкой, OK mini apps за просмотр,
+#                Боковая колонка, OK mini apps рядом с контентом, В клипах, В видео
+# Проекты ВК: Нативная реклама
+# Рекламная сеть: Нативная реклама, Боковая колонка, В видео, Перед загрузкой, За просмотр
+PADS_FOR_LEADADS: List[int] = [
+    # ВК
+    1342048, 1303002, 2243453, 2620220, 1361696, 2224658, 2224674, 2224661, 2937325,
+    # Одноклассники
+    1480820, 1011137, 1011136, 2202571, 2202570, 2341238, 1303027,
+    # Проекты ВК
+    1571938,
+    # Рекламная сеть
+    1359394, 1359123, 1359414, 1361691, 1359393,
+]
 
 # ======= ШАБЛОНЫ ДЛЯ НАЗВАНИЙ =======
 AUD_TOKEN_RE = re.compile(r"\{\%([A-Z]+)((?:-[A-Z]+(?:\([^\)]*\))?)*)\%\}")
@@ -1335,6 +1354,32 @@ def create_url_v2(url_str: str, tokens: List[str]) -> int:
             return int(payload["url"]["id"])
 
     raise RuntimeError(f"No id in /api/v2/urls.json response: {payload}")
+
+
+def create_leadads_url(leadform_id: str, tokens: List[str]) -> int:
+    """
+    Создаёт URL для лидформы через /api/v2/urls.json.
+    Формат URL: leadads://{leadform_id}/
+    Возвращает id для использования в ad_object_id и urls.primary.id.
+    """
+    endpoint = f"{API_BASE}/api/v2/urls.json"
+    leadads_url = f"leadads://{leadform_id}/"
+    body = json.dumps({"url": leadads_url}, ensure_ascii=False).encode("utf-8")
+    log.info("Creating leadads URL: %s", leadads_url)
+    payload = with_retries("POST", endpoint, tokens, data=body)
+
+    if isinstance(payload, dict):
+        if "id" in payload:
+            url_id = int(payload["id"])
+            log.info("Leadads URL created: leadform_id=%s -> url_id=%s", leadform_id, url_id)
+            return url_id
+        # на всякий случай (если внезапно завернутый формат)
+        if isinstance(payload.get("url"), dict) and "id" in payload["url"]:
+            url_id = int(payload["url"]["id"])
+            log.info("Leadads URL created: leadform_id=%s -> url_id=%s", leadform_id, url_id)
+            return url_id
+
+    raise RuntimeError(f"No id in /api/v2/urls.json response for leadads: {payload}")
     
 # ============================ Баннер (строго 2 креатива) ============================
 
@@ -1379,10 +1424,17 @@ def make_banner_for_creative(url_id: int,
                              cta_text: str,
                              media_kind: str,
                              media_id: int,
-                             objective: str = "") -> Dict[str, Any]:
+                             objective: str = "",
+                             button_text: str = "") -> Dict[str, Any]:
     """
     Собирает баннер с переданным media_kind ('image_600x600' или 'video_portrait_9_16_30s')
     и media_id. Остальные поля — как раньше.
+    
+    Для leadads:
+    - text_90: короткое описание
+    - text_220: длинное описание
+    - cta_leadads: CTA кнопка
+    - title_30_additional: текст на кнопке (из поля button_text)
     """
     title = (ad.get("title") or "").strip()
     short = (ad.get("shortDescription") or "").strip()
@@ -1402,9 +1454,22 @@ def make_banner_for_creative(url_id: int,
         # Для картинок и любых других типов — как раньше
         content[media_kind] = {"id": int(media_id)}
 
-    log.info("Banner #%d: icon_id=%s, %s=%s, name='%s', cta='%s'",
-             idx, int(icon_id), media_kind, media_id, banner_name, cta_text)
-    if objective == "site_conversions":
+    log.info("Banner #%d: icon_id=%s, %s=%s, name='%s', cta='%s', objective='%s'",
+             idx, int(icon_id), media_kind, media_id, banner_name, cta_text, objective)
+    
+    if objective == "leadads":
+        textblocks = {
+            "about_company_115": {"text": advertiser_info, "title": ""},
+            "cta_leadads": {"text": (cta_text or "sendRequest"), "title": ""},
+            "text_90": {"text": short, "title": ""},
+            "text_220": {"text": long_text, "title": ""},
+            "title_40_vkads": {"text": title, "title": ""},
+        }
+        # Добавляем title_30_additional если есть текст на кнопке
+        if button_text:
+            textblocks["title_30_additional"] = {"text": button_text, "title": ""}
+            log.info("Banner #%d: added title_30_additional='%s'", idx, button_text)
+    elif objective == "site_conversions":
         textblocks = {
             "about_company_115": {"text": advertiser_info, "title": ""},
             "cta_sites_full": {"text": (cta_text or "visitSite"), "title": ""},
@@ -1585,10 +1650,11 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                                "leadads требует company.leadform_id", "Missing company.leadform_id")
             raise RuntimeError("Missing company.leadform_id for leadads")
         try:
-            ad_object_id = int(leadform)
+            # Создаём URL через /api/v2/urls.json с leadads://{leadform_id}/
+            ad_object_id = create_leadads_url(str(leadform).strip(), tokens)
         except Exception as e:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                               "company.leadform_id должен быть числом", repr(e))
+                               "Не удалось создать URL для лидформы", repr(e))
             raise
     else:
         # Разрешаем URL -> id (как раньше) — только если не leadads
@@ -1779,6 +1845,14 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         )
 
         cta_text = (ad.get("button") or "visitSite").strip()
+        # Для leadads: button содержит CTA (apply, getoffer, learnMore и т.д.)
+        # buttonText (если есть) -> title_30_additional
+        button_text_for_leadads = ""
+        if objective == "leadads":
+            # CTA для leadads берём из button (apply, getoffer, learnMore и т.д.)
+            cta_text = (ad.get("button") or "apply").strip()
+            # Текст на кнопке (дополнительный) из отдельного поля buttonText
+            button_text_for_leadads = (ad.get("buttonText") or "").strip()
 
         # --- bannerUrl -> url_id для баннера (если нет — используем company.url or leadform id) ---
         banner_url_raw = (
@@ -1807,7 +1881,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 advertiser_info=adv_info, icon_id=int(icon_id),
                 banner_name=banner_name, cta_text=cta_text,
                 media_kind=media_kind, media_id=media_id,
-                objective=objective
+                objective=objective,
+                button_text=button_text_for_leadads
             )
             banners_by_group.append(banner)
             log.info("Собран баннер #%d для группы '%s' (name='%s')",
@@ -1928,10 +2003,11 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                                "leadads требует company.leadform_id", "Missing company.leadform_id")
             raise RuntimeError("Missing company.leadform_id for leadads")
         try:
-            ad_object_id = int(leadform)
+            # Создаём URL через /api/v2/urls.json с leadads://{leadform_id}/
+            ad_object_id = create_leadads_url(str(leadform).strip(), tokens)
         except Exception as e:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                               "company.leadform_id должен быть числом", repr(e))
+                               "Не удалось создать URL для лидформы", repr(e))
             raise
     else:
         try:
@@ -2059,8 +2135,11 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 targetings["pads"] = placements
 
             budget_day = int(g.get("budget") or 0)
-            # Для leadads utm не включаем (см. build_ad_plan_payload логику)
-            utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
+            # Для leadads utm не включаем (аналогично build_ad_plan_payload)
+            if objective == "leadads":
+                utm = None
+            else:
+                utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
             max_price_for_group = compute_group_max_price(g)
 
             # КАЖДЫЙ креатив → отдельная группа с ОДНИМ баннером
@@ -2077,6 +2156,15 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
                 ad_tpl = (ad.get("adName") or f"Объявление {ai + 1}").strip()
                 btn = (ad.get("button") or "visitSite").strip()
+                
+                # Для leadads: button содержит CTA (apply, getoffer, learnMore и т.д.)
+                # buttonText (если есть) -> title_30_additional
+                button_text_for_leadads = ""
+                if objective == "leadads":
+                    # CTA для leadads берём из button (apply, getoffer, learnMore и т.д.)
+                    btn = (ad.get("button") or "apply").strip()
+                    # Текст на кнопке (дополнительный) из отдельного поля buttonText
+                    button_text_for_leadads = (ad.get("buttonText") or "").strip()
 
                 # --- bannerUrl -> url_id для всех баннеров этого ad ---
                 banner_url_raw = (
@@ -2151,7 +2239,8 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         ad_url_id_for_banner, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
-                        media_kind="video_portrait_9_16_30s", media_id=media_id, objective=objective
+                        media_kind="video_portrait_9_16_30s", media_id=media_id, objective=objective,
+                        button_text=button_text_for_leadads
                     )
 
                     safe_g_name = (g_name or "").strip()
@@ -2173,9 +2262,11 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "date_end": None,
                         "age_restrictions": "18+",
                         "package_id": pkg_id,
-                        "utm": utm,
                         "banners": [banner],
                     }
+                    # Добавляем utm только если установлен (для leadads не будет)
+                    if utm is not None:
+                        group_payload["utm"] = utm
                     pg_group = _build_priced_goal_group(company)
                     if pg_group:
                         group_payload["priced_goal"] = pg_group
@@ -2235,7 +2326,8 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         ad_url_id_for_banner, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
-                        media_kind=media_kind, media_id=media_id, objective=objective
+                        media_kind=media_kind, media_id=media_id, objective=objective,
+                        button_text=button_text_for_leadads
                     )
 
                     safe_g_name = (g_name or "").strip()
@@ -2257,9 +2349,11 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "date_end": None,
                         "age_restrictions": "18+",
                         "package_id": pkg_id,
-                        "utm": utm,
                         "banners": [banner],
                     }
+                    # Добавляем utm только если установлен (для leadads не будет)
+                    if utm is not None:
+                        group_payload["utm"] = utm
                     pg_group = _build_priced_goal_group(company)
                     if pg_group:
                         group_payload["priced_goal"] = pg_group
