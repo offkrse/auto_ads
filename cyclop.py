@@ -21,13 +21,21 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.5"
+VersionCyclop = "1.51"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
 ENV_FILE = Path("/opt/auto_ads/.env")
 LOGS_DIR = Path("/opt/auto_ads/logs")
 LOG_FILE = LOGS_DIR / "cyclop.log"
+
+# Директория для проверки модерации
+CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
+CHECK_MODERATION_DIR.mkdir(parents=True, exist_ok=True)
+
+# Директория для one-shot пресетов (автоматическое пересоздание после бана)
+ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
+ONE_SHOT_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
 
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 
@@ -1069,6 +1077,87 @@ def write_result_error(user_id: str, cabinet_id: str, preset_id: str, preset_nam
     # Отправляем уведомление в Telegram
     notify_error_if_enabled(user_id, cabinet_id, preset_name, human)
 
+
+def save_for_moderation_check(
+    user_id: str,
+    cabinet_id: str,
+    preset_id: str,
+    preset: Dict[str, Any],
+    vk_response: Dict[str, Any],
+    ads_info: List[Dict[str, Any]]
+) -> None:
+    """
+    Сохраняет информацию о созданной кампании для последующей проверки модерации.
+    
+    Файл: /opt/auto_ads/data/check_moderation/company_<random_id>.json
+    
+    Формат:
+    {
+        "user_id": "...",
+        "cabinet_id": "...",
+        "preset_id": "...",
+        "preset": {...},  # полная структура пресета
+        "company_ids": ["340"],
+        "ad_groups_ids": [{"321": {"video_id": "...", "original_video_id": "...", "textset_id": "..."}}],
+        "created_at": "2026-01-18 12:00:00"
+    }
+    """
+    try:
+        # Извлекаем company_id и ad_groups из ответа VK
+        company_ids = []
+        ad_groups_info = []
+        
+        if isinstance(vk_response, dict):
+            # Формат ответа: {"id": 340, "ad_groups": [{"id": 321}, ...]}
+            if "id" in vk_response:
+                company_ids.append(str(vk_response["id"]))
+            
+            ad_groups = vk_response.get("ad_groups", [])
+            if isinstance(ad_groups, list):
+                for i, ag in enumerate(ad_groups):
+                    if isinstance(ag, dict) and "id" in ag:
+                        ag_id = str(ag["id"])
+                        # Сопоставляем с информацией об объявлениях
+                        ad_info = ads_info[i] if i < len(ads_info) else {}
+                        video_id = ad_info.get("video_id", "")
+                        image_id = ad_info.get("image_id", "")
+                        ad_groups_info.append({
+                            ag_id: {
+                                "video_id": video_id,
+                                "original_video_id": video_id,  # изначально совпадает
+                                "image_id": image_id,
+                                "original_image_id": image_id,  # изначально совпадает
+                                "textset_id": ad_info.get("textset_id", ""),
+                                "short_description": ad_info.get("short_description", ""),
+                                "long_description": ad_info.get("long_description", ""),
+                            }
+                        })
+        
+        if not company_ids:
+            log.warning("save_for_moderation_check: no company_ids found in response")
+            return
+        
+        random_id = random.randint(100000, 999999)
+        filename = f"company_{random_id}.json"
+        filepath = CHECK_MODERATION_DIR / filename
+        
+        data = {
+            "user_id": str(user_id),
+            "cabinet_id": str(cabinet_id),
+            "preset_id": str(preset_id),
+            "preset": preset,
+            "company_ids": company_ids,
+            "ad_groups_ids": ad_groups_info,
+            "created_at": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        
+        dump_json(filepath, data)
+        log.info("Saved for moderation check: %s (company_ids=%s)", filepath, company_ids)
+        
+    except Exception as e:
+        log.error("save_for_moderation_check failed: %s", repr(e))
+
+
 def extract_campaign_ids_from_resp(resp: Dict[str, Any]) -> List[int]:
     #Возвращаем список int без дублей (порядок сохраняем).
     ids: List[int] = []
@@ -1790,6 +1879,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
     # 3) Баннеры 1:1 с группами + рендер имён с плейсхолдерами
     banners_by_group: List[Dict[str, Any]] = []
+    ads_info_for_moderation: List[Dict[str, Any]] = []  # для save_for_moderation_check
     company_counter = 0
 
     for gi in range(len(groups)):
@@ -1885,6 +1975,18 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 button_text=button_text_for_leadads
             )
             banners_by_group.append(banner)
+            
+            # Сохраняем информацию для проверки модерации
+            video_ids = ad.get("videoIds") or []
+            image_ids = ad.get("imageIds") or []
+            ads_info_for_moderation.append({
+                "video_id": str(video_ids[0]) if video_ids else "",
+                "image_id": str(image_ids[0]) if image_ids else "",
+                "textset_id": ad.get("textSetId") or "",
+                "short_description": ad.get("shortDescription") or "",
+                "long_description": ad.get("longDescription") or "",
+            })
+            
             log.info("Собран баннер #%d для группы '%s' (name='%s')",
                      gi + 1, rendered_group_names[gi], banner_name)
         except Exception as e:
@@ -1976,6 +2078,15 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         raise
 
     write_result_success(user_id, cabinet_id, preset_id, preset_name, trigger_time, id_company)
+    
+    # Сохраняем информацию для проверки модерации
+    for r in results:
+        vk_resp = r.get("response") or {}
+        save_for_moderation_check(
+            user_id, cabinet_id, preset_id, preset,
+            vk_resp, ads_info_for_moderation
+        )
+    
     return results
 
 
@@ -2081,6 +2192,9 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
     base_payload = build_ad_plan_payload(preset_mut, ad_object_id, 1, rendered_company_name=rendered_company_name)
     payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
     payload_try["ad_groups"] = []  # перезапишем полностью
+    
+    # Список для сбора информации об объявлениях для проверки модерации
+    ads_info_for_moderation_fast: List[Dict[str, Any]] = []
 
     pkg_id = package_id_for_objective(objective)
 
@@ -2271,6 +2385,15 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     if pg_group:
                         group_payload["priced_goal"] = pg_group
                     _add_group_with_optional_pads(payload_try["ad_groups"], group_payload, placements)
+                    
+                    # Сохраняем информацию для проверки модерации
+                    ads_info_for_moderation_fast.append({
+                        "video_id": str(media_id),
+                        "image_id": "",
+                        "textset_id": ad.get("textSetId") or "",
+                        "short_description": ad.get("shortDescription") or "",
+                        "long_description": ad.get("longDescription") or "",
+                    })
                     made_any = True
 
                 # --- затем КАРТИНКИ ---
@@ -2358,6 +2481,15 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     if pg_group:
                         group_payload["priced_goal"] = pg_group
                     _add_group_with_optional_pads(payload_try["ad_groups"], group_payload, placements)
+                    
+                    # Сохраняем информацию для проверки модерации
+                    ads_info_for_moderation_fast.append({
+                        "video_id": "",
+                        "image_id": str(media_id),
+                        "textset_id": ad.get("textSetId") or "",
+                        "short_description": ad.get("shortDescription") or "",
+                        "long_description": ad.get("longDescription") or "",
+                    })
                     made_any = True
 
             if not made_any:
@@ -2448,6 +2580,15 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
         raise
 
     write_result_success(user_id, cabinet_id, preset_id, preset_name, trigger_time, id_company)
+    
+    # Сохраняем информацию для проверки модерации
+    for r in results:
+        vk_resp = r.get("response") or {}
+        save_for_moderation_check(
+            user_id, cabinet_id, preset_id, preset,
+            vk_resp, ads_info_for_moderation_fast
+        )
+    
     return results
 
 # ============================ Основной цикл ============================
