@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.51"
+VersionCyclop = "1.52"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1101,24 +1101,60 @@ def save_for_moderation_check(
         "ad_groups_ids": [{"321": {"video_id": "...", "original_video_id": "...", "textset_id": "..."}}],
         "created_at": "2026-01-18 12:00:00"
     }
+    
+    Ответ VK имеет структуру:
+    {
+      "response": {
+        "campaigns": [
+          {
+            "id": 340,
+            "ad_groups": [{"id": 321}]
+          }
+        ]
+      }
+    }
     """
     try:
-        # Извлекаем company_id и ad_groups из ответа VK
         company_ids = []
         ad_groups_info = []
         
+        # Парсим структуру ответа VK
+        # vk_response может быть {"response": {"campaigns": [...]}} или напрямую {"campaigns": [...]}
+        campaigns = []
+        
         if isinstance(vk_response, dict):
-            # Формат ответа: {"id": 340, "ad_groups": [{"id": 321}, ...]}
-            if "id" in vk_response:
-                company_ids.append(str(vk_response["id"]))
+            # Вариант 1: {"response": {"campaigns": [...]}}
+            inner = vk_response.get("response")
+            if isinstance(inner, dict):
+                campaigns = inner.get("campaigns", [])
             
-            ad_groups = vk_response.get("ad_groups", [])
+            # Вариант 2: {"campaigns": [...]} (напрямую)
+            if not campaigns:
+                campaigns = vk_response.get("campaigns", [])
+        
+        if not campaigns:
+            log.warning("save_for_moderation_check: no campaigns found in response: %s", 
+                       str(vk_response)[:200])
+            return
+        
+        # Обрабатываем каждую кампанию
+        ad_info_index = 0
+        for campaign in campaigns:
+            if not isinstance(campaign, dict):
+                continue
+            
+            campaign_id = campaign.get("id")
+            if campaign_id:
+                company_ids.append(str(campaign_id))
+            
+            # Извлекаем ad_groups
+            ad_groups = campaign.get("ad_groups", [])
             if isinstance(ad_groups, list):
-                for i, ag in enumerate(ad_groups):
+                for ag in ad_groups:
                     if isinstance(ag, dict) and "id" in ag:
                         ag_id = str(ag["id"])
                         # Сопоставляем с информацией об объявлениях
-                        ad_info = ads_info[i] if i < len(ads_info) else {}
+                        ad_info = ads_info[ad_info_index] if ad_info_index < len(ads_info) else {}
                         video_id = ad_info.get("video_id", "")
                         image_id = ad_info.get("image_id", "")
                         ad_groups_info.append({
@@ -1132,6 +1168,7 @@ def save_for_moderation_check(
                                 "long_description": ad_info.get("long_description", ""),
                             }
                         })
+                        ad_info_index += 1
         
         if not company_ids:
             log.warning("save_for_moderation_check: no company_ids found in response")
@@ -1152,7 +1189,8 @@ def save_for_moderation_check(
         }
         
         dump_json(filepath, data)
-        log.info("Saved for moderation check: %s (company_ids=%s)", filepath, company_ids)
+        log.info("Saved for moderation check: %s (company_ids=%s, ad_groups=%d)", 
+                filepath, company_ids, len(ad_groups_info))
         
     except Exception as e:
         log.error("save_for_moderation_check failed: %s", repr(e))
