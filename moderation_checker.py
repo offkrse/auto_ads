@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.1"
+VERSION = "1.11"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -56,11 +56,11 @@ CHECK_MODERATION_DIR.mkdir(parents=True, exist_ok=True)
 ONE_SHOT_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
 ONE_ADD_GROUPS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Символы для замены в текстах
-SHORT_TEXT_SWAP = "🌟"
-SHORT_TEXT_SYMBOLS = "🌟;🔥;🏅;🚀;🥇;🌠;🎯;🎁"
-LONG_TEXT_SWAP = "🌟"
-LONG_TEXT_SYMBOLS = "🌟;🔥;🏅;🚀;🥇;🌠;🎯;🎁"
+# Дефолтные символы для замены (используются если не заданы в textset)
+DEFAULT_SHORT_TEXT_SWAP = "🌟"
+DEFAULT_SHORT_TEXT_SYMBOLS = "🌟;🔥;🏅;🚀;🥇;🌠;🎯;🎁"
+DEFAULT_LONG_TEXT_SWAP = "🌟"
+DEFAULT_LONG_TEXT_SYMBOLS = "🌟;🔥;🏅;🚀;🥇;🌠;🎯;🎁"
 
 # Сдвиг времени для one-shot пресетов (часов от текущего времени)
 ONE_SHOT_TIME_OFFSET_HOURS = 7
@@ -418,16 +418,30 @@ def get_next_symbol(current_text: str, swap_char: str, symbols_str: str, used_te
 def swap_text_symbols(
     short_desc: str,
     long_desc: str,
-    used_texts: List[Tuple[str, str]]
+    used_texts: List[Tuple[str, str]],
+    textset: Optional[Dict] = None
 ) -> Tuple[str, str]:
     """
     Заменяет символы в текстах, избегая уже использованных комбинаций.
+    Берёт настройки символов из textset, если они заданы.
     """
+    # Получаем настройки из textset или используем дефолтные
+    if textset:
+        short_swap = textset.get("short_text_swap", DEFAULT_SHORT_TEXT_SWAP)
+        short_symbols = textset.get("short_text_symbols", DEFAULT_SHORT_TEXT_SYMBOLS)
+        long_swap = textset.get("long_text_swap", DEFAULT_LONG_TEXT_SWAP)
+        long_symbols = textset.get("long_text_symbols", DEFAULT_LONG_TEXT_SYMBOLS)
+    else:
+        short_swap = DEFAULT_SHORT_TEXT_SWAP
+        short_symbols = DEFAULT_SHORT_TEXT_SYMBOLS
+        long_swap = DEFAULT_LONG_TEXT_SWAP
+        long_symbols = DEFAULT_LONG_TEXT_SYMBOLS
+    
     used_shorts = [t[0] for t in used_texts]
     used_longs = [t[1] for t in used_texts]
     
-    new_short = get_next_symbol(short_desc, SHORT_TEXT_SWAP, SHORT_TEXT_SYMBOLS, used_shorts)
-    new_long = get_next_symbol(long_desc, LONG_TEXT_SWAP, LONG_TEXT_SYMBOLS, used_longs)
+    new_short = get_next_symbol(short_desc, short_swap, short_symbols, used_shorts)
+    new_long = get_next_symbol(long_desc, long_swap, long_symbols, used_longs)
     
     return new_short, new_long
 
@@ -712,6 +726,10 @@ def process_banned_group(
     long_desc = ad_data.get("long_description", "")
     segments = []
     
+    # Загружаем textset для получения настроек символов
+    textsets = load_textsets(user_id, cabinet_id)
+    textset = find_textset(textsets, textset_id) if textset_id else None
+    
     # Если NO_ALLOWED_BANNERS - получаем данные из VK API
     if is_no_allowed_banners:
         log.info("Processing NO_ALLOWED_BANNERS for group %s", group_id)
@@ -772,8 +790,8 @@ def process_banned_group(
     if rehash_result:
         new_video_id = rehash_result["new_vk_id"]
         
-        # Меняем текст
-        new_short, new_long = swap_text_symbols(short_desc, long_desc, used_texts)
+        # Меняем текст (передаём textset для получения настроек символов)
+        new_short, new_long = swap_text_symbols(short_desc, long_desc, used_texts, textset)
         
         # Создаём пресет в зависимости от типа проблемы
         if is_no_allowed_banners:
