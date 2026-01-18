@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.52"
+VersionCyclop = "1.53"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1091,50 +1091,54 @@ def save_for_moderation_check(
     
     Файл: /opt/auto_ads/data/check_moderation/company_<random_id>.json
     
-    Формат:
-    {
-        "user_id": "...",
-        "cabinet_id": "...",
-        "preset_id": "...",
-        "preset": {...},  # полная структура пресета
-        "company_ids": ["340"],
-        "ad_groups_ids": [{"321": {"video_id": "...", "original_video_id": "...", "textset_id": "..."}}],
-        "created_at": "2026-01-18 12:00:00"
-    }
-    
-    Ответ VK имеет структуру:
+    Ответ VK при создании кампании имеет структуру:
     {
       "response": {
         "campaigns": [
           {
-            "id": 340,
-            "ad_groups": [{"id": 321}]
+            "id": 16508149,          // ID кампании
+            "ad_groups": [
+              {"id": 126999621},     // ID групп объявлений
+              {"id": 126999622}
+            ]
           }
         ]
       }
+    }
+    
+    Формат сохраняемого файла:
+    {
+        "user_id": "...",
+        "cabinet_id": "...",
+        "preset_id": "...",
+        "preset": {...},
+        "company_ids": ["16508149"],
+        "ad_groups_ids": [{"126999621": {...}}, {"126999622": {...}}],
+        "created_at": "2026-01-18 12:00:00"
     }
     """
     try:
         company_ids = []
         ad_groups_info = []
         
+        log.debug("save_for_moderation_check: parsing vk_response: %s", str(vk_response)[:500])
+        
         # Парсим структуру ответа VK
-        # vk_response может быть {"response": {"campaigns": [...]}} или напрямую {"campaigns": [...]}
         campaigns = []
         
         if isinstance(vk_response, dict):
-            # Вариант 1: {"response": {"campaigns": [...]}}
+            # Структура: {"response": {"campaigns": [...]}}
             inner = vk_response.get("response")
             if isinstance(inner, dict):
                 campaigns = inner.get("campaigns", [])
             
-            # Вариант 2: {"campaigns": [...]} (напрямую)
+            # Или напрямую: {"campaigns": [...]}
             if not campaigns:
                 campaigns = vk_response.get("campaigns", [])
         
         if not campaigns:
             log.warning("save_for_moderation_check: no campaigns found in response: %s", 
-                       str(vk_response)[:200])
+                       str(vk_response)[:300])
             return
         
         # Обрабатываем каждую кампанию
@@ -1143,12 +1147,15 @@ def save_for_moderation_check(
             if not isinstance(campaign, dict):
                 continue
             
+            # ID кампании
             campaign_id = campaign.get("id")
             if campaign_id:
                 company_ids.append(str(campaign_id))
             
-            # Извлекаем ad_groups
+            # Извлекаем ad_groups из кампании
             ad_groups = campaign.get("ad_groups", [])
+            log.debug("Campaign %s has %d ad_groups", campaign_id, len(ad_groups) if ad_groups else 0)
+            
             if isinstance(ad_groups, list):
                 for ag in ad_groups:
                     if isinstance(ag, dict) and "id" in ag:
@@ -1160,9 +1167,9 @@ def save_for_moderation_check(
                         ad_groups_info.append({
                             ag_id: {
                                 "video_id": video_id,
-                                "original_video_id": video_id,  # изначально совпадает
+                                "original_video_id": video_id,
                                 "image_id": image_id,
-                                "original_image_id": image_id,  # изначально совпадает
+                                "original_image_id": image_id,
                                 "textset_id": ad_info.get("textset_id", ""),
                                 "short_description": ad_info.get("short_description", ""),
                                 "long_description": ad_info.get("long_description", ""),
@@ -1171,7 +1178,7 @@ def save_for_moderation_check(
                         ad_info_index += 1
         
         if not company_ids:
-            log.warning("save_for_moderation_check: no company_ids found in response")
+            log.warning("save_for_moderation_check: no company_ids extracted")
             return
         
         random_id = random.randint(100000, 999999)
@@ -2120,6 +2127,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     # Сохраняем информацию для проверки модерации
     for r in results:
         vk_resp = r.get("response") or {}
+        # Debug: сохраняем структуру ответа в лог
+        log.info("VK response structure for moderation: %s", json.dumps(vk_resp, ensure_ascii=False)[:1000])
         save_for_moderation_check(
             user_id, cabinet_id, preset_id, preset,
             vk_resp, ads_info_for_moderation
@@ -2622,6 +2631,8 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
     # Сохраняем информацию для проверки модерации
     for r in results:
         vk_resp = r.get("response") or {}
+        # Debug: сохраняем структуру ответа в лог
+        log.info("VK response structure for moderation (FAST): %s", json.dumps(vk_resp, ensure_ascii=False)[:1000])
         save_for_moderation_check(
             user_id, cabinet_id, preset_id, preset,
             vk_resp, ads_info_for_moderation_fast
