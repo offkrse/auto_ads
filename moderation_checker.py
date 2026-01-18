@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.11"
+VERSION = "1.12"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -137,8 +137,10 @@ def atomic_write_json(path: Path, data: Any) -> None:
 
 def get_cabinet_token(user_id: str, cabinet_id: str) -> Optional[str]:
     """Получает реальный токен для кабинета."""
-    user_file = USERS_ROOT / str(user_id) / "user.json"
+    # Файл пользователя: /opt/auto_ads/users/<user_id>/<user_id>.json
+    user_file = USERS_ROOT / str(user_id) / f"{user_id}.json"
     if not user_file.exists():
+        log.error("User file not found: %s", user_file)
         return None
     try:
         user_data = load_json(user_file)
@@ -147,7 +149,14 @@ def get_cabinet_token(user_id: str, cabinet_id: str) -> Optional[str]:
             if str(cab.get("id")) == str(cabinet_id):
                 token_name = cab.get("token")
                 if token_name:
-                    return get_real_token(token_name)
+                    real_token = get_real_token(token_name)
+                    if real_token:
+                        return real_token
+                    else:
+                        log.error("Token %s not found in env", token_name)
+                else:
+                    log.error("No token name for cabinet %s", cabinet_id)
+        log.error("Cabinet %s not found in user file", cabinet_id)
     except Exception as e:
         log.error("Failed to get cabinet token: %s", e)
     return None
