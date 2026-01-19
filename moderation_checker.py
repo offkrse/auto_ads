@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.13"
+VERSION = "1.14"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -354,10 +354,12 @@ def update_moderation_status(
 ) -> bool:
     """
     Обновляет статус модерации для видео.
-    Формат: moderation: [{objective: [{video_id, original_video_id, status, textset_id, text_short, text_long}]}]
+    Формат: moderation: [{objective: [{video_id, original_video_id, status, textset_id, text_short, text_long, timestamp}]}]
     """
     if not original_video_id:
         original_video_id = video_id
+    
+    timestamp = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
     
     for s in sets:
         for item in s.get("items", []):
@@ -390,7 +392,8 @@ def update_moderation_status(
                             "status": status,
                             "textset_id": str(textset_id),
                             "text_short": text_short,
-                            "text_long": text_long
+                            "text_long": text_long,
+                            "timestamp": timestamp
                         })
                         return True
     return False
@@ -469,20 +472,46 @@ def swap_text_symbols(
 def cabinet_storage(cabinet_id: str) -> Path:
     return CREO_STORAGE_ROOT / str(cabinet_id)
 
+def find_local_video_id_by_vk_id(sets: List[Dict], vk_video_id: str, cabinet_id: str) -> Optional[str]:
+    """
+    Находит локальный ID видео по VK ID из sets.json.
+    
+    В sets.json видео хранится так:
+    {
+        "id": "id_abc123",          // локальный ID
+        "vkByCabinet": {
+            "21799870": "102924861"  // cabinet_id -> VK ID
+        }
+    }
+    """
+    for s in sets:
+        for item in s.get("items", []):
+            vk_by_cabinet = item.get("vkByCabinet", {})
+            if str(vk_by_cabinet.get(str(cabinet_id))) == str(vk_video_id):
+                local_id = item.get("id")
+                if local_id:
+                    return str(local_id)
+    return None
+
 def rehash_video(
     user_id: str,
     cabinet_id: str,
     video_id: str,
-    token: str
+    token: str,
+    sets: Optional[List[Dict]] = None
 ) -> Optional[Dict]:
     """
     Создаёт копию видео с новым хэшом и загружает в VK.
     НЕ удаляет оригинальное видео.
+    
+    video_id - это VK ID видео (из баннера).
+    Файлы на диске называются: {vk_id}_{original_name} (например 102924861_IMG_0822.MOV)
+    
     Возвращает информацию о новом видео или None при ошибке.
     """
     storage = cabinet_storage(cabinet_id)
     
-    # Ищем файл видео по video_id
+    # Файлы на диске называются {vk_id}_{original_name}
     video_file = None
     
     for f in storage.glob(f"{video_id}_*"):
@@ -491,8 +520,16 @@ def rehash_video(
             break
     
     if not video_file:
-        log.error("Video file not found for id %s in %s", video_id, storage)
+        log.error("Video file not found for video_id=%s in %s", video_id, storage)
+        # Выводим список файлов для отладки
+        try:
+            files = list(storage.glob("*"))[:20]
+            log.error("Available files in storage: %s", [f.name for f in files])
+        except:
+            pass
         return None
+    
+    log.info("Found video file: %s", video_file)
     
     # Читаем мету
     base_no_ext = video_file.stem
@@ -510,7 +547,7 @@ def rehash_video(
     width = int(meta.get("width") or 720)
     height = int(meta.get("height") or 1280)
     
-    # Получаем display_name
+    # Получаем display_name (часть после vk_id_)
     display_name = video_file.name.split("_", 1)[1] if "_" in video_file.name else video_file.name
     ext = video_file.suffix
     
@@ -551,10 +588,11 @@ def rehash_video(
             return None
         
         resp_json = resp.json()
+        log.info("VK upload response: %s", json.dumps(resp_json, ensure_ascii=False)[:500])
         new_vk_id = str(resp_json.get("id") or "").strip()
         
         if not new_vk_id:
-            log.error("VK did not return id")
+            log.error("VK did not return id in response: %s", resp_json)
             return None
         
         log.info("Video rehashed: %s -> %s", video_id, new_vk_id)
