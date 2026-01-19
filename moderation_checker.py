@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.15"
+VERSION = "1.16"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -697,6 +697,10 @@ def create_one_shot_preset(
         # Копируем пресет
         new_preset = json.loads(json.dumps(original_preset, ensure_ascii=False))
         
+        # Добавляем user_id и cabinet_id для cyclop
+        new_preset["_user_id"] = str(user_id)
+        new_preset["_cabinet_id"] = str(cabinet_id)
+        
         # Добавляем информацию об оригинальном видео
         new_preset["_moderation_info"] = {
             "original_video_id": original_video_id,
@@ -745,7 +749,8 @@ def create_add_group_preset(
     new_short: str,
     new_long: str,
     textset_id: str,
-    segments: List[int]
+    segments: List[int],
+    ad_plan_id: str = ""
 ) -> Optional[Path]:
     """
     Создаёт пресет для добавления группы с обновлёнными видео и сегментами.
@@ -755,12 +760,17 @@ def create_add_group_preset(
         # Копируем пресет
         new_preset = json.loads(json.dumps(original_preset, ensure_ascii=False))
         
-        # Добавляем информацию об оригинальном видео
+        # Добавляем user_id и cabinet_id для cyclop
+        new_preset["_user_id"] = str(user_id)
+        new_preset["_cabinet_id"] = str(cabinet_id)
+        
+        # Добавляем информацию для добавления группы
         new_preset["_moderation_info"] = {
             "original_video_id": original_video_id,
             "old_video_id": old_video_id,
             "new_video_id": new_video_id,
             "segments": segments,
+            "ad_plan_id": ad_plan_id,
         }
         
         # Обновляем время
@@ -769,10 +779,8 @@ def create_add_group_preset(
         
         # Обновляем видео и текст во всех объявлениях
         for ad in new_preset.get("ads", []):
-            # Заменяем video_id
-            video_ids = ad.get("videoIds", [])
-            if old_video_id in video_ids:
-                ad["videoIds"] = [new_video_id if v == old_video_id else v for v in video_ids]
+            # Заменяем video_id на новый
+            ad["videoIds"] = [new_video_id]
             
             # Заменяем текст если textset совпадает
             if ad.get("textSetId") == textset_id or not textset_id:
@@ -791,7 +799,7 @@ def create_add_group_preset(
         
         dump_json(filepath, new_preset)
         
-        log.info("Created add-group preset: %s", filepath)
+        log.info("Created add-group preset: %s (ad_plan_id=%s)", filepath, ad_plan_id)
         return filepath
         
     except Exception as e:
@@ -810,7 +818,8 @@ def process_banned_group(
     ad_data: Dict,
     sets: List[Dict],
     objective: str,
-    is_no_allowed_banners: bool = False
+    is_no_allowed_banners: bool = False,
+    company_id: str = ""
 ) -> bool:
     """
     Обрабатывает забаненную группу или группу с NO_ALLOWED_BANNERS.
@@ -897,7 +906,8 @@ def process_banned_group(
             create_add_group_preset(
                 user_id, cabinet_id, preset_id, preset,
                 new_video_id, video_id, original_video_id,
-                new_short, new_long, textset_id, segments
+                new_short, new_long, textset_id, segments,
+                ad_plan_id=company_id
             )
         else:
             # Создаём one-shot пресет
@@ -972,7 +982,8 @@ def process_moderation_file(filepath: Path) -> bool:
                     process_banned_group(
                         token, user_id, cabinet_id, preset_id, preset,
                         ag_id, ad_data, sets, objective,
-                        is_no_allowed_banners=False
+                        is_no_allowed_banners=False,
+                        company_id=company_id
                     )
         
         # major_status=BANNED но status не BANNED - проверяем каждую группу
@@ -1008,7 +1019,8 @@ def process_moderation_file(filepath: Path) -> bool:
                             process_banned_group(
                                 token, user_id, cabinet_id, preset_id, preset,
                                 ag_id, ad_data, sets, objective,
-                                is_no_allowed_banners=True
+                                is_no_allowed_banners=True,
+                                company_id=company_id
                             )
                 # Не удаляем файл, так как есть проблемы
                 should_delete = False
@@ -1050,7 +1062,8 @@ def process_moderation_file(filepath: Path) -> bool:
                             process_banned_group(
                                 token, user_id, cabinet_id, preset_id, preset,
                                 ag_id, ad_data, sets, objective,
-                                is_no_allowed_banners=True
+                                is_no_allowed_banners=True,
+                                company_id=company_id
                             )
                 # Не удаляем файл, так как есть проблемы
                 should_delete = False
