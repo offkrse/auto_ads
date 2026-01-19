@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.55"
+VersionCyclop = "1.56"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -29,13 +29,9 @@ ENV_FILE = Path("/opt/auto_ads/.env")
 LOGS_DIR = Path("/opt/auto_ads/logs")
 LOG_FILE = LOGS_DIR / "cyclop.log"
 
-# Директория для проверки модерации
-CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
-CHECK_MODERATION_DIR.mkdir(parents=True, exist_ok=True)
-
-# Директория для one-shot пресетов (автоматическое пересоздание после бана)
+# Директории для пресетов модерации
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
-ONE_SHOT_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+ONE_ADD_GROUPS_DIR = Path("/opt/auto_ads/data/one_add_groups")
 
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 
@@ -105,31 +101,12 @@ def package_id_for_objective(obj: str) -> int:
     return {
         "socialengagement": 3127,
         "site_conversions": 3229,
-        "leadads": 3215,
     }.get(obj, 3127)
 
 # Площадки (pads), разрешённые для пакета 3127 (примерный список)
 PADS_FOR_PACKAGE: Dict[int, List[int]] = {
     3127: [102641, 1254386, 111756, 1265106, 1010345, 2243453],
 }
-
-# Площадки для leadads (пакет 3215)
-# ВК: Лента, В клипах, В историях, В видео, VK mini apps перед загрузкой,
-#     VK mini apps рядом с контентом, VK mini apps за просмотр, Боковая колонка, Нативная реклама
-# Одноклассники: Лента, OK mini apps перед загрузкой, OK mini apps за просмотр,
-#                Боковая колонка, OK mini apps рядом с контентом, В клипах, В видео
-# Проекты ВК: Нативная реклама
-# Рекламная сеть: Нативная реклама, Боковая колонка, В видео, Перед загрузкой, За просмотр
-PADS_FOR_LEADADS: List[int] = [
-    # ВК
-    1342048, 1303002, 2243453, 2620220, 1361696, 2224658, 2224674, 2224661, 2937325,
-    # Одноклассники
-    1480820, 1011137, 1011136, 2202571, 2202570, 2341238, 1303027,
-    # Проекты ВК
-    1571938,
-    # Рекламная сеть
-    1359394, 1359123, 1359414, 1361691, 1359393,
-]
 
 # ======= ШАБЛОНЫ ДЛЯ НАЗВАНИЙ =======
 AUD_TOKEN_RE = re.compile(r"\{\%([A-Z]+)((?:-[A-Z]+(?:\([^\)]*\))?)*)\%\}")
@@ -1077,100 +1054,6 @@ def write_result_error(user_id: str, cabinet_id: str, preset_id: str, preset_nam
     # Отправляем уведомление в Telegram
     notify_error_if_enabled(user_id, cabinet_id, preset_name, human)
 
-
-def save_for_moderation_check(
-    user_id: str,
-    cabinet_id: str,
-    preset_id: str,
-    preset: Dict[str, Any],
-    vk_response: Dict[str, Any],
-    ads_info: List[Dict[str, Any]]
-) -> None:
-    """
-    Сохраняет информацию о созданной кампании для последующей проверки модерации.
-    
-    Файл: /opt/auto_ads/data/check_moderation/company_<random_id>.json
-    
-    Ответ VK при создании кампании имеет структуру:
-    {
-      "campaigns": [{"id": 127005819}, {"id": 127005820}],  // это ad_groups (группы объявлений)
-      "id": 16520407                                         // это company_id (ID кампании)
-    }
-    
-    Формат сохраняемого файла:
-    {
-        "user_id": "...",
-        "cabinet_id": "...",
-        "preset_id": "...",
-        "preset": {...},
-        "company_ids": ["16520407"],
-        "ad_groups_ids": [{"127005819": {...}}, {"127005820": {...}}],
-        "created_at": "2026-01-18 12:00:00"
-    }
-    """
-    try:
-        company_ids = []
-        ad_groups_info = []
-        
-        if not isinstance(vk_response, dict):
-            log.warning("save_for_moderation_check: vk_response is not a dict")
-            return
-        
-        # ID кампании - на верхнем уровне
-        company_id = vk_response.get("id")
-        if company_id:
-            company_ids.append(str(company_id))
-        
-        # ad_groups - в поле "campaigns" (да, VK так называет группы в ответе)
-        ad_groups = vk_response.get("campaigns", [])
-        
-        if isinstance(ad_groups, list):
-            for i, ag in enumerate(ad_groups):
-                if isinstance(ag, dict) and "id" in ag:
-                    ag_id = str(ag["id"])
-                    # Сопоставляем с информацией об объявлениях
-                    ad_info = ads_info[i] if i < len(ads_info) else {}
-                    video_id = ad_info.get("video_id", "")
-                    image_id = ad_info.get("image_id", "")
-                    ad_groups_info.append({
-                        ag_id: {
-                            "video_id": video_id,
-                            "original_video_id": video_id,
-                            "image_id": image_id,
-                            "original_image_id": image_id,
-                            "textset_id": ad_info.get("textset_id", ""),
-                            "short_description": ad_info.get("short_description", ""),
-                            "long_description": ad_info.get("long_description", ""),
-                        }
-                    })
-        
-        if not company_ids:
-            log.warning("save_for_moderation_check: no company_id found in response: %s", 
-                       str(vk_response)[:300])
-            return
-        
-        random_id = random.randint(100000, 999999)
-        filename = f"company_{random_id}.json"
-        filepath = CHECK_MODERATION_DIR / filename
-        
-        data = {
-            "user_id": str(user_id),
-            "cabinet_id": str(cabinet_id),
-            "preset_id": str(preset_id),
-            "preset": preset,
-            "company_ids": company_ids,
-            "ad_groups_ids": ad_groups_info,
-            "created_at": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        
-        dump_json(filepath, data)
-        log.info("Saved for moderation check: %s (company_ids=%s, ad_groups=%d)", 
-                filepath, company_ids, len(ad_groups_info))
-        
-    except Exception as e:
-        log.error("save_for_moderation_check failed: %s", repr(e))
-
-
 def extract_campaign_ids_from_resp(resp: Dict[str, Any]) -> List[int]:
     #Возвращаем список int без дублей (порядок сохраняем).
     ids: List[int] = []
@@ -1456,32 +1339,6 @@ def create_url_v2(url_str: str, tokens: List[str]) -> int:
             return int(payload["url"]["id"])
 
     raise RuntimeError(f"No id in /api/v2/urls.json response: {payload}")
-
-
-def create_leadads_url(leadform_id: str, tokens: List[str]) -> int:
-    """
-    Создаёт URL для лидформы через /api/v2/urls.json.
-    Формат URL: leadads://{leadform_id}/
-    Возвращает id для использования в ad_object_id и urls.primary.id.
-    """
-    endpoint = f"{API_BASE}/api/v2/urls.json"
-    leadads_url = f"leadads://{leadform_id}/"
-    body = json.dumps({"url": leadads_url}, ensure_ascii=False).encode("utf-8")
-    log.info("Creating leadads URL: %s", leadads_url)
-    payload = with_retries("POST", endpoint, tokens, data=body)
-
-    if isinstance(payload, dict):
-        if "id" in payload:
-            url_id = int(payload["id"])
-            log.info("Leadads URL created: leadform_id=%s -> url_id=%s", leadform_id, url_id)
-            return url_id
-        # на всякий случай (если внезапно завернутый формат)
-        if isinstance(payload.get("url"), dict) and "id" in payload["url"]:
-            url_id = int(payload["url"]["id"])
-            log.info("Leadads URL created: leadform_id=%s -> url_id=%s", leadform_id, url_id)
-            return url_id
-
-    raise RuntimeError(f"No id in /api/v2/urls.json response for leadads: {payload}")
     
 # ============================ Баннер (строго 2 креатива) ============================
 
@@ -1526,17 +1383,10 @@ def make_banner_for_creative(url_id: int,
                              cta_text: str,
                              media_kind: str,
                              media_id: int,
-                             objective: str = "",
-                             button_text: str = "") -> Dict[str, Any]:
+                             objective: str = "") -> Dict[str, Any]:
     """
     Собирает баннер с переданным media_kind ('image_600x600' или 'video_portrait_9_16_30s')
     и media_id. Остальные поля — как раньше.
-    
-    Для leadads:
-    - text_90: короткое описание
-    - text_220: длинное описание
-    - cta_leadads: CTA кнопка
-    - title_30_additional: текст на кнопке (из поля button_text)
     """
     title = (ad.get("title") or "").strip()
     short = (ad.get("shortDescription") or "").strip()
@@ -1556,22 +1406,9 @@ def make_banner_for_creative(url_id: int,
         # Для картинок и любых других типов — как раньше
         content[media_kind] = {"id": int(media_id)}
 
-    log.info("Banner #%d: icon_id=%s, %s=%s, name='%s', cta='%s', objective='%s'",
-             idx, int(icon_id), media_kind, media_id, banner_name, cta_text, objective)
-    
-    if objective == "leadads":
-        textblocks = {
-            "about_company_115": {"text": advertiser_info, "title": ""},
-            "cta_leadads": {"text": (cta_text or "sendRequest"), "title": ""},
-            "text_90": {"text": short, "title": ""},
-            "text_220": {"text": long_text, "title": ""},
-            "title_40_vkads": {"text": title, "title": ""},
-        }
-        # Добавляем title_30_additional если есть текст на кнопке
-        if button_text:
-            textblocks["title_30_additional"] = {"text": button_text, "title": ""}
-            log.info("Banner #%d: added title_30_additional='%s'", idx, button_text)
-    elif objective == "site_conversions":
+    log.info("Banner #%d: icon_id=%s, %s=%s, name='%s', cta='%s'",
+             idx, int(icon_id), media_kind, media_id, banner_name, cta_text)
+    if objective == "site_conversions":
         textblocks = {
             "about_company_115": {"text": advertiser_info, "title": ""},
             "cta_sites_full": {"text": (cta_text or "visitSite"), "title": ""},
@@ -1721,65 +1558,6 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     return payload
 
 
-# ============================ Поиск одобренных креативов ============================
-
-def find_approved_creative(
-    sets: List[Dict],
-    video_id: str,
-    textset_id: str,
-    objective: str,
-    cabinet_id: str
-) -> Optional[Dict]:
-    """
-    Ищет одобренный креатив в sets.json для данного video_id и textset_id.
-    
-    Возвращает словарь с одобренными данными:
-    {
-        "video_id": "...",
-        "text_short": "...",
-        "text_long": "..."
-    }
-    или None если не найдено.
-    """
-    for s in sets:
-        for item in s.get("items", []):
-            # Проверяем vkByCabinet
-            vk_by_cabinet = item.get("vkByCabinet", {})
-            vk_id = str(vk_by_cabinet.get(str(cabinet_id), ""))
-            
-            if vk_id != str(video_id):
-                continue
-            
-            # Нашли креатив, ищем в moderation одобренный вариант
-            moderation = item.get("moderation", [])
-            for mod_entry in moderation:
-                if objective not in mod_entry:
-                    continue
-                
-                for record in mod_entry[objective]:
-                    if record.get("status") == "APPROVED" and record.get("textset_id") == textset_id:
-                        return {
-                            "video_id": record.get("video_id", video_id),
-                            "text_short": record.get("text_short", ""),
-                            "text_long": record.get("text_long", "")
-                        }
-    
-    return None
-
-
-def load_sets_for_cabinet(user_id: str, cabinet_id: str) -> List[Dict]:
-    """Загружает sets.json для кабинета."""
-    sets_path = USERS_ROOT / str(user_id) / "creatives" / str(cabinet_id) / "sets.json"
-    if not sets_path.exists():
-        return []
-    try:
-        with open(sets_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        log.warning("Failed to load sets.json: %s", e)
-        return []
-
-
 # ============================ Создание плана ============================
 
 def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
@@ -1811,11 +1589,10 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                                "leadads требует company.leadform_id", "Missing company.leadform_id")
             raise RuntimeError("Missing company.leadform_id for leadads")
         try:
-            # Создаём URL через /api/v2/urls.json с leadads://{leadform_id}/
-            ad_object_id = create_leadads_url(str(leadform).strip(), tokens)
+            ad_object_id = int(leadform)
         except Exception as e:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                               "Не удалось создать URL для лидформы", repr(e))
+                               "company.leadform_id должен быть числом", repr(e))
             raise
     else:
         # Разрешаем URL -> id (как раньше) — только если не leadads
@@ -1881,34 +1658,6 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                  i, ad.get("adName"), ad.get("button"), ad.get("title"), ad.get("videoIds"),
                  ad.get("logoId") or company.get("logoId"),
                  ad.get("advertiserInfo") or company.get("advertiserInfo"))
-
-    # 2.1) Загружаем sets.json для поиска одобренных креативов
-    sets_data = load_sets_for_cabinet(user_id, cabinet_id)
-    
-    # 2.2) Проверяем одобренные креативы и подменяем video_id/тексты если есть
-    for i, ad in enumerate(ads):
-        video_ids = ad.get("videoIds") or []
-        textset_id = ad.get("textSetId") or ""
-        
-        if video_ids and textset_id:
-            approved = find_approved_creative(
-                sets_data, 
-                str(video_ids[0]), 
-                textset_id, 
-                objective, 
-                str(cabinet_id)
-            )
-            if approved:
-                log.info("Found APPROVED creative for ads[%d]: video_id=%s -> %s, texts updated",
-                        i, video_ids[0], approved.get("video_id"))
-                # Подменяем video_id если изменился
-                if approved.get("video_id") and approved["video_id"] != str(video_ids[0]):
-                    ad["videoIds"] = [approved["video_id"]]
-                # Подменяем тексты
-                if approved.get("text_short"):
-                    ad["shortDescription"] = approved["text_short"]
-                if approved.get("text_long"):
-                    ad["longDescription"] = approved["text_long"]
 
     # === РЕНДЕРИНГ НАЗВАНИЙ С ПОЛНЫМИ ТОКЕНАМИ ===
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
@@ -1979,7 +1728,6 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
     # 3) Баннеры 1:1 с группами + рендер имён с плейсхолдерами
     banners_by_group: List[Dict[str, Any]] = []
-    ads_info_for_moderation: List[Dict[str, Any]] = []  # для save_for_moderation_check
     company_counter = 0
 
     for gi in range(len(groups)):
@@ -2035,14 +1783,6 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         )
 
         cta_text = (ad.get("button") or "visitSite").strip()
-        # Для leadads: button содержит CTA (apply, getoffer, learnMore и т.д.)
-        # buttonText (если есть) -> title_30_additional
-        button_text_for_leadads = ""
-        if objective == "leadads":
-            # CTA для leadads берём из button (apply, getoffer, learnMore и т.д.)
-            cta_text = (ad.get("button") or "apply").strip()
-            # Текст на кнопке (дополнительный) из отдельного поля buttonText
-            button_text_for_leadads = (ad.get("buttonText") or "").strip()
 
         # --- bannerUrl -> url_id для баннера (если нет — используем company.url or leadform id) ---
         banner_url_raw = (
@@ -2071,22 +1811,9 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 advertiser_info=adv_info, icon_id=int(icon_id),
                 banner_name=banner_name, cta_text=cta_text,
                 media_kind=media_kind, media_id=media_id,
-                objective=objective,
-                button_text=button_text_for_leadads
+                objective=objective
             )
             banners_by_group.append(banner)
-            
-            # Сохраняем информацию для проверки модерации
-            video_ids = ad.get("videoIds") or []
-            image_ids = ad.get("imageIds") or []
-            ads_info_for_moderation.append({
-                "video_id": str(video_ids[0]) if video_ids else "",
-                "image_id": str(image_ids[0]) if image_ids else "",
-                "textset_id": ad.get("textSetId") or "",
-                "short_description": ad.get("shortDescription") or "",
-                "long_description": ad.get("longDescription") or "",
-            })
-            
             log.info("Собран баннер #%d для группы '%s' (name='%s')",
                      gi + 1, rendered_group_names[gi], banner_name)
         except Exception as e:
@@ -2178,17 +1905,6 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         raise
 
     write_result_success(user_id, cabinet_id, preset_id, preset_name, trigger_time, id_company)
-    
-    # Сохраняем информацию для проверки модерации
-    for r in results:
-        vk_resp = r.get("response") or {}
-        # Debug: сохраняем структуру ответа в лог
-        log.info("VK response structure for moderation: %s", json.dumps(vk_resp, ensure_ascii=False)[:1000])
-        save_for_moderation_check(
-            user_id, cabinet_id, preset_id, preset,
-            vk_resp, ads_info_for_moderation
-        )
-    
     return results
 
 
@@ -2216,11 +1932,10 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                                "leadads требует company.leadform_id", "Missing company.leadform_id")
             raise RuntimeError("Missing company.leadform_id for leadads")
         try:
-            # Создаём URL через /api/v2/urls.json с leadads://{leadform_id}/
-            ad_object_id = create_leadads_url(str(leadform).strip(), tokens)
+            ad_object_id = int(leadform)
         except Exception as e:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                               "Не удалось создать URL для лидформы", repr(e))
+                               "company.leadform_id должен быть числом", repr(e))
             raise
     else:
         try:
@@ -2260,34 +1975,6 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                            "В пресете отсутствуют объявления", "ads is empty")
         raise RuntimeError("ads is empty")
 
-    # Загружаем sets.json для поиска одобренных креативов
-    sets_data = load_sets_for_cabinet(user_id, cabinet_id)
-    
-    # Проверяем одобренные креативы и подменяем video_id/тексты если есть
-    for i, ad in enumerate(ads):
-        video_ids = ad.get("videoIds") or []
-        textset_id = ad.get("textSetId") or ""
-        
-        if video_ids and textset_id:
-            approved = find_approved_creative(
-                sets_data, 
-                str(video_ids[0]), 
-                textset_id, 
-                objective, 
-                str(cabinet_id)
-            )
-            if approved:
-                log.info("FAST: Found APPROVED creative for ads[%d]: video_id=%s -> %s, texts updated",
-                        i, video_ids[0], approved.get("video_id"))
-                # Подменяем video_id если изменился
-                if approved.get("video_id") and approved["video_id"] != str(video_ids[0]):
-                    ad["videoIds"] = [approved["video_id"]]
-                # Подменяем тексты
-                if approved.get("text_short"):
-                    ad["shortDescription"] = approved["text_short"]
-                if approved.get("text_long"):
-                    ad["longDescription"] = approved["text_long"]
-
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
     day_number_for_names = compute_day_number(datetime.now(LOCAL_TZ))
 
@@ -2322,9 +2009,6 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
     base_payload = build_ad_plan_payload(preset_mut, ad_object_id, 1, rendered_company_name=rendered_company_name)
     payload_try = json.loads(json.dumps(base_payload, ensure_ascii=False))
     payload_try["ad_groups"] = []  # перезапишем полностью
-    
-    # Список для сбора информации об объявлениях для проверки модерации
-    ads_info_for_moderation_fast: List[Dict[str, Any]] = []
 
     pkg_id = package_id_for_objective(objective)
 
@@ -2379,11 +2063,8 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 targetings["pads"] = placements
 
             budget_day = int(g.get("budget") or 0)
-            # Для leadads utm не включаем (аналогично build_ad_plan_payload)
-            if objective == "leadads":
-                utm = None
-            else:
-                utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
+            # Для leadads utm не включаем (см. build_ad_plan_payload логику)
+            utm = g.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
             max_price_for_group = compute_group_max_price(g)
 
             # КАЖДЫЙ креатив → отдельная группа с ОДНИМ баннером
@@ -2400,15 +2081,6 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
                 ad_tpl = (ad.get("adName") or f"Объявление {ai + 1}").strip()
                 btn = (ad.get("button") or "visitSite").strip()
-                
-                # Для leadads: button содержит CTA (apply, getoffer, learnMore и т.д.)
-                # buttonText (если есть) -> title_30_additional
-                button_text_for_leadads = ""
-                if objective == "leadads":
-                    # CTA для leadads берём из button (apply, getoffer, learnMore и т.д.)
-                    btn = (ad.get("button") or "apply").strip()
-                    # Текст на кнопке (дополнительный) из отдельного поля buttonText
-                    button_text_for_leadads = (ad.get("buttonText") or "").strip()
 
                 # --- bannerUrl -> url_id для всех баннеров этого ad ---
                 banner_url_raw = (
@@ -2483,8 +2155,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         ad_url_id_for_banner, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
-                        media_kind="video_portrait_9_16_30s", media_id=media_id, objective=objective,
-                        button_text=button_text_for_leadads
+                        media_kind="video_portrait_9_16_30s", media_id=media_id, objective=objective
                     )
 
                     safe_g_name = (g_name or "").strip()
@@ -2506,24 +2177,13 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "date_end": None,
                         "age_restrictions": "18+",
                         "package_id": pkg_id,
+                        "utm": utm,
                         "banners": [banner],
                     }
-                    # Добавляем utm только если установлен (для leadads не будет)
-                    if utm is not None:
-                        group_payload["utm"] = utm
                     pg_group = _build_priced_goal_group(company)
                     if pg_group:
                         group_payload["priced_goal"] = pg_group
                     _add_group_with_optional_pads(payload_try["ad_groups"], group_payload, placements)
-                    
-                    # Сохраняем информацию для проверки модерации
-                    ads_info_for_moderation_fast.append({
-                        "video_id": str(media_id),
-                        "image_id": "",
-                        "textset_id": ad.get("textSetId") or "",
-                        "short_description": ad.get("shortDescription") or "",
-                        "long_description": ad.get("longDescription") or "",
-                    })
                     made_any = True
 
                 # --- затем КАРТИНКИ ---
@@ -2579,8 +2239,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         ad_url_id_for_banner, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
-                        media_kind=media_kind, media_id=media_id, objective=objective,
-                        button_text=button_text_for_leadads
+                        media_kind=media_kind, media_id=media_id, objective=objective
                     )
 
                     safe_g_name = (g_name or "").strip()
@@ -2602,24 +2261,13 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "date_end": None,
                         "age_restrictions": "18+",
                         "package_id": pkg_id,
+                        "utm": utm,
                         "banners": [banner],
                     }
-                    # Добавляем utm только если установлен (для leadads не будет)
-                    if utm is not None:
-                        group_payload["utm"] = utm
                     pg_group = _build_priced_goal_group(company)
                     if pg_group:
                         group_payload["priced_goal"] = pg_group
                     _add_group_with_optional_pads(payload_try["ad_groups"], group_payload, placements)
-                    
-                    # Сохраняем информацию для проверки модерации
-                    ads_info_for_moderation_fast.append({
-                        "video_id": "",
-                        "image_id": str(media_id),
-                        "textset_id": ad.get("textSetId") or "",
-                        "short_description": ad.get("shortDescription") or "",
-                        "long_description": ad.get("longDescription") or "",
-                    })
                     made_any = True
 
             if not made_any:
@@ -2710,17 +2358,6 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
         raise
 
     write_result_success(user_id, cabinet_id, preset_id, preset_name, trigger_time, id_company)
-    
-    # Сохраняем информацию для проверки модерации
-    for r in results:
-        vk_resp = r.get("response") or {}
-        # Debug: сохраняем структуру ответа в лог
-        log.info("VK response structure for moderation (FAST): %s", json.dumps(vk_resp, ensure_ascii=False)[:1000])
-        save_for_moderation_check(
-            user_id, cabinet_id, preset_id, preset,
-            vk_resp, ads_info_for_moderation_fast
-        )
-    
     return results
 
 # ============================ Основной цикл ============================
@@ -2804,6 +2441,347 @@ def process_queue_once() -> None:
         except Exception as e:
             log.exception("Process item failed: %s", e)
 
+
+# ============================ Обработка one_shot_presets ============================
+
+def process_one_shot_presets() -> None:
+    """
+    Обрабатывает пресеты из /opt/auto_ads/data/one_shot_presets/.
+    Каждый файл - обычный пресет, создаём кампанию как обычно.
+    После успешной обработки файл удаляется.
+    """
+    if not ONE_SHOT_PRESETS_DIR.exists():
+        return
+    
+    files = list(ONE_SHOT_PRESETS_DIR.glob("*.json"))
+    if not files:
+        return
+    
+    log.info("Found %d one-shot preset(s) to process", len(files))
+    
+    for filepath in files:
+        try:
+            preset = load_json(filepath)
+            mod_info = preset.get("_moderation_info", {})
+            
+            # Получаем user_id и cabinet_id из пресета или имени файла
+            # Пресет должен содержать эту информацию
+            user_id = preset.get("_user_id", "")
+            cabinet_id = preset.get("_cabinet_id", "")
+            
+            if not user_id or not cabinet_id:
+                log.error("one_shot preset %s missing _user_id or _cabinet_id", filepath.name)
+                continue
+            
+            # Получаем токены
+            tokens = get_tokens_for_cabinet(user_id, cabinet_id)
+            if not tokens:
+                log.error("No tokens for user %s cabinet %s", user_id, cabinet_id)
+                continue
+            
+            preset_name = preset.get("company", {}).get("presetName", "one-shot")
+            trigger_time = datetime.now(LOCAL_TZ).strftime("%H:%M")
+            preset_id = f"os_{filepath.stem}"
+            
+            log.info("Processing one-shot preset: %s (user=%s, cabinet=%s)", 
+                    filepath.name, user_id, cabinet_id)
+            
+            # Определяем тип пресета
+            fast_flag = preset.get("fastPreset", False)
+            
+            if fast_flag:
+                create_ad_plan_fast(
+                    preset, tokens, 1, user_id, cabinet_id,
+                    preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time
+                )
+            else:
+                create_ad_plan(
+                    preset, tokens, 1, user_id, cabinet_id,
+                    preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time
+                )
+            
+            # Удаляем файл после успешной обработки
+            filepath.unlink()
+            log.info("One-shot preset processed and deleted: %s", filepath.name)
+            
+        except Exception as e:
+            log.exception("Failed to process one-shot preset %s: %s", filepath.name, e)
+
+
+# ============================ Обработка one_add_groups ============================
+
+def process_one_add_groups() -> None:
+    """
+    Обрабатывает пресеты из /opt/auto_ads/data/one_add_groups/.
+    Добавляет группу в существующую кампанию.
+    
+    POST /api/v2/ad_plans/<ad_plan_id>.json
+    
+    Тело запроса содержит только ad_groups, без данных кампании.
+    Использует video_id и segments из _moderation_info.
+    """
+    if not ONE_ADD_GROUPS_DIR.exists():
+        return
+    
+    files = list(ONE_ADD_GROUPS_DIR.glob("*.json"))
+    if not files:
+        return
+    
+    log.info("Found %d add-group preset(s) to process", len(files))
+    
+    for filepath in files:
+        try:
+            preset = load_json(filepath)
+            mod_info = preset.get("_moderation_info", {})
+            
+            if not mod_info:
+                log.error("add-group preset %s missing _moderation_info", filepath.name)
+                continue
+            
+            # Получаем данные из _moderation_info
+            new_video_id = mod_info.get("new_video_id")
+            segments = mod_info.get("segments", [])
+            ad_plan_id = mod_info.get("ad_plan_id")
+            
+            if not new_video_id:
+                log.error("add-group preset %s missing new_video_id", filepath.name)
+                continue
+            
+            if not ad_plan_id:
+                log.error("add-group preset %s missing ad_plan_id", filepath.name)
+                continue
+            
+            # Получаем user_id и cabinet_id
+            user_id = preset.get("_user_id", "")
+            cabinet_id = preset.get("_cabinet_id", "")
+            
+            if not user_id or not cabinet_id:
+                log.error("add-group preset %s missing _user_id or _cabinet_id", filepath.name)
+                continue
+            
+            # Получаем токен
+            tokens = get_tokens_for_cabinet(user_id, cabinet_id)
+            if not tokens:
+                log.error("No tokens for user %s cabinet %s", user_id, cabinet_id)
+                continue
+            
+            token = tokens[0]
+            
+            log.info("Processing add-group preset: %s (ad_plan=%s, video=%s, segments=%s)",
+                    filepath.name, ad_plan_id, new_video_id, segments)
+            
+            # Собираем payload для добавления группы
+            payload = build_add_group_payload(preset, new_video_id, segments)
+            
+            if not payload:
+                log.error("Failed to build add-group payload for %s", filepath.name)
+                continue
+            
+            # Отправляем запрос
+            endpoint = f"{API_BASE}/api/v2/ad_plans/{ad_plan_id}.json"
+            headers = {"Authorization": f"Bearer {token}"}
+            
+            log.info("POST %s", endpoint)
+            if DEBUG_SAVE_PAYLOAD:
+                debug_path = LOGS_DIR / f"add_group_payload_{filepath.stem}.json"
+                dump_json(debug_path, payload)
+            
+            resp = requests.post(
+                endpoint, 
+                json=payload, 
+                headers=headers, 
+                timeout=VK_HTTP_TIMEOUT_POST
+            )
+            
+            if resp.status_code == 200:
+                log.info("Add-group success for %s: %s", filepath.name, resp.text[:200])
+                # Удаляем файл после успешной обработки
+                filepath.unlink()
+                log.info("Add-group preset processed and deleted: %s", filepath.name)
+            else:
+                log.error("Add-group failed for %s: %s %s", 
+                         filepath.name, resp.status_code, resp.text[:300])
+            
+        except Exception as e:
+            log.exception("Failed to process add-group preset %s: %s", filepath.name, e)
+
+
+def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments: List[int]) -> Optional[Dict]:
+    """
+    Собирает payload для добавления группы в существующую кампанию.
+    
+    Возвращает структуру:
+    {
+        "ad_groups": [{
+            "name": "...",
+            "targetings": {...},
+            "banners": [...]
+        }]
+    }
+    """
+    try:
+        company = preset.get("company", {})
+        groups = preset.get("groups", [])
+        ads = preset.get("ads", [])
+        
+        if not groups or not ads:
+            log.error("build_add_group_payload: missing groups or ads")
+            return None
+        
+        # Берём первую группу и первое объявление как шаблон
+        group = groups[0]
+        ad = ads[0]
+        
+        objective = company.get("targetAction", "leadads")
+        
+        # Собираем targetings
+        regions = group.get("regions", [])
+        gender = group.get("gender", "male,female")
+        age_str = group.get("age", "18-65")
+        
+        # Парсим возраст
+        age_list = build_age_list(age_str)
+        
+        # Парсим пол
+        sex_list = []
+        if "male" in gender:
+            sex_list.append("male")
+        if "female" in gender:
+            sex_list.append("female")
+        if not sex_list:
+            sex_list = ["male", "female"]
+        
+        targetings: Dict[str, Any] = {
+            "geo": {"regions": [int(r) for r in regions if r]},
+            "sex": sex_list,
+            "age": {"age_list": age_list},
+        }
+        
+        # Добавляем сегменты из _moderation_info
+        if segments:
+            targetings["audience_segments_new"] = {
+                "items": [{"id": int(s)} for s in segments]
+            }
+        
+        # Добавляем интересы если есть
+        interests = group.get("interests", [])
+        if interests:
+            targetings["interests"] = [int(i) for i in interests]
+        
+        # Placements
+        placements = group.get("placements", [])
+        if placements:
+            targetings["pads"] = [int(p) for p in placements]
+        
+        # Бюджет
+        budget_day = int(group.get("budget", 200))
+        max_price = 0
+        bid_strategy = group.get("bidStrategy", "min")
+        if bid_strategy != "min":
+            max_price = int(group.get("maxCpa", 0) or 0)
+        
+        # Дата старта
+        start_date = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
+        start_date_str = start_date.strftime("%Y-%m-%d")
+        
+        # Собираем баннер
+        icon_id = ad.get("logoId") or company.get("logoId")
+        adv_info = ad.get("advertiserInfo") or company.get("advertiserInfo", "")
+        title = ad.get("title", "")
+        short_desc = ad.get("shortDescription", "")
+        long_desc = ad.get("longDescription", "")
+        cta = ad.get("button", "apply")
+        button_text = ad.get("buttonText", "")
+        
+        # URL/leadform
+        if objective == "leadads":
+            leadform_id = company.get("leadform_id", "")
+            url_id = int(leadform_id) if leadform_id else 0
+        else:
+            url = company.get("url", "")
+            # Здесь нужно было бы получить url_id, но для простоты используем 0
+            url_id = 0
+        
+        # Content с новым video_id
+        content: Dict[str, Any] = {
+            "icon_256x256": {"id": int(icon_id) if icon_id else 0},
+            "video_portrait_9_16_30s": {"id": int(new_video_id)},
+            "video_portrait_9_16_180s": {"id": int(new_video_id)},
+        }
+        
+        # Textblocks
+        if objective == "leadads":
+            textblocks = {
+                "about_company_115": {"text": adv_info, "title": ""},
+                "cta_leadads": {"text": cta, "title": ""},
+                "text_90": {"text": short_desc, "title": ""},
+                "text_220": {"text": long_desc, "title": ""},
+                "title_40_vkads": {"text": title, "title": ""},
+            }
+            if button_text:
+                textblocks["title_30_additional"] = {"text": button_text, "title": ""}
+        else:
+            textblocks = {
+                "about_company_115": {"text": adv_info, "title": ""},
+                "cta_sites_full": {"text": cta, "title": ""},
+                "text_90": {"text": short_desc, "title": ""},
+                "text_long": {"text": long_desc, "title": ""},
+                "title_40_vkads": {"text": title, "title": ""},
+            }
+        
+        banner = {
+            "name": ad.get("adName", "Объявление"),
+            "urls": {"primary": {"id": url_id}},
+            "content": content,
+            "textblocks": textblocks,
+        }
+        
+        # Название группы
+        group_name = group.get("groupName", "Группа")
+        
+        # Package ID
+        pkg_id = package_id_for_objective(objective)
+        
+        ad_group = {
+            "name": group_name,
+            "targetings": targetings,
+            "max_price": max_price,
+            "budget_limit": None,
+            "budget_limit_day": budget_day,
+            "date_start": start_date_str,
+            "date_end": None,
+            "age_restrictions": "18+",
+            "package_id": pkg_id,
+            "banners": [banner],
+        }
+        
+        return {"ad_groups": [ad_group]}
+        
+    except Exception as e:
+        log.exception("build_add_group_payload error: %s", e)
+        return None
+
+
+def get_tokens_for_cabinet(user_id: str, cabinet_id: str) -> List[str]:
+    """Получает токены для кабинета из файла пользователя."""
+    user_file = USERS_ROOT / str(user_id) / f"{user_id}.json"
+    if not user_file.exists():
+        return []
+    
+    try:
+        user_data = load_json(user_file)
+        cabinets = user_data.get("cabinets", [])
+        for cab in cabinets:
+            if str(cab.get("id")) == str(cabinet_id):
+                token_name = cab.get("token", "")
+                if token_name and token_name in _TOKEN_CACHE:
+                    return [_TOKEN_CACHE[token_name]]
+        return []
+    except Exception as e:
+        log.error("get_tokens_for_cabinet error: %s", e)
+        return []
+
+
 def main_loop() -> None:
     load_tokens_from_envfile()
     now_local = datetime.now(LOCAL_TZ)
@@ -2819,6 +2797,10 @@ def main_loop() -> None:
     while True:
         try:
             process_queue_once()
+            # Обрабатываем one-shot пресеты после основной очереди
+            process_one_shot_presets()
+            # Обрабатываем add-group пресеты в последнюю очередь
+            process_one_add_groups()
         except Exception as e:
             log.exception("Fatal error: %s", e)
         sleep_to_next_tick(30, wake_early=0.15)
