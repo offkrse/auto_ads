@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.58"
+VersionCyclop = "1.59"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1243,6 +1243,7 @@ def check_trigger(trigger_hhmm: str, now_local: Optional[datetime] = None) -> Tu
 
     # короткий лог
     sign = f"+{SERVER_SHIFT_HOURS}" if SERVER_SHIFT_HOURS >= 0 else str(SERVER_SHIFT_HOURS)
+    log.info("trig=%s | %s | match=%s", trigger_hhmm, sign, match)
     return match, info
 
 def as_int_list(maybe_csv_or_list) -> List[int]:
@@ -2753,9 +2754,9 @@ def process_queue_once() -> None:
             # статус пресета в очереди (по умолчанию считаем active)
             status = str(item.get("status", "active")).strip().lower()
             if status != "active":
-                #log.info("[SKIP] %s/%s preset=%s | status=%s",
-                #         item.get("user_id"), item.get("cabinet_id"),
-                #         item.get("preset_id"), status)
+                log.info("[SKIP] %s/%s preset=%s | status=%s",
+                         item.get("user_id"), item.get("cabinet_id"),
+                         item.get("preset_id"), status)
                 continue
 
             user_id = str(item["user_id"])
@@ -3130,6 +3131,7 @@ def get_tokens_for_cabinet(user_id: str, cabinet_id: str) -> List[str]:
     """Получает токены для кабинета из файла пользователя."""
     user_file = USERS_ROOT / str(user_id) / f"{user_id}.json"
     if not user_file.exists():
+        log.error("User file not found: %s", user_file)
         return []
     
     try:
@@ -3138,8 +3140,19 @@ def get_tokens_for_cabinet(user_id: str, cabinet_id: str) -> List[str]:
         for cab in cabinets:
             if str(cab.get("id")) == str(cabinet_id):
                 token_name = cab.get("token", "")
-                if token_name and token_name in _TOKEN_CACHE:
-                    return [_TOKEN_CACHE[token_name]]
+                if token_name:
+                    # Токен может быть именем переменной окружения (VK_TOKEN_xxx) или сырым токеном
+                    if token_name.startswith("VK_TOKEN_"):
+                        # Имя переменной окружения
+                        token_value = os.environ.get(token_name, "")
+                        if token_value:
+                            return [token_value]
+                        else:
+                            log.error("Token %s not found in environment", token_name)
+                    else:
+                        # Сырой токен
+                        return [token_name]
+        log.error("Cabinet %s not found for user %s", cabinet_id, user_id)
         return []
     except Exception as e:
         log.error("get_tokens_for_cabinet error: %s", e)
