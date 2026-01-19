@@ -10,6 +10,8 @@ import {
   IconMisc,
 } from "./components/icons/SidebarIcons";
 import { TriggersPage } from "./components/TriggersPage";
+import { TextSetsPage } from "./components/TextSetsPage";
+import { IconText } from "./components/icons/IconText";
 
 
 declare global {
@@ -116,6 +118,7 @@ type PresetAd = {
   advertiserInfo?: string;
   logoId?: string;
   button?: string;
+  buttonText?: string; // Текст на кнопке (для leadads)
   videoIds: string[];
   imageIds: string[];
   creativeSetIds: string[];
@@ -300,6 +303,24 @@ const CTA_OPTIONS: {label: string; value: string}[] = [
   { label: "Получить предложение",value: "getoffer"    },
 ];
 
+const CTA_OPTIONS_LEADADS: {label: string; value: string}[] = [
+  { label: "Подать заявку",       value: "apply"       },
+  { label: "Получить предложение",value: "getoffer"    },
+  { label: "Подробнее",           value: "learnMore"   },
+  { label: "Попробовать",         value: "try"         },
+  { label: "Узнать",              value: "learn"       },
+  { label: "Смотреть",            value: "watch"       },
+  { label: "Принять участие",     value: "participate" },
+  { label: "Написать",            value: "write"       },
+  { label: "Откликнуться",        value: "respond"     },
+  { label: "Открыть",             value: "open"        },
+  { label: "Создать",             value: "create"      },
+  { label: "Связаться",           value: "contactUs"   },
+  { label: "Заказать",            value: "order"       },
+  { label: "Подписаться",         value: "subscribe"   },
+  { label: "Записаться",          value: "enroll"      },
+];
+
 type CropFormatId = "600x600" | "1080x1350" | "607x1080";
 
 type ImageFormat = {
@@ -395,7 +416,7 @@ async function cropImageToBlob(
   });
 }
 
-type TabId = "campaigns" | "creatives" | "audiences" | "logo" | "history" | "settings" | "misc";
+type TabId = "campaigns" | "creatives" | "audiences" | "logo" | "textsets" | "history" | "settings" | "misc";
 type CampaignsSubTab = "presets" | "companies";
 type CompaniesViewTab = "campaigns" | "groups" | "ads";
 
@@ -3107,6 +3128,7 @@ function normalizePreset(raw: any): Preset {
     advertiserInfo: a?.advertiserInfo ?? "",
     logoId: a?.logoId ?? "",
     button: a?.button ?? "",
+    buttonText: a?.buttonText ?? "",
     videoIds: Array.isArray(a?.videoIds) ? a.videoIds.map(String) : [],
     imageIds: Array.isArray(a?.imageIds) ? a.imageIds.map(String) : [],
     creativeSetIds: Array.isArray(a?.creativeSetIds) ? a.creativeSetIds.map(String) : [],
@@ -5252,6 +5274,7 @@ const App: React.FC = () => {
           shortDescription: "",
           longDescription: "",
           button: "",
+          buttonText: "",
           videoIds: [],
           imageIds: [],
           creativeSetIds: [],
@@ -5308,6 +5331,7 @@ const App: React.FC = () => {
           shortDescription: "",
           longDescription: "",
           button: "",
+          buttonText: "",
           videoIds: [],
           imageIds: [],             // ←
           creativeSetIds: [],
@@ -6391,7 +6415,16 @@ const App: React.FC = () => {
             <IconAudience3 className="tab-icon" />
             <span className="tab-label">Аудитории</span>
           </button>
-
+          <button
+            className={`sidebar-tab ${activeTab === "textsets" ? "active" : ""}`}
+            onClick={() => {
+              setActiveTab("textsets");
+              setView({ type: "home" });
+            }}
+          >
+            <IconText className="tab-icon" />
+            <span className="tab-label">Тексты</span>
+          </button>
           <button
             className={`sidebar-tab ${activeTab === "history" ? "active" : ""}`}
             onClick={() => {
@@ -6414,17 +6447,19 @@ const App: React.FC = () => {
             <span className="tab-label">Настройки</span>
           </button>
 
-          {/* Разное с подвкладками Триггер и Триггер пресета */}
-          <button
-            className={`sidebar-tab ${activeTab === "misc" ? "active" : ""}`}
-            onClick={() => {
-              setActiveTab("misc");
-              setView({ type: "home" });
-            }}
-          >
-            <IconMisc className="tab-icon" />
-            <span className="tab-label">Разное</span>
-          </button>
+          {/* Разное с подвкладками Триггер и Триггер пресета - только для user_id 1342381428 */}
+          {userId === "1342381428" && (
+            <button
+              className={`sidebar-tab ${activeTab === "misc" ? "active" : ""}`}
+              onClick={() => {
+                setActiveTab("misc");
+                setView({ type: "home" });
+              }}
+            >
+              <IconMisc className="tab-icon" />
+              <span className="tab-label">Разное</span>
+            </button>
+          )}
         </div>
       </aside>
     </>
@@ -6514,9 +6549,9 @@ const App: React.FC = () => {
             </button>
             
             <div className="companies-actions-dropdown">
-              <button className="outline-button">
+              <button className="outline-button" style={{borderRadius:7,padding:"6px 16px"}}>
                 Действия
-                <span style={{ marginLeft: 4, fontSize: 10, borderRadius:7 }}>▼</span>
+                <span style={{ marginLeft: 4, fontSize: 10 }}>▼</span>
               </button>
             </div>
             
@@ -8278,11 +8313,24 @@ const App: React.FC = () => {
                 onChange={(e) => updateAd({ button: e.target.value })}
               >
                 <option value="">Не выбрано</option>
-                {CTA_OPTIONS.map(o => (
+                {(companyTarget === "leadads" ? CTA_OPTIONS_LEADADS : CTA_OPTIONS).map(o => (
                   <option key={o.value} value={o.value}>{o.label}</option>
                 ))}
               </select>
             </div>
+
+            {companyTarget === "leadads" && (
+              <div className="form-field">
+                <label>Текст на кнопке</label>
+                <input
+                  type="text"
+                  maxLength={30}
+                  placeholder="Дополнительный текст на кнопке"
+                  value={ad.buttonText ?? ""}
+                  onChange={(e) => updateAd({ buttonText: e.target.value })}
+                />
+              </div>
+            )}
 
             {ad.textSetId && (
               <>
@@ -9185,6 +9233,14 @@ const App: React.FC = () => {
     if (activeTab === "campaigns") return renderCampaignsHome();
     if (activeTab === "creatives") return renderCreativesPage();
     if (activeTab === "audiences") return renderAudiencesPage();
+    if (activeTab === "textsets") return (
+      <TextSetsPage
+        apiBase={API_BASE}
+        userId={userId || ""}
+        cabinetId={selectedCabinetId}
+        fetchSecured={fetchSecured}
+      />
+    );
     if (activeTab === "logo") return renderLogoPage();
     if (activeTab === "history") return renderHistoryPage();
     if (activeTab === "settings") return renderSettingsPage();
@@ -9192,7 +9248,7 @@ const App: React.FC = () => {
       <TriggersPage
         apiBase={API_BASE}
         userId={userId || ""}
-        cabinetId={cabinetId}
+        cabinetId={selectedCabinetId}
         cabinets={cabinets}
         fetchSecured={fetchSecured}
       />
