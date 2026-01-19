@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.54"
+VersionCyclop = "1.55"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1721,6 +1721,65 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
     return payload
 
 
+# ============================ Поиск одобренных креативов ============================
+
+def find_approved_creative(
+    sets: List[Dict],
+    video_id: str,
+    textset_id: str,
+    objective: str,
+    cabinet_id: str
+) -> Optional[Dict]:
+    """
+    Ищет одобренный креатив в sets.json для данного video_id и textset_id.
+    
+    Возвращает словарь с одобренными данными:
+    {
+        "video_id": "...",
+        "text_short": "...",
+        "text_long": "..."
+    }
+    или None если не найдено.
+    """
+    for s in sets:
+        for item in s.get("items", []):
+            # Проверяем vkByCabinet
+            vk_by_cabinet = item.get("vkByCabinet", {})
+            vk_id = str(vk_by_cabinet.get(str(cabinet_id), ""))
+            
+            if vk_id != str(video_id):
+                continue
+            
+            # Нашли креатив, ищем в moderation одобренный вариант
+            moderation = item.get("moderation", [])
+            for mod_entry in moderation:
+                if objective not in mod_entry:
+                    continue
+                
+                for record in mod_entry[objective]:
+                    if record.get("status") == "APPROVED" and record.get("textset_id") == textset_id:
+                        return {
+                            "video_id": record.get("video_id", video_id),
+                            "text_short": record.get("text_short", ""),
+                            "text_long": record.get("text_long", "")
+                        }
+    
+    return None
+
+
+def load_sets_for_cabinet(user_id: str, cabinet_id: str) -> List[Dict]:
+    """Загружает sets.json для кабинета."""
+    sets_path = USERS_ROOT / str(user_id) / "creatives" / str(cabinet_id) / "sets.json"
+    if not sets_path.exists():
+        return []
+    try:
+        with open(sets_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        log.warning("Failed to load sets.json: %s", e)
+        return []
+
+
 # ============================ Создание плана ============================
 
 def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
@@ -1822,6 +1881,34 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                  i, ad.get("adName"), ad.get("button"), ad.get("title"), ad.get("videoIds"),
                  ad.get("logoId") or company.get("logoId"),
                  ad.get("advertiserInfo") or company.get("advertiserInfo"))
+
+    # 2.1) Загружаем sets.json для поиска одобренных креативов
+    sets_data = load_sets_for_cabinet(user_id, cabinet_id)
+    
+    # 2.2) Проверяем одобренные креативы и подменяем video_id/тексты если есть
+    for i, ad in enumerate(ads):
+        video_ids = ad.get("videoIds") or []
+        textset_id = ad.get("textSetId") or ""
+        
+        if video_ids and textset_id:
+            approved = find_approved_creative(
+                sets_data, 
+                str(video_ids[0]), 
+                textset_id, 
+                objective, 
+                str(cabinet_id)
+            )
+            if approved:
+                log.info("Found APPROVED creative for ads[%d]: video_id=%s -> %s, texts updated",
+                        i, video_ids[0], approved.get("video_id"))
+                # Подменяем video_id если изменился
+                if approved.get("video_id") and approved["video_id"] != str(video_ids[0]):
+                    ad["videoIds"] = [approved["video_id"]]
+                # Подменяем тексты
+                if approved.get("text_short"):
+                    ad["shortDescription"] = approved["text_short"]
+                if approved.get("text_long"):
+                    ad["longDescription"] = approved["text_long"]
 
     # === РЕНДЕРИНГ НАЗВАНИЙ С ПОЛНЫМИ ТОКЕНАМИ ===
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
@@ -2172,6 +2259,34 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
         write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                            "В пресете отсутствуют объявления", "ads is empty")
         raise RuntimeError("ads is empty")
+
+    # Загружаем sets.json для поиска одобренных креативов
+    sets_data = load_sets_for_cabinet(user_id, cabinet_id)
+    
+    # Проверяем одобренные креативы и подменяем video_id/тексты если есть
+    for i, ad in enumerate(ads):
+        video_ids = ad.get("videoIds") or []
+        textset_id = ad.get("textSetId") or ""
+        
+        if video_ids and textset_id:
+            approved = find_approved_creative(
+                sets_data, 
+                str(video_ids[0]), 
+                textset_id, 
+                objective, 
+                str(cabinet_id)
+            )
+            if approved:
+                log.info("FAST: Found APPROVED creative for ads[%d]: video_id=%s -> %s, texts updated",
+                        i, video_ids[0], approved.get("video_id"))
+                # Подменяем video_id если изменился
+                if approved.get("video_id") and approved["video_id"] != str(video_ids[0]):
+                    ad["videoIds"] = [approved["video_id"]]
+                # Подменяем тексты
+                if approved.get("text_short"):
+                    ad["shortDescription"] = approved["text_short"]
+                if approved.get("text_long"):
+                    ad["longDescription"] = approved["text_long"]
 
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
     day_number_for_names = compute_day_number(datetime.now(LOCAL_TZ))
