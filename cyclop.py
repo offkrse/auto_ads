@@ -1243,7 +1243,6 @@ def check_trigger(trigger_hhmm: str, now_local: Optional[datetime] = None) -> Tu
 
     # короткий лог
     sign = f"+{SERVER_SHIFT_HOURS}" if SERVER_SHIFT_HOURS >= 0 else str(SERVER_SHIFT_HOURS)
-    log.info("trig=%s | %s | match=%s", trigger_hhmm, sign, match)
     return match, info
 
 def as_int_list(maybe_csv_or_list) -> List[int]:
