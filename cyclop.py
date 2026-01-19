@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.56"
+VersionCyclop = "1.57"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -2387,9 +2387,9 @@ def process_queue_once() -> None:
             # статус пресета в очереди (по умолчанию считаем active)
             status = str(item.get("status", "active")).strip().lower()
             if status != "active":
-                log.info("[SKIP] %s/%s preset=%s | status=%s",
-                         item.get("user_id"), item.get("cabinet_id"),
-                         item.get("preset_id"), status)
+                #log.info("[SKIP] %s/%s preset=%s | status=%s",
+                #         item.get("user_id"), item.get("cabinet_id"),
+                #         item.get("preset_id"), status)
                 continue
 
             user_id = str(item["user_id"])
