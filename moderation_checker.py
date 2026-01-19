@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.14"
+VERSION = "1.15"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -493,22 +493,51 @@ def find_local_video_id_by_vk_id(sets: List[Dict], vk_video_id: str, cabinet_id:
                     return str(local_id)
     return None
 
+
+# Кэш для уже обработанных video_id в текущем запуске
+# {old_video_id: new_video_id}
+_rehash_cache: Dict[str, str] = {}
+
+
+def clear_rehash_cache() -> None:
+    """Очищает кэш rehash (вызывать в начале обработки)."""
+    global _rehash_cache
+    _rehash_cache = {}
+
+
 def rehash_video(
     user_id: str,
     cabinet_id: str,
     video_id: str,
-    token: str,
-    sets: Optional[List[Dict]] = None
+    token: str
 ) -> Optional[Dict]:
     """
     Создаёт копию видео с новым хэшом и загружает в VK.
-    НЕ удаляет оригинальное видео.
     
-    video_id - это VK ID видео (из баннера).
-    Файлы на диске называются: {vk_id}_{original_name} (например 102924861_IMG_0822.MOV)
+    Логика:
+    1. Проверяем кэш - если video_id уже обрабатывался, возвращаем закэшированный результат
+    2. Ищем файл: /mnt/data/auto_ads_storage/video/<cabinet_id>/<video_id>_<name>.<ext>
+    3. Создаём временный файл: temp_<random_id>_<name>.<ext> в той же директории
+    4. Ремуксим через ffmpeg (меняет хэш)
+    5. Загружаем в VK
+    6. Удаляем временный файл
+    7. Сохраняем результат в кэш
     
     Возвращает информацию о новом видео или None при ошибке.
     """
+    global _rehash_cache
+    
+    # Проверяем кэш
+    if video_id in _rehash_cache:
+        cached_new_id = _rehash_cache[video_id]
+        log.info("Using cached rehash result: %s -> %s", video_id, cached_new_id)
+        return {
+            "old_vk_id": video_id,
+            "new_vk_id": cached_new_id,
+            "vk_response": {},
+            "from_cache": True
+        }
+    
     storage = cabinet_storage(cabinet_id)
     
     # Файлы на диске называются {vk_id}_{original_name}
@@ -547,41 +576,49 @@ def rehash_video(
     width = int(meta.get("width") or 720)
     height = int(meta.get("height") or 1280)
     
-    # Получаем display_name (часть после vk_id_)
-    display_name = video_file.name.split("_", 1)[1] if "_" in video_file.name else video_file.name
-    ext = video_file.suffix
+    # Получаем original_name (часть после vk_id_)
+    original_name = video_file.name.split("_", 1)[1] if "_" in video_file.name else video_file.name
     
-    # Создаём временный файл с изменённым содержимым через ffmpeg
-    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-        tmp_path = Path(tmp.name)
+    # Создаём временный файл В ТОЙ ЖЕ ДИРЕКТОРИИ
+    random_id = random.randint(100000, 999999)
+    temp_filename = f"temp_{random_id}_{original_name}"
+    temp_path = storage / temp_filename
     
     try:
-        # Ремультиплекс через ffmpeg для изменения байтов
+        # Ремультиплекс через ffmpeg для изменения хэша
+        log.info("Remuxing video to %s", temp_path)
         proc = subprocess.run(
             [
                 "ffmpeg", "-y",
                 "-i", str(video_file),
                 "-c", "copy",
-                str(tmp_path),
+                "-map_metadata", "-1",  # убираем метаданные для изменения хэша
+                str(temp_path),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
         if proc.returncode != 0:
-            log.warning("ffmpeg remux failed, copying file: %s", proc.stderr[:300])
-            shutil.copy(video_file, tmp_path)
+            log.error("ffmpeg remux failed: %s", proc.stderr[:500])
+            return None
+        
+        if not temp_path.exists():
+            log.error("Temp file was not created: %s", temp_path)
+            return None
+        
+        log.info("Temp file created: %s (size=%d)", temp_path, temp_path.stat().st_size)
         
         # Загружаем в VK
         headers = {"Authorization": f"Bearer {token}"}
         vk_url = f"{API_BASE}/api/v2/content/video.json"
         
-        with open(tmp_path, "rb") as fh:
+        with open(temp_path, "rb") as fh:
             files = {
-                "file": (display_name, fh, "video/mp4"),
+                "file": (original_name, fh, "video/mp4"),
                 "data": (None, json.dumps({"width": width, "height": height}), "application/json"),
             }
-            resp = requests.post(vk_url, headers=headers, files=files, timeout=120)
+            resp = requests.post(vk_url, headers=headers, files=files, timeout=180)
         
         if resp.status_code != 200:
             log.error("VK upload failed: %s %s", resp.status_code, resp.text[:300])
@@ -597,6 +634,9 @@ def rehash_video(
         
         log.info("Video rehashed: %s -> %s", video_id, new_vk_id)
         
+        # Сохраняем в кэш
+        _rehash_cache[video_id] = new_vk_id
+        
         return {
             "old_vk_id": video_id,
             "new_vk_id": new_vk_id,
@@ -609,10 +649,11 @@ def rehash_video(
     finally:
         # Удаляем временный файл
         try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except:
-            pass
+            if temp_path.exists():
+                temp_path.unlink()
+                log.info("Deleted temp file: %s", temp_path)
+        except Exception as e:
+            log.warning("Failed to delete temp file %s: %s", temp_path, e)
 
 # ============================ Textsets ============================
 
@@ -900,6 +941,10 @@ def process_moderation_file(filepath: Path) -> bool:
     if not token:
         log.error("No token for user %s cabinet %s", user_id, cabinet_id)
         return False  # Не удаляем, попробуем позже
+    
+    # Очищаем кэш rehash для этого файла (чтобы одинаковые video_id в одном файле 
+    # использовали один и тот же новый video_id)
+    clear_rehash_cache()
     
     objective = preset.get("company", {}).get("targetAction", "socialengagement")
     
