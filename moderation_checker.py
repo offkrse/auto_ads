@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.22"
+VERSION = "1.23"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -442,14 +442,7 @@ def get_next_symbol(current_text: str, swap_char: str, symbols_str: str, used_te
     
     # Проверяем есть ли swap_char в тексте
     if swap_char not in current_text:
-        log.warning("swap_char %r not found in text, adding symbol to end", swap_char)
-        # Если swap_char нет - добавляем символ в конец
-        for symbol in symbols:
-            new_text = current_text + symbol
-            if new_text not in used_texts:
-                return new_text
-        # Все варианты использованы - добавляем случайный
-        return current_text + random.choice(symbols) + str(random.randint(0, 9))
+        log.warning("swap_char %r not found in text: %s", swap_char, current_text[:50])
     
     for symbol in symbols:
         new_text = current_text.replace(swap_char, symbol, 1)
@@ -949,8 +942,8 @@ def process_banned_group(
         "BANNED", textset_id, short_desc, long_desc, original_video_id
     )
     
-    # Меняем хэш видео
-    rehash_result = rehash_video(user_id, cabinet_id, video_id, token)
+    # Меняем хэш видео - ищем файл по original_video_id (файл на диске называется по оригинальному ID)
+    rehash_result = rehash_video(user_id, cabinet_id, original_video_id, token)
     
     if rehash_result:
         new_video_id = rehash_result["new_vk_id"]
@@ -1096,7 +1089,22 @@ def process_moderation_file(filepath: Path) -> bool:
                             else:
                                 groups_to_keep_checking.append(ag_id)
                         else:
-                            # Группа без проблем - можно удалить из отслеживания
+                            # Группа без проблем - записываем APPROVED и удаляем из отслеживания
+                            video_id = ad_data.get("video_id", "")
+                            original_video_id = ad_data.get("original_video_id", video_id)
+                            textset_id = ad_data.get("textset_id", "")
+                            short_desc = ad_data.get("short_description", "")
+                            long_desc = ad_data.get("long_description", "")
+                            
+                            log.info("Group %s passed moderation (major_status=BANNED), writing APPROVED: video=%s, original=%s",
+                                    ag_id, video_id, original_video_id)
+                            
+                            if video_id:
+                                result = update_moderation_status(
+                                    sets, video_id, cabinet_id, objective,
+                                    "APPROVED", textset_id, short_desc, long_desc, original_video_id
+                                )
+                                log.info("update_moderation_status(APPROVED) returned: %s", result)
                             groups_to_remove.append(ag_id)
             else:
                 log.warning("Campaign %s has major_status=BANNED but no groups with NO_ALLOWED_BANNERS", company_id)
