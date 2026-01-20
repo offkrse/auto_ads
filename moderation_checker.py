@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.20"
+VERSION = "1.21"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -398,25 +398,37 @@ def update_moderation_status(
                         return True
     return False
 
-def get_used_texts(sets: List[Dict], video_id: str, cabinet_id: str, objective: str) -> List[Tuple[str, str]]:
-    """Возвращает список уже использованных текстов (short, long) для видео."""
+def get_used_texts(sets: List[Dict], original_video_id: str, cabinet_id: str, objective: str) -> List[Tuple[str, str]]:
+    """
+    Возвращает список уже использованных текстов (short, long) для оригинального видео.
+    Ищет по original_video_id в записях moderation.
+    """
     used = []
+    original_video_id_str = str(original_video_id)
+    
     for s in sets:
         for item in s.get("items", []):
+            # Проверяем соответствует ли item оригинальному видео
             vk_by_cabinet = item.get("vkByCabinet", {})
-            item_match = (
-                str(vk_by_cabinet.get(str(cabinet_id))) == str(video_id) or
-                str(item.get("id")) == str(video_id)
-            )
+            item_id = str(item.get("id", ""))
+            vk_id = str(vk_by_cabinet.get(str(cabinet_id), ""))
+            
+            item_match = (item_id == original_video_id_str) or (vk_id == original_video_id_str)
             
             if item_match and "moderation" in item:
                 for mod_entry in item["moderation"]:
                     if objective in mod_entry:
                         for record in mod_entry[objective]:
-                            used.append((
-                                record.get("text_short", ""),
-                                record.get("text_long", "")
-                            ))
+                            # Также проверяем записи по original_video_id внутри moderation
+                            record_original = str(record.get("original_video_id", ""))
+                            if record_original == original_video_id_str or not record_original:
+                                used.append((
+                                    record.get("text_short", ""),
+                                    record.get("text_long", "")
+                                ))
+    
+    log.info("get_used_texts for original_video=%s: found %d used combinations", 
+            original_video_id_str, len(used))
     return used
 
 # ============================ Замена текста ============================
@@ -1131,7 +1143,7 @@ def process_moderation_file(filepath: Path) -> bool:
                             groups_to_remove.append(ag_id)
             else:
                 # Все группы прошли модерацию - записываем APPROVED
-                log.info("All groups in campaign %s passed moderation", company_id)
+                log.info("All groups in campaign %s passed moderation, writing APPROVED to sets.json", company_id)
                 
                 for ag_info in ad_groups_ids:
                     for ag_id, ad_data in ag_info.items():
@@ -1141,11 +1153,15 @@ def process_moderation_file(filepath: Path) -> bool:
                         short_desc = ad_data.get("short_description", "")
                         long_desc = ad_data.get("long_description", "")
                         
+                        log.info("Writing APPROVED for group %s: video=%s, original=%s, textset=%s",
+                                ag_id, video_id, original_video_id, textset_id)
+                        
                         if video_id:
-                            update_moderation_status(
+                            result = update_moderation_status(
                                 sets, video_id, cabinet_id, objective,
                                 "APPROVED", textset_id, short_desc, long_desc, original_video_id
                             )
+                            log.info("update_moderation_status returned: %s", result)
                         groups_to_remove.append(ag_id)
         else:
             # Другой статус (PENDING и т.д.) - оставляем для повторной проверки
