@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.62"
+VersionCyclop = "1.63"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1173,6 +1173,105 @@ def save_for_moderation_check(
         
     except Exception as e:
         log.error("save_for_moderation_check failed: %s", repr(e))
+
+
+def add_group_to_moderation_file(company_id: str, group_info: Dict[str, Any]) -> bool:
+    """
+    Добавляет информацию о новой группе в существующий файл check_moderation.
+    
+    Ищет файл с company_id в company_ids и добавляет group_info в ad_groups_ids.
+    
+    Args:
+        company_id: ID кампании
+        group_info: Словарь вида {group_id: {video_id: ..., textset_id: ..., ...}}
+    
+    Returns:
+        True если файл найден и обновлён, False иначе.
+    """
+    try:
+        company_id_str = str(company_id)
+        
+        # Ищем файл с этой кампанией
+        for filepath in CHECK_MODERATION_DIR.glob("company_*.json"):
+            try:
+                data = load_json(filepath)
+                company_ids = data.get("company_ids", [])
+                
+                if company_id_str in [str(c) for c in company_ids]:
+                    # Нашли файл, добавляем группу
+                    ad_groups_ids = data.get("ad_groups_ids", [])
+                    ad_groups_ids.append(group_info)
+                    data["ad_groups_ids"] = ad_groups_ids
+                    
+                    # Сохраняем
+                    dump_json(filepath, data)
+                    log.info("Updated moderation file %s: added group to ad_groups_ids", filepath.name)
+                    return True
+                    
+            except Exception as e:
+                log.warning("Error reading %s: %s", filepath.name, e)
+                continue
+        
+        log.warning("No moderation file found for company_id=%s", company_id)
+        return False
+        
+    except Exception as e:
+        log.error("add_group_to_moderation_file failed: %s", repr(e))
+        return False
+
+
+def remove_group_from_moderation_file(company_id: str, group_id: str) -> bool:
+    """
+    Удаляет информацию о группе из файла check_moderation.
+    
+    Args:
+        company_id: ID кампании
+        group_id: ID группы для удаления
+    
+    Returns:
+        True если группа удалена, False иначе.
+    """
+    try:
+        company_id_str = str(company_id)
+        group_id_str = str(group_id)
+        
+        # Ищем файл с этой кампанией
+        for filepath in CHECK_MODERATION_DIR.glob("company_*.json"):
+            try:
+                data = load_json(filepath)
+                company_ids = data.get("company_ids", [])
+                
+                if company_id_str in [str(c) for c in company_ids]:
+                    # Нашли файл, удаляем группу
+                    ad_groups_ids = data.get("ad_groups_ids", [])
+                    new_ad_groups_ids = []
+                    removed = False
+                    
+                    for ag_info in ad_groups_ids:
+                        if isinstance(ag_info, dict):
+                            # Проверяем есть ли group_id в ключах
+                            if group_id_str not in ag_info:
+                                new_ad_groups_ids.append(ag_info)
+                            else:
+                                removed = True
+                                log.info("Removed group %s from moderation file %s", group_id_str, filepath.name)
+                        else:
+                            new_ad_groups_ids.append(ag_info)
+                    
+                    if removed:
+                        data["ad_groups_ids"] = new_ad_groups_ids
+                        dump_json(filepath, data)
+                        return True
+                    
+            except Exception as e:
+                log.warning("Error reading %s: %s", filepath.name, e)
+                continue
+        
+        return False
+        
+    except Exception as e:
+        log.error("remove_group_from_moderation_file failed: %s", repr(e))
+        return False
 
 
 def extract_campaign_ids_from_resp(resp: Dict[str, Any]) -> List[int]:
@@ -3013,30 +3112,33 @@ def process_one_add_groups() -> None:
                     trigger_time, [int(ad_plan_id)]
                 )
                 
-                # Сохраняем для проверки модерации
+                # Обновляем существующий файл check_moderation - добавляем группу в ad_groups_ids
                 try:
                     resp_json = resp.json() if resp.text else {}
                     ads = preset.get("ads", [])
                     ad = ads[0] if ads else {}
-                    ads_info = [{
-                        "video_id": new_video_id,
-                        "original_video_id": mod_info.get("original_video_id", new_video_id),
-                        "image_id": "",
-                        "textset_id": ad.get("textSetId", ""),
-                        "short_description": ad.get("shortDescription", ""),
-                        "long_description": ad.get("longDescription", ""),
-                    }]
-                    # Формируем response в нужном формате
-                    vk_response = {
-                        "id": ad_plan_id,
-                        "campaigns": resp_json.get("campaigns", []) if resp_json else []
-                    }
-                    save_for_moderation_check(
-                        user_id, cabinet_id, f"ag_{filepath.stem}",
-                        preset, vk_response, ads_info
-                    )
+                    
+                    # Получаем ID новой группы из ответа
+                    new_campaigns = resp_json.get("campaigns", []) if resp_json else []
+                    
+                    for new_camp in new_campaigns:
+                        if isinstance(new_camp, dict) and "id" in new_camp:
+                            new_group_id = str(new_camp["id"])
+                            new_group_info = {
+                                new_group_id: {
+                                    "video_id": new_video_id,
+                                    "original_video_id": mod_info.get("original_video_id", new_video_id),
+                                    "image_id": "",
+                                    "textset_id": ad.get("textSetId", ""),
+                                    "short_description": ad.get("shortDescription", ""),
+                                    "long_description": ad.get("longDescription", ""),
+                                }
+                            }
+                            # Добавляем в существующий файл
+                            add_group_to_moderation_file(ad_plan_id, new_group_info)
+                            log.info("Added group %s to moderation check for campaign %s", new_group_id, ad_plan_id)
                 except Exception as e:
-                    log.warning("Failed to save add-group for moderation check: %s", e)
+                    log.warning("Failed to update moderation file for add-group: %s", e)
                 
                 # Удаляем файл после успешной обработки
                 filepath.unlink()
@@ -3165,8 +3267,58 @@ def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments:
             "textblocks": textblocks,
         }
         
-        # Название группы
-        group_name = group.get("groupName", "Группа")
+        # Название группы с поддержкой токенов
+        group_name_tpl = group.get("groupName", "Группа")
+        
+        # Получаем данные для рендеринга токенов
+        today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
+        day_number = compute_day_number(datetime.now(LOCAL_TZ))
+        
+        # Получаем имена аудиторий
+        aud_names = list(group.get("audienceNames") or [])
+        abs_names = list(group.get("abstractAudiences") or [])
+        if not aud_names and abs_names:
+            aud_names = expand_abstract_names(abs_names, day_number)
+        
+        # Рендерим название группы
+        group_name = truncate_name(
+            render_with_tokens(
+                group_name_tpl,
+                today_date=today,
+                objective=objective,
+                age=group.get("age", ""),
+                gender=group.get("gender", ""),
+                n=1,
+                n_g=1,
+                creo="Видео",
+                audience_names=aud_names,
+                company_src=company.get("companyName", ""),
+                group_src=group_name_tpl,
+                banner_src=ad.get("adName", "")
+            ),
+            200
+        )
+        
+        # Рендерим название баннера
+        banner_name_tpl = ad.get("adName", "Объявление")
+        banner_name = truncate_name(
+            render_with_tokens(
+                banner_name_tpl,
+                today_date=today,
+                objective=objective,
+                age=group.get("age", ""),
+                gender=group.get("gender", ""),
+                n=1,
+                n_g=1,
+                creo="Видео",
+                audience_names=aud_names,
+                company_src=company.get("companyName", ""),
+                group_src=group_name_tpl,
+                banner_src=banner_name_tpl
+            ),
+            200
+        )
+        banner["name"] = banner_name
         
         # Package ID
         pkg_id = package_id_for_objective(objective)
