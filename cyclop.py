@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.61"
+VersionCyclop = "1.62"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -3001,12 +3001,21 @@ def process_one_add_groups() -> None:
                 timeout=VK_HTTP_TIMEOUT_POST
             )
             
-            if resp.status_code == 200:
-                log.info("Add-group success for %s: %s", filepath.name, resp.text[:200])
+            if resp.status_code in (200, 204):
+                log.info("Add-group success for %s (status=%d): %s", 
+                        filepath.name, resp.status_code, resp.text[:200] if resp.text else "empty")
+                
+                # Записываем успех в created.json
+                preset_name = preset.get("company", {}).get("presetName", "add-group")
+                trigger_time = datetime.now(LOCAL_TZ).strftime("%H:%M")
+                write_result_success(
+                    user_id, cabinet_id, f"ag_{filepath.stem}", preset_name,
+                    trigger_time, [int(ad_plan_id)]
+                )
                 
                 # Сохраняем для проверки модерации
                 try:
-                    resp_json = resp.json()
+                    resp_json = resp.json() if resp.text else {}
                     ads = preset.get("ads", [])
                     ad = ads[0] if ads else {}
                     ads_info = [{
@@ -3020,7 +3029,7 @@ def process_one_add_groups() -> None:
                     # Формируем response в нужном формате
                     vk_response = {
                         "id": ad_plan_id,
-                        "campaigns": resp_json.get("campaigns", [])
+                        "campaigns": resp_json.get("campaigns", []) if resp_json else []
                     }
                     save_for_moderation_check(
                         user_id, cabinet_id, f"ag_{filepath.stem}",
