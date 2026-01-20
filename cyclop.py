@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.59"
+VersionCyclop = "1.60"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1771,6 +1771,90 @@ def find_approved_creative(
     return None
 
 
+def is_combination_banned(
+    sets: List[Dict],
+    video_id: str,
+    textset_id: str,
+    text_short: str,
+    text_long: str,
+    objective: str,
+    cabinet_id: str
+) -> bool:
+    """
+    Проверяет, забанена ли комбинация video_id + текст.
+    
+    Возвращает True если найдена запись с status="BANNED" 
+    для данного video_id, textset_id и тех же текстов.
+    """
+    for s in sets:
+        for item in s.get("items", []):
+            # Проверяем vkByCabinet
+            vk_by_cabinet = item.get("vkByCabinet", {})
+            vk_id = str(vk_by_cabinet.get(str(cabinet_id), ""))
+            
+            if vk_id != str(video_id):
+                continue
+            
+            # Нашли креатив, ищем в moderation забаненный вариант
+            moderation = item.get("moderation", [])
+            for mod_entry in moderation:
+                if objective not in mod_entry:
+                    continue
+                
+                for record in mod_entry[objective]:
+                    if record.get("status") == "BANNED" and record.get("textset_id") == textset_id:
+                        # Проверяем совпадение текстов
+                        if record.get("text_short") == text_short and record.get("text_long") == text_long:
+                            return True
+    
+    return False
+
+
+def check_and_replace_banned_creative(
+    ad: Dict[str, Any],
+    sets_data: List[Dict],
+    objective: str,
+    cabinet_id: str,
+    ad_index: int
+) -> bool:
+    """
+    Проверяет объявление на забаненные комбинации и заменяет на одобренные если есть.
+    
+    Возвращает True если была произведена замена.
+    """
+    video_ids = ad.get("videoIds") or []
+    textset_id = ad.get("textSetId") or ""
+    text_short = ad.get("shortDescription") or ""
+    text_long = ad.get("longDescription") or ""
+    
+    if not video_ids or not textset_id:
+        return False
+    
+    video_id = str(video_ids[0])
+    
+    # Проверяем забанена ли текущая комбинация
+    if is_combination_banned(sets_data, video_id, textset_id, text_short, text_long, objective, cabinet_id):
+        log.info("ads[%d]: combination video=%s + texts is BANNED, looking for APPROVED", ad_index, video_id)
+        
+        # Ищем одобренный вариант
+        approved = find_approved_creative(sets_data, video_id, textset_id, objective, cabinet_id)
+        if approved:
+            log.info("ads[%d]: found APPROVED replacement: video=%s", ad_index, approved.get("video_id"))
+            # Подменяем video_id если изменился
+            if approved.get("video_id") and approved["video_id"] != video_id:
+                ad["videoIds"] = [approved["video_id"]]
+            # Подменяем тексты
+            if approved.get("text_short"):
+                ad["shortDescription"] = approved["text_short"]
+            if approved.get("text_long"):
+                ad["longDescription"] = approved["text_long"]
+            return True
+        else:
+            log.warning("ads[%d]: no APPROVED replacement found for banned combination", ad_index)
+    
+    return False
+
+
 def load_sets_for_cabinet(user_id: str, cabinet_id: str) -> List[Dict]:
     """Загружает sets.json для кабинета."""
     sets_path = USERS_ROOT / str(user_id) / "creatives" / str(cabinet_id) / "sets.json"
@@ -1886,33 +1970,12 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                  ad.get("logoId") or company.get("logoId"),
                  ad.get("advertiserInfo") or company.get("advertiserInfo"))
 
-    # 2.1) Загружаем sets.json для поиска одобренных креативов
+    # 2.1) Загружаем sets.json для поиска одобренных/забаненных креативов
     sets_data = load_sets_for_cabinet(user_id, cabinet_id)
     
-    # 2.2) Проверяем одобренные креативы и подменяем video_id/тексты если есть
+    # 2.2) Проверяем забаненные комбинации и заменяем на одобренные если есть
     for i, ad in enumerate(ads):
-        video_ids = ad.get("videoIds") or []
-        textset_id = ad.get("textSetId") or ""
-        
-        if video_ids and textset_id:
-            approved = find_approved_creative(
-                sets_data, 
-                str(video_ids[0]), 
-                textset_id, 
-                objective, 
-                str(cabinet_id)
-            )
-            if approved:
-                log.info("Found APPROVED creative for ads[%d]: video_id=%s -> %s, texts updated",
-                        i, video_ids[0], approved.get("video_id"))
-                # Подменяем video_id если изменился
-                if approved.get("video_id") and approved["video_id"] != str(video_ids[0]):
-                    ad["videoIds"] = [approved["video_id"]]
-                # Подменяем тексты
-                if approved.get("text_short"):
-                    ad["shortDescription"] = approved["text_short"]
-                if approved.get("text_long"):
-                    ad["longDescription"] = approved["text_long"]
+        check_and_replace_banned_creative(ad, sets_data, objective, str(cabinet_id), i)
 
     # === РЕНДЕРИНГ НАЗВАНИЙ С ПОЛНЫМИ ТОКЕНАМИ ===
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
@@ -2264,33 +2327,12 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                            "В пресете отсутствуют объявления", "ads is empty")
         raise RuntimeError("ads is empty")
 
-    # Загружаем sets.json для поиска одобренных креативов
+    # Загружаем sets.json для поиска одобренных/забаненных креативов
     sets_data = load_sets_for_cabinet(user_id, cabinet_id)
     
-    # Проверяем одобренные креативы и подменяем video_id/тексты если есть
+    # Проверяем забаненные комбинации и заменяем на одобренные если есть
     for i, ad in enumerate(ads):
-        video_ids = ad.get("videoIds") or []
-        textset_id = ad.get("textSetId") or ""
-        
-        if video_ids and textset_id:
-            approved = find_approved_creative(
-                sets_data, 
-                str(video_ids[0]), 
-                textset_id, 
-                objective, 
-                str(cabinet_id)
-            )
-            if approved:
-                log.info("FAST: Found APPROVED creative for ads[%d]: video_id=%s -> %s, texts updated",
-                        i, video_ids[0], approved.get("video_id"))
-                # Подменяем video_id если изменился
-                if approved.get("video_id") and approved["video_id"] != str(video_ids[0]):
-                    ad["videoIds"] = [approved["video_id"]]
-                # Подменяем тексты
-                if approved.get("text_short"):
-                    ad["shortDescription"] = approved["text_short"]
-                if approved.get("text_long"):
-                    ad["longDescription"] = approved["text_long"]
+        check_and_replace_banned_creative(ad, sets_data, objective, str(cabinet_id), i)
 
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
     day_number_for_names = compute_day_number(datetime.now(LOCAL_TZ))
@@ -2961,6 +3003,32 @@ def process_one_add_groups() -> None:
             
             if resp.status_code == 200:
                 log.info("Add-group success for %s: %s", filepath.name, resp.text[:200])
+                
+                # Сохраняем для проверки модерации
+                try:
+                    resp_json = resp.json()
+                    ads = preset.get("ads", [])
+                    ad = ads[0] if ads else {}
+                    ads_info = [{
+                        "video_id": new_video_id,
+                        "original_video_id": mod_info.get("original_video_id", new_video_id),
+                        "image_id": "",
+                        "textset_id": ad.get("textSetId", ""),
+                        "short_description": ad.get("shortDescription", ""),
+                        "long_description": ad.get("longDescription", ""),
+                    }]
+                    # Формируем response в нужном формате
+                    vk_response = {
+                        "id": ad_plan_id,
+                        "campaigns": resp_json.get("campaigns", [])
+                    }
+                    save_for_moderation_check(
+                        user_id, cabinet_id, f"ag_{filepath.stem}",
+                        preset, vk_response, ads_info
+                    )
+                except Exception as e:
+                    log.warning("Failed to save add-group for moderation check: %s", e)
+                
                 # Удаляем файл после успешной обработки
                 filepath.unlink()
                 log.info("Add-group preset processed and deleted: %s", filepath.name)
@@ -3000,51 +3068,31 @@ def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments:
         
         objective = company.get("targetAction", "leadads")
         
-        # Собираем targetings
-        regions = group.get("regions", [])
-        gender = group.get("gender", "male,female")
+        # Собираем targetings (как в build_ad_plan_payload)
+        regions = as_int_list(group.get("regions"))
+        gender_str = group.get("gender", "male,female")
+        genders = split_gender(gender_str)
         age_str = group.get("age", "18-65")
-        
-        # Парсим возраст
         age_list = build_age_list(age_str)
+        interests_list = as_int_list(group.get("interests"))
+        placements = as_int_list(group.get("placements"))
         
-        # Парсим пол
-        sex_list = []
-        if "male" in gender:
-            sex_list.append("male")
-        if "female" in gender:
-            sex_list.append("female")
-        if not sex_list:
-            sex_list = ["male", "female"]
-        
-        targetings: Dict[str, Any] = {
-            "geo": {"regions": [int(r) for r in regions if r]},
-            "sex": sex_list,
-            "age": {"age_list": age_list},
-        }
-        
-        # Добавляем сегменты из _moderation_info
+        targetings: Dict[str, Any] = {"geo": {"regions": regions}}
+        if genders:
+            targetings["sex"] = genders
+        # Используем сегменты из _moderation_info
         if segments:
-            targetings["audience_segments_new"] = {
-                "items": [{"id": int(s)} for s in segments]
-            }
-        
-        # Добавляем интересы если есть
-        interests = group.get("interests", [])
-        if interests:
-            targetings["interests"] = [int(i) for i in interests]
-        
-        # Placements
-        placements = group.get("placements", [])
+            targetings["segments"] = [int(s) for s in segments]
+        if interests_list:
+            targetings["interests"] = interests_list
+        if age_list:
+            targetings["age"] = {"age_list": age_list}
         if placements:
-            targetings["pads"] = [int(p) for p in placements]
+            targetings["pads"] = placements
         
         # Бюджет
-        budget_day = int(group.get("budget", 200))
-        max_price = 0
-        bid_strategy = group.get("bidStrategy", "min")
-        if bid_strategy != "min":
-            max_price = int(group.get("maxCpa", 0) or 0)
+        budget_day = int(group.get("budget") or 200)
+        max_price = compute_group_max_price(group)
         
         # Дата старта
         start_date = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
@@ -3107,11 +3155,17 @@ def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments:
         # Package ID
         pkg_id = package_id_for_objective(objective)
         
-        ad_group = {
+        # UTM для не-leadads
+        utm = None
+        if objective != "leadads":
+            utm = group.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
+        
+        ad_group: Dict[str, Any] = {
             "name": group_name,
             "targetings": targetings,
-            "max_price": max_price,
+            "autobidding_mode": "max_goals",
             "budget_limit": None,
+            "max_price": max_price,
             "budget_limit_day": budget_day,
             "date_start": start_date_str,
             "date_end": None,
@@ -3119,6 +3173,14 @@ def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments:
             "package_id": pkg_id,
             "banners": [banner],
         }
+        
+        if utm is not None:
+            ad_group["utm"] = utm
+        
+        # Добавляем priced_goal если есть
+        pg_group = _build_priced_goal_group(company)
+        if pg_group:
+            ad_group["priced_goal"] = pg_group
         
         return {"ad_groups": [ad_group]}
         
