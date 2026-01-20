@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.64"
+VersionCyclop = "1.65"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1826,15 +1826,15 @@ def build_ad_plan_payload(preset: Dict[str, Any], ad_object_id: int, plan_index:
 
 # ============================ Поиск одобренных креативов ============================
 
-def find_approved_creative(
+def find_approved_for_original_video(
     sets: List[Dict],
-    video_id: str,
+    original_video_id: str,
     textset_id: str,
     objective: str,
     cabinet_id: str
 ) -> Optional[Dict]:
     """
-    Ищет одобренный креатив в sets.json для данного video_id и textset_id.
+    Ищет APPROVED комбинацию по original_video_id.
     
     Возвращает словарь с одобренными данными:
     {
@@ -1844,33 +1844,37 @@ def find_approved_creative(
     }
     или None если не найдено.
     """
-    video_id_str = str(video_id)
+    original_video_id_str = str(original_video_id)
     textset_id_str = str(textset_id)
-    cabinet_id_str = str(cabinet_id)
     
     for s in sets:
         for item in s.get("items", []):
-            # Проверяем vkByCabinet
+            # Проверяем id item или vkByCabinet
             vk_by_cabinet = item.get("vkByCabinet", {})
-            vk_id = str(vk_by_cabinet.get(cabinet_id_str, ""))
+            vk_id = str(vk_by_cabinet.get(str(cabinet_id), ""))
+            item_id = str(item.get("id", ""))
             
-            # Проверяем совпадение video_id с vkByCabinet или с id item
-            item_match = (vk_id == video_id_str) or (str(item.get("id", "")) == video_id_str)
+            # item должен соответствовать original_video_id
+            item_match = (item_id == original_video_id_str) or (vk_id == original_video_id_str)
             
             if not item_match:
                 continue
             
-            # Нашли креатив, ищем в moderation одобренный вариант
+            # Нашли креатив, ищем в moderation APPROVED вариант
             moderation = item.get("moderation", [])
             for mod_entry in moderation:
                 if objective not in mod_entry:
                     continue
                 
                 for record in mod_entry[objective]:
-                    if record.get("status") == "APPROVED" and str(record.get("textset_id", "")) == textset_id_str:
-                        log.info("Found APPROVED creative: video=%s -> %s", video_id_str, record.get("video_id"))
+                    # Ищем по original_video_id и APPROVED статусу
+                    if (record.get("status") == "APPROVED" and 
+                        str(record.get("original_video_id", "")) == original_video_id_str and
+                        str(record.get("textset_id", "")) == textset_id_str):
+                        log.info("Found APPROVED: original=%s, video=%s", 
+                                original_video_id_str, record.get("video_id"))
                         return {
-                            "video_id": record.get("video_id", video_id),
+                            "video_id": record.get("video_id", original_video_id),
                             "text_short": record.get("text_short", ""),
                             "text_long": record.get("text_long", "")
                         }
@@ -1878,9 +1882,9 @@ def find_approved_creative(
     return None
 
 
-def is_combination_banned(
+def is_text_banned_for_original_video(
     sets: List[Dict],
-    video_id: str,
+    original_video_id: str,
     textset_id: str,
     text_short: str,
     text_long: str,
@@ -1888,95 +1892,102 @@ def is_combination_banned(
     cabinet_id: str
 ) -> bool:
     """
-    Проверяет, забанена ли комбинация video_id + текст.
-    
-    Возвращает True если найдена запись с status="BANNED" 
-    для данного video_id, textset_id и тех же текстов.
+    Проверяет, забанен ли данный текст для original_video_id.
     """
-    video_id_str = str(video_id)
+    original_video_id_str = str(original_video_id)
     textset_id_str = str(textset_id)
-    cabinet_id_str = str(cabinet_id)
     
     for s in sets:
         for item in s.get("items", []):
-            # Проверяем vkByCabinet - нужно найти item по video_id
+            # Проверяем id item или vkByCabinet
             vk_by_cabinet = item.get("vkByCabinet", {})
-            vk_id = str(vk_by_cabinet.get(cabinet_id_str, ""))
+            vk_id = str(vk_by_cabinet.get(str(cabinet_id), ""))
+            item_id = str(item.get("id", ""))
             
-            # Проверяем совпадение video_id с vkByCabinet или с id item
-            item_match = (vk_id == video_id_str) or (str(item.get("id", "")) == video_id_str)
+            item_match = (item_id == original_video_id_str) or (vk_id == original_video_id_str)
             
             if not item_match:
                 continue
             
-            # Нашли креатив, ищем в moderation забаненный вариант
+            # Ищем BANNED записи
             moderation = item.get("moderation", [])
             for mod_entry in moderation:
                 if objective not in mod_entry:
                     continue
                 
                 for record in mod_entry[objective]:
-                    if record.get("status") != "BANNED":
-                        continue
-                    
-                    # Проверяем textset_id
-                    if str(record.get("textset_id", "")) != textset_id_str:
-                        continue
-                    
-                    # Проверяем совпадение текстов
-                    record_short = record.get("text_short", "")
-                    record_long = record.get("text_long", "")
-                    
-                    if record_short == text_short and record_long == text_long:
-                        log.info("Found BANNED combination: video=%s, textset=%s", video_id_str, textset_id_str)
+                    if (record.get("status") == "BANNED" and
+                        str(record.get("textset_id", "")) == textset_id_str and
+                        record.get("text_short", "") == text_short and
+                        record.get("text_long", "") == text_long):
                         return True
     
     return False
 
 
-def check_and_replace_banned_creative(
+def check_and_get_approved_creative(
     ad: Dict[str, Any],
     sets_data: List[Dict],
     objective: str,
     cabinet_id: str,
     ad_index: int
-) -> bool:
+) -> Optional[Dict]:
     """
-    Проверяет объявление на забаненные комбинации и заменяет на одобренные если есть.
+    Проверяет объявление и возвращает APPROVED данные если есть.
     
-    Возвращает True если была произведена замена.
+    Логика:
+    1. Ищем APPROVED по original_video_id (= текущему video_id из пресета)
+    2. Если нашли - проверяем не забанен ли текст
+    3. Если текст забанен - возвращаем None (объявление не создаём)
+    4. Если текст не забанен - возвращаем APPROVED данные
+    5. Если нет APPROVED - возвращаем исходные данные (первый запуск)
+    
+    Returns:
+        Dict с video_id, text_short, text_long для создания объявления
+        или None если объявление не должно создаваться (текст забанен, нет APPROVED)
     """
     video_ids = ad.get("videoIds") or []
     textset_id = ad.get("textSetId") or ""
     text_short = ad.get("shortDescription") or ""
     text_long = ad.get("longDescription") or ""
     
-    if not video_ids or not textset_id:
-        return False
+    if not video_ids:
+        return None
     
-    video_id = str(video_ids[0])
+    original_video_id = str(video_ids[0])
     
-    # Проверяем забанена ли текущая комбинация
-    if is_combination_banned(sets_data, video_id, textset_id, text_short, text_long, objective, cabinet_id):
-        log.info("ads[%d]: combination video=%s + texts is BANNED, looking for APPROVED", ad_index, video_id)
-        
-        # Ищем одобренный вариант
-        approved = find_approved_creative(sets_data, video_id, textset_id, objective, cabinet_id)
-        if approved:
-            log.info("ads[%d]: found APPROVED replacement: video=%s", ad_index, approved.get("video_id"))
-            # Подменяем video_id если изменился
-            if approved.get("video_id") and approved["video_id"] != video_id:
-                ad["videoIds"] = [approved["video_id"]]
-            # Подменяем тексты
-            if approved.get("text_short"):
-                ad["shortDescription"] = approved["text_short"]
-            if approved.get("text_long"):
-                ad["longDescription"] = approved["text_long"]
-            return True
+    # Ищем APPROVED комбинацию
+    approved = find_approved_for_original_video(
+        sets_data, original_video_id, textset_id, objective, str(cabinet_id)
+    )
+    
+    if approved:
+        # Есть APPROVED - проверяем не забанен ли текущий текст
+        if is_text_banned_for_original_video(
+            sets_data, original_video_id, textset_id, 
+            text_short, text_long, objective, str(cabinet_id)
+        ):
+            log.info("ads[%d]: text is BANNED, using APPROVED replacement", ad_index)
+            return approved
         else:
-            log.warning("ads[%d]: no APPROVED replacement found for banned combination", ad_index)
-    
-    return False
+            # Текст не забанен - используем APPROVED
+            log.info("ads[%d]: using APPROVED video=%s", ad_index, approved.get("video_id"))
+            return approved
+    else:
+        # Нет APPROVED записей - проверяем не забанен ли текущий текст
+        if is_text_banned_for_original_video(
+            sets_data, original_video_id, textset_id,
+            text_short, text_long, objective, str(cabinet_id)
+        ):
+            log.warning("ads[%d]: text is BANNED and no APPROVED found, skipping ad", ad_index)
+            return None
+        
+        # Первый запуск или текст не забанен - используем исходные данные
+        return {
+            "video_id": original_video_id,
+            "text_short": text_short,
+            "text_long": text_long
+        }
 
 
 def load_sets_for_cabinet(user_id: str, cabinet_id: str) -> List[Dict]:
@@ -2097,9 +2108,30 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     # 2.1) Загружаем sets.json для поиска одобренных/забаненных креативов
     sets_data = load_sets_for_cabinet(user_id, cabinet_id)
     
-    # 2.2) Проверяем забаненные комбинации и заменяем на одобренные если есть
+    # 2.2) Проверяем объявления и фильтруем забаненные
+    approved_ads = []
     for i, ad in enumerate(ads):
-        check_and_replace_banned_creative(ad, sets_data, objective, str(cabinet_id), i)
+        approved_data = check_and_get_approved_creative(ad, sets_data, objective, str(cabinet_id), i)
+        if approved_data:
+            # Обновляем объявление одобренными данными
+            ad["videoIds"] = [approved_data["video_id"]]
+            if approved_data.get("text_short"):
+                ad["shortDescription"] = approved_data["text_short"]
+            if approved_data.get("text_long"):
+                ad["longDescription"] = approved_data["text_long"]
+            approved_ads.append(ad)
+        else:
+            log.warning("ads[%d] is BANNED and no APPROVED replacement, skipping", i)
+    
+    # Проверяем остались ли объявления
+    if not approved_ads:
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "Компания отклонена", "All ads are BANNED with no APPROVED replacements")
+        raise RuntimeError("All ads are BANNED")
+    
+    # Заменяем ads на отфильтрованный список
+    ads = approved_ads
+    preset_mut["ads"] = ads
 
     # === РЕНДЕРИНГ НАЗВАНИЙ С ПОЛНЫМИ ТОКЕНАМИ ===
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
@@ -2454,9 +2486,30 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
     # Загружаем sets.json для поиска одобренных/забаненных креативов
     sets_data = load_sets_for_cabinet(user_id, cabinet_id)
     
-    # Проверяем забаненные комбинации и заменяем на одобренные если есть
+    # Проверяем объявления и фильтруем забаненные
+    approved_ads = []
     for i, ad in enumerate(ads):
-        check_and_replace_banned_creative(ad, sets_data, objective, str(cabinet_id), i)
+        approved_data = check_and_get_approved_creative(ad, sets_data, objective, str(cabinet_id), i)
+        if approved_data:
+            # Обновляем объявление одобренными данными
+            ad["videoIds"] = [approved_data["video_id"]]
+            if approved_data.get("text_short"):
+                ad["shortDescription"] = approved_data["text_short"]
+            if approved_data.get("text_long"):
+                ad["longDescription"] = approved_data["text_long"]
+            approved_ads.append(ad)
+        else:
+            log.warning("FAST ads[%d] is BANNED and no APPROVED replacement, skipping", i)
+    
+    # Проверяем остались ли объявления
+    if not approved_ads:
+        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                           "Компания отклонена", "All ads are BANNED with no APPROVED replacements")
+        raise RuntimeError("All ads are BANNED")
+    
+    # Заменяем ads на отфильтрованный список
+    ads = approved_ads
+    preset_mut["ads"] = ads
 
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
     day_number_for_names = compute_day_number(datetime.now(LOCAL_TZ))
@@ -3042,6 +3095,32 @@ def process_one_shot_presets() -> None:
 
 # ============================ Обработка one_add_groups ============================
 
+def get_ad_plan_groups(token: str, ad_plan_id: str) -> List[int]:
+    """
+    Получает список ID групп для кампании.
+    
+    GET /api/v2/ad_plans/<id>.json?fields=ad_groups
+    
+    Returns:
+        Список ID групп
+    """
+    endpoint = f"{API_BASE}/api/v2/ad_plans/{ad_plan_id}.json?fields=id,ad_groups"
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    try:
+        resp = requests.get(endpoint, headers=headers, timeout=VK_HTTP_TIMEOUT)
+        if resp.status_code == 200:
+            data = resp.json()
+            ad_groups = data.get("ad_groups", [])
+            return [int(ag["id"]) for ag in ad_groups if isinstance(ag, dict) and "id" in ag]
+        else:
+            log.warning("get_ad_plan_groups failed: %s %s", resp.status_code, resp.text[:200])
+            return []
+    except Exception as e:
+        log.error("get_ad_plan_groups error: %s", e)
+        return []
+
+
 def process_one_add_groups() -> None:
     """
     Обрабатывает пресеты из /opt/auto_ads/data/one_add_groups/.
@@ -3102,6 +3181,10 @@ def process_one_add_groups() -> None:
             log.info("Processing add-group preset: %s (ad_plan=%s, video=%s, segments=%s)",
                     filepath.name, ad_plan_id, new_video_id, segments)
             
+            # Получаем список групп ДО добавления
+            groups_before = get_ad_plan_groups(token, ad_plan_id)
+            log.info("Groups before adding: %s", groups_before)
+            
             # Собираем payload для добавления группы
             payload = build_add_group_payload(preset, new_video_id, segments, token)
             
@@ -3137,31 +3220,32 @@ def process_one_add_groups() -> None:
                     trigger_time, [int(ad_plan_id)]
                 )
                 
-                # Обновляем существующий файл check_moderation - добавляем группу в ad_groups_ids
+                # Получаем список групп ПОСЛЕ добавления и находим новую
                 try:
-                    resp_json = resp.json() if resp.text else {}
+                    groups_after = get_ad_plan_groups(token, ad_plan_id)
+                    log.info("Groups after adding: %s", groups_after)
+                    
+                    # Находим новые группы (которых не было до добавления)
+                    new_group_ids = [g for g in groups_after if g not in groups_before]
+                    log.info("New groups found: %s", new_group_ids)
+                    
                     ads = preset.get("ads", [])
                     ad = ads[0] if ads else {}
                     
-                    # Получаем ID новой группы из ответа
-                    new_campaigns = resp_json.get("campaigns", []) if resp_json else []
-                    
-                    for new_camp in new_campaigns:
-                        if isinstance(new_camp, dict) and "id" in new_camp:
-                            new_group_id = str(new_camp["id"])
-                            new_group_info = {
-                                new_group_id: {
-                                    "video_id": new_video_id,
-                                    "original_video_id": mod_info.get("original_video_id", new_video_id),
-                                    "image_id": "",
-                                    "textset_id": ad.get("textSetId", ""),
-                                    "short_description": ad.get("shortDescription", ""),
-                                    "long_description": ad.get("longDescription", ""),
-                                }
+                    for new_group_id in new_group_ids:
+                        new_group_info = {
+                            str(new_group_id): {
+                                "video_id": new_video_id,
+                                "original_video_id": mod_info.get("original_video_id", new_video_id),
+                                "image_id": "",
+                                "textset_id": ad.get("textSetId", ""),
+                                "short_description": ad.get("shortDescription", ""),
+                                "long_description": ad.get("longDescription", ""),
                             }
-                            # Добавляем в существующий файл
-                            add_group_to_moderation_file(ad_plan_id, new_group_info)
-                            log.info("Added group %s to moderation check for campaign %s", new_group_id, ad_plan_id)
+                        }
+                        # Добавляем в существующий файл check_moderation
+                        add_group_to_moderation_file(ad_plan_id, new_group_info)
+                        log.info("Added group %s to moderation check for campaign %s", new_group_id, ad_plan_id)
                 except Exception as e:
                     log.warning("Failed to update moderation file for add-group: %s", e)
                 
