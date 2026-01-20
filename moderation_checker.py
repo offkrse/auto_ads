@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.21"
+VERSION = "1.22"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -440,6 +440,17 @@ def get_next_symbol(current_text: str, swap_char: str, symbols_str: str, used_te
     """
     symbols = [s.strip() for s in symbols_str.split(";") if s.strip()]
     
+    # Проверяем есть ли swap_char в тексте
+    if swap_char not in current_text:
+        log.warning("swap_char %r not found in text, adding symbol to end", swap_char)
+        # Если swap_char нет - добавляем символ в конец
+        for symbol in symbols:
+            new_text = current_text + symbol
+            if new_text not in used_texts:
+                return new_text
+        # Все варианты использованы - добавляем случайный
+        return current_text + random.choice(symbols) + str(random.randint(0, 9))
+    
     for symbol in symbols:
         new_text = current_text.replace(swap_char, symbol, 1)
         if new_text not in used_texts:
@@ -471,11 +482,18 @@ def swap_text_symbols(
         long_swap = DEFAULT_LONG_TEXT_SWAP
         long_symbols = DEFAULT_LONG_TEXT_SYMBOLS
     
+    log.info("swap_text_symbols: short_swap=%r, short_symbols=%r", short_swap, short_symbols)
+    log.info("swap_text_symbols: long_swap=%r, long_symbols=%r", long_swap, long_symbols)
+    log.info("swap_text_symbols: used_texts=%s", used_texts)
+    
     used_shorts = [t[0] for t in used_texts]
     used_longs = [t[1] for t in used_texts]
     
     new_short = get_next_symbol(short_desc, short_swap, short_symbols, used_shorts)
     new_long = get_next_symbol(long_desc, long_swap, long_symbols, used_longs)
+    
+    log.info("swap_text_symbols: short changed=%s, long changed=%s", 
+            new_short != short_desc, new_long != long_desc)
     
     return new_short, new_long
 
@@ -1135,11 +1153,15 @@ def process_moderation_file(filepath: Path) -> bool:
                             short_desc = ad_data.get("short_description", "")
                             long_desc = ad_data.get("long_description", "")
                             
+                            log.info("Group %s passed moderation, writing APPROVED: video=%s, original=%s",
+                                    ag_id, video_id, original_video_id)
+                            
                             if video_id:
-                                update_moderation_status(
+                                result = update_moderation_status(
                                     sets, video_id, cabinet_id, objective,
                                     "APPROVED", textset_id, short_desc, long_desc, original_video_id
                                 )
+                                log.info("update_moderation_status(APPROVED) returned: %s", result)
                             groups_to_remove.append(ag_id)
             else:
                 # Все группы прошли модерацию - записываем APPROVED
