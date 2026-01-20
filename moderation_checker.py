@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.17"
+VERSION = "1.18"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -808,6 +808,34 @@ def create_add_group_preset(
 
 # ============================ Обработка забаненных групп ============================
 
+def remove_group_from_moderation_data(data: Dict, group_id: str) -> bool:
+    """
+    Удаляет группу из ad_groups_ids в данных файла модерации.
+    
+    Returns:
+        True если группа была удалена.
+    """
+    group_id_str = str(group_id)
+    ad_groups_ids = data.get("ad_groups_ids", [])
+    new_ad_groups_ids = []
+    removed = False
+    
+    for ag_info in ad_groups_ids:
+        if isinstance(ag_info, dict):
+            if group_id_str not in ag_info:
+                new_ad_groups_ids.append(ag_info)
+            else:
+                removed = True
+                log.info("Marked group %s for removal from moderation file", group_id_str)
+        else:
+            new_ad_groups_ids.append(ag_info)
+    
+    if removed:
+        data["ad_groups_ids"] = new_ad_groups_ids
+    
+    return removed
+
+
 def process_banned_group(
     token: str,
     user_id: str,
@@ -961,7 +989,8 @@ def process_moderation_file(filepath: Path) -> bool:
     # Загружаем sets.json
     sets = load_sets(user_id, cabinet_id)
     
-    should_delete = True  # По умолчанию удаляем после обработки
+    groups_to_remove = []  # Группы для удаления из ad_groups_ids
+    groups_to_keep_checking = []  # Группы которые нужно продолжать проверять
     
     # Проверяем каждую кампанию
     for company_id in company_ids:
@@ -969,7 +998,10 @@ def process_moderation_file(filepath: Path) -> bool:
         
         if status is None:
             log.warning("Could not get status for campaign %s", company_id)
-            should_delete = False  # Не удаляем, попробуем позже
+            # Оставляем все группы этой кампании для повторной проверки
+            for ag_info in ad_groups_ids:
+                for ag_id in ag_info.keys():
+                    groups_to_keep_checking.append(ag_id)
             continue
         
         # Кампания полностью забанена
@@ -979,12 +1011,16 @@ def process_moderation_file(filepath: Path) -> bool:
             # Обрабатываем каждую группу объявлений
             for ag_info in ad_groups_ids:
                 for ag_id, ad_data in ag_info.items():
-                    process_banned_group(
+                    success = process_banned_group(
                         token, user_id, cabinet_id, preset_id, preset,
                         ag_id, ad_data, sets, objective,
                         is_no_allowed_banners=False,
                         company_id=company_id
                     )
+                    if success:
+                        groups_to_remove.append(ag_id)
+                    else:
+                        groups_to_keep_checking.append(ag_id)
         
         # major_status=BANNED но status не BANNED - проверяем каждую группу
         elif major_status == "BANNED":
@@ -1016,17 +1052,25 @@ def process_moderation_file(filepath: Path) -> bool:
                 for ag_info in ad_groups_ids:
                     for ag_id, ad_data in ag_info.items():
                         if ag_id in groups_with_problems:
-                            process_banned_group(
+                            success = process_banned_group(
                                 token, user_id, cabinet_id, preset_id, preset,
                                 ag_id, ad_data, sets, objective,
                                 is_no_allowed_banners=True,
                                 company_id=company_id
                             )
-                # Не удаляем файл, так как есть проблемы
-                should_delete = False
+                            if success:
+                                groups_to_remove.append(ag_id)
+                            else:
+                                groups_to_keep_checking.append(ag_id)
+                        else:
+                            # Группа без проблем - можно удалить из отслеживания
+                            groups_to_remove.append(ag_id)
             else:
                 log.warning("Campaign %s has major_status=BANNED but no groups with NO_ALLOWED_BANNERS", company_id)
-                should_delete = False
+                # Оставляем для повторной проверки
+                for ag_info in ad_groups_ids:
+                    for ag_id in ag_info.keys():
+                        groups_to_keep_checking.append(ag_id)
         
         elif status == "ACTIVE":
             log.info("Campaign %s is ACTIVE, checking groups for NO_ALLOWED_BANNERS", company_id)
@@ -1044,29 +1088,43 @@ def process_moderation_file(filepath: Path) -> bool:
             # Проверяем issues групп
             issues_by_group = get_ad_groups_issues(token, group_ids)
             
-            has_no_allowed_banners = False
             groups_with_problems = []
             
             for ag_id, issues in issues_by_group.items():
                 for issue in issues:
                     if issue.get("code") == "NO_ALLOWED_BANNERS":
-                        has_no_allowed_banners = True
                         groups_with_problems.append(ag_id)
                         log.info("Group %s has NO_ALLOWED_BANNERS", ag_id)
             
-            if has_no_allowed_banners:
+            if groups_with_problems:
                 # Обрабатываем группы с проблемами
                 for ag_info in ad_groups_ids:
                     for ag_id, ad_data in ag_info.items():
                         if ag_id in groups_with_problems:
-                            process_banned_group(
+                            success = process_banned_group(
                                 token, user_id, cabinet_id, preset_id, preset,
                                 ag_id, ad_data, sets, objective,
                                 is_no_allowed_banners=True,
                                 company_id=company_id
                             )
-                # Не удаляем файл, так как есть проблемы
-                should_delete = False
+                            if success:
+                                groups_to_remove.append(ag_id)
+                            else:
+                                groups_to_keep_checking.append(ag_id)
+                        else:
+                            # Группа прошла модерацию - записываем APPROVED и удаляем из отслеживания
+                            video_id = ad_data.get("video_id", "")
+                            original_video_id = ad_data.get("original_video_id", video_id)
+                            textset_id = ad_data.get("textset_id", "")
+                            short_desc = ad_data.get("short_description", "")
+                            long_desc = ad_data.get("long_description", "")
+                            
+                            if video_id:
+                                update_moderation_status(
+                                    sets, video_id, cabinet_id, objective,
+                                    "APPROVED", textset_id, short_desc, long_desc, original_video_id
+                                )
+                            groups_to_remove.append(ag_id)
             else:
                 # Все группы прошли модерацию - записываем APPROVED
                 log.info("All groups in campaign %s passed moderation", company_id)
@@ -1084,15 +1142,32 @@ def process_moderation_file(filepath: Path) -> bool:
                                 sets, video_id, cabinet_id, objective,
                                 "APPROVED", textset_id, short_desc, long_desc, original_video_id
                             )
+                        groups_to_remove.append(ag_id)
         else:
-            # Другой статус (PENDING и т.д.) - не удаляем, проверим позже
+            # Другой статус (PENDING и т.д.) - оставляем для повторной проверки
             log.info("Campaign %s has status %s, will check later", company_id, status)
-            should_delete = False
+            for ag_info in ad_groups_ids:
+                for ag_id in ag_info.keys():
+                    groups_to_keep_checking.append(ag_id)
     
     # Сохраняем обновлённый sets.json
     save_sets(user_id, cabinet_id, sets)
     
-    return should_delete
+    # Удаляем обработанные группы из данных файла
+    for group_id in groups_to_remove:
+        if group_id not in groups_to_keep_checking:
+            remove_group_from_moderation_data(data, group_id)
+    
+    # Проверяем остались ли группы для отслеживания
+    remaining_groups = data.get("ad_groups_ids", [])
+    if not remaining_groups:
+        log.info("All groups processed, file can be deleted")
+        return True
+    else:
+        # Сохраняем обновлённый файл
+        dump_json(filepath, data)
+        log.info("Updated moderation file, %d groups remaining", len(remaining_groups))
+        return False
 
 def process_all_moderation_files() -> None:
     """Обрабатывает все файлы в check_moderation."""
