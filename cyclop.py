@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.66"
+VersionCyclop = "1.67"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1342,7 +1342,7 @@ def check_trigger(trigger_hhmm: str, now_local: Optional[datetime] = None) -> Tu
 
     # короткий лог
     sign = f"+{SERVER_SHIFT_HOURS}" if SERVER_SHIFT_HOURS >= 0 else str(SERVER_SHIFT_HOURS)
-    log.info("trig=%s | %s | match=%s", trigger_hhmm, sign, match)
+    #log.info("trig=%s | %s | match=%s", trigger_hhmm, sign, match)
     return match, info
 
 def as_int_list(maybe_csv_or_list) -> List[int]:
@@ -2105,6 +2105,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
     # 2.1) Загружаем sets.json для поиска одобренных/забаненных креативов
     sets_data = load_sets_for_cabinet(user_id, cabinet_id)
+    log.info("Loaded sets_data with %d sets, checking %d ads", len(sets_data), len(ads))
     
     # 2.2) Проверяем объявления и фильтруем забаненные
     approved_ads = []
@@ -2482,32 +2483,9 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
         raise RuntimeError("ads is empty")
 
     # Загружаем sets.json для поиска одобренных/забаненных креативов
+    # Проверка будет для каждого видео отдельно в цикле ниже
     sets_data = load_sets_for_cabinet(user_id, cabinet_id)
-    
-    # Проверяем объявления и фильтруем забаненные
-    approved_ads = []
-    for i, ad in enumerate(ads):
-        approved_data = check_and_get_approved_creative(ad, sets_data, objective, str(cabinet_id), i)
-        if approved_data:
-            # Обновляем объявление одобренными данными
-            ad["videoIds"] = [approved_data["video_id"]]
-            if approved_data.get("text_short"):
-                ad["shortDescription"] = approved_data["text_short"]
-            if approved_data.get("text_long"):
-                ad["longDescription"] = approved_data["text_long"]
-            approved_ads.append(ad)
-        else:
-            log.warning("FAST ads[%d] is BANNED and no APPROVED replacement, skipping", i)
-    
-    # Проверяем остались ли объявления
-    if not approved_ads:
-        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                           "Компания отклонена", "All ads are BANNED with no APPROVED replacements")
-        raise RuntimeError("All ads are BANNED")
-    
-    # Заменяем ads на отфильтрованный список
-    ads = approved_ads
-    preset_mut["ads"] = ads
+    log.info("FAST: loaded sets_data with %d sets, checking %d ads", len(sets_data), len(ads))
 
     today = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
     day_number_for_names = compute_day_number(datetime.now(LOCAL_TZ))
@@ -2659,6 +2637,34 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     except Exception:
                         continue
 
+                    # Проверяем модерацию для этого конкретного видео
+                    video_id_str = str(media_id)
+                    textset_id = ad.get("textSetId") or ""
+                    text_short = ad.get("shortDescription") or ""
+                    text_long = ad.get("longDescription") or ""
+                    
+                    # Проверяем не забанен ли этот текст для этого видео
+                    if is_text_banned_for_original_video(
+                        sets_data, video_id_str, textset_id,
+                        text_short, text_long, objective, str(cabinet_id)
+                    ):
+                        # Ищем APPROVED
+                        approved = find_approved_for_original_video(
+                            sets_data, video_id_str, textset_id, objective, str(cabinet_id)
+                        )
+                        if approved:
+                            log.info("FAST: video %s text BANNED, using APPROVED video=%s", 
+                                    video_id_str, approved.get("video_id"))
+                            media_id = int(approved["video_id"])
+                            text_short = approved.get("text_short") or text_short
+                            text_long = approved.get("text_long") or text_long
+                            # Обновляем ad для баннера
+                            ad["shortDescription"] = text_short
+                            ad["longDescription"] = text_long
+                        else:
+                            log.warning("FAST: video %s text BANNED, no APPROVED, skipping", video_id_str)
+                            continue
+
                     creo = "Видео"
                     group_seq = len(payload_try["ad_groups"]) + 1
 
@@ -2740,7 +2746,9 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     # Сохраняем информацию для проверки модерации
                     ads_info_for_moderation_fast.append({
                         "video_id": str(media_id),
+                        "original_video_id": str(media_id),
                         "image_id": "",
+                        "original_image_id": "",
                         "textset_id": ad.get("textSetId") or "",
                         "short_description": ad.get("shortDescription") or "",
                         "long_description": ad.get("longDescription") or "",
@@ -2836,7 +2844,9 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     # Сохраняем информацию для проверки модерации
                     ads_info_for_moderation_fast.append({
                         "video_id": "",
+                        "original_video_id": "",
                         "image_id": str(media_id),
+                        "original_image_id": str(media_id),
                         "textset_id": ad.get("textSetId") or "",
                         "short_description": ad.get("shortDescription") or "",
                         "long_description": ad.get("longDescription") or "",
@@ -2971,9 +2981,9 @@ def process_queue_once() -> None:
             # статус пресета в очереди (по умолчанию считаем active)
             status = str(item.get("status", "active")).strip().lower()
             if status != "active":
-                log.info("[SKIP] %s/%s preset=%s | status=%s",
-                         item.get("user_id"), item.get("cabinet_id"),
-                         item.get("preset_id"), status)
+                #log.info("[SKIP] %s/%s preset=%s | status=%s",
+                #         item.get("user_id"), item.get("cabinet_id"),
+                #         item.get("preset_id"), status)
                 continue
 
             user_id = str(item["user_id"])
