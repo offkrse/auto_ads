@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.65"
+VersionCyclop = "1.66"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1937,10 +1937,10 @@ def check_and_get_approved_creative(
     
     Логика:
     1. Ищем APPROVED по original_video_id (= текущему video_id из пресета)
-    2. Если нашли - проверяем не забанен ли текст
-    3. Если текст забанен - возвращаем None (объявление не создаём)
-    4. Если текст не забанен - возвращаем APPROVED данные
-    5. Если нет APPROVED - возвращаем исходные данные (первый запуск)
+    2. Если нашли APPROVED - используем его (текст в пресете был забанен)
+    3. Если нет APPROVED - проверяем не забанен ли текущий текст
+    4. Если текст забанен и нет APPROVED - возвращаем None (объявление не создаём)
+    5. Если текст не забанен - возвращаем исходные данные (первый запуск)
     
     Returns:
         Dict с video_id, text_short, text_long для создания объявления
@@ -1952,9 +1952,11 @@ def check_and_get_approved_creative(
     text_long = ad.get("longDescription") or ""
     
     if not video_ids:
+        log.warning("ads[%d]: no videoIds, skipping", ad_index)
         return None
     
     original_video_id = str(video_ids[0])
+    log.info("ads[%d]: checking video=%s, textset=%s", ad_index, original_video_id, textset_id)
     
     # Ищем APPROVED комбинацию
     approved = find_approved_for_original_video(
@@ -1962,27 +1964,23 @@ def check_and_get_approved_creative(
     )
     
     if approved:
-        # Есть APPROVED - проверяем не забанен ли текущий текст
-        if is_text_banned_for_original_video(
-            sets_data, original_video_id, textset_id, 
-            text_short, text_long, objective, str(cabinet_id)
-        ):
-            log.info("ads[%d]: text is BANNED, using APPROVED replacement", ad_index)
-            return approved
-        else:
-            # Текст не забанен - используем APPROVED
-            log.info("ads[%d]: using APPROVED video=%s", ad_index, approved.get("video_id"))
-            return approved
+        # Есть APPROVED - используем его (это значит исходный текст был забанен)
+        log.info("ads[%d]: found APPROVED, using video=%s", ad_index, approved.get("video_id"))
+        return approved
     else:
         # Нет APPROVED записей - проверяем не забанен ли текущий текст
-        if is_text_banned_for_original_video(
+        is_banned = is_text_banned_for_original_video(
             sets_data, original_video_id, textset_id,
             text_short, text_long, objective, str(cabinet_id)
-        ):
+        )
+        log.info("ads[%d]: no APPROVED found, is_banned=%s", ad_index, is_banned)
+        
+        if is_banned:
             log.warning("ads[%d]: text is BANNED and no APPROVED found, skipping ad", ad_index)
             return None
         
         # Первый запуск или текст не забанен - используем исходные данные
+        log.info("ads[%d]: using original data (first run or not banned)", ad_index)
         return {
             "video_id": original_video_id,
             "text_short": text_short,
@@ -2973,9 +2971,9 @@ def process_queue_once() -> None:
             # статус пресета в очереди (по умолчанию считаем active)
             status = str(item.get("status", "active")).strip().lower()
             if status != "active":
-                #log.info("[SKIP] %s/%s preset=%s | status=%s",
-                #         item.get("user_id"), item.get("cabinet_id"),
-                #         item.get("preset_id"), status)
+                log.info("[SKIP] %s/%s preset=%s | status=%s",
+                         item.get("user_id"), item.get("cabinet_id"),
+                         item.get("preset_id"), status)
                 continue
 
             user_id = str(item["user_id"])
