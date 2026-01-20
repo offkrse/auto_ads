@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.60"
+VersionCyclop = "1.61"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -2979,7 +2979,7 @@ def process_one_add_groups() -> None:
                     filepath.name, ad_plan_id, new_video_id, segments)
             
             # Собираем payload для добавления группы
-            payload = build_add_group_payload(preset, new_video_id, segments)
+            payload = build_add_group_payload(preset, new_video_id, segments, token)
             
             if not payload:
                 log.error("Failed to build add-group payload for %s", filepath.name)
@@ -3040,7 +3040,7 @@ def process_one_add_groups() -> None:
             log.exception("Failed to process add-group preset %s: %s", filepath.name, e)
 
 
-def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments: List[int]) -> Optional[Dict]:
+def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments: List[int], token: str) -> Optional[Dict]:
     """
     Собирает payload для добавления группы в существующую кампанию.
     
@@ -3110,10 +3110,17 @@ def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments:
         # URL/leadform
         if objective == "leadads":
             leadform_id = company.get("leadform_id", "")
-            url_id = int(leadform_id) if leadform_id else 0
+            if not leadform_id:
+                log.error("build_add_group_payload: missing leadform_id for leadads")
+                return None
+            # Создаём URL через API (как в create_ad_plan)
+            url_id = create_leadads_url(str(leadform_id).strip(), [token])
         else:
             url = company.get("url", "")
-            url_id = 0
+            if url:
+                url_id = resolve_url_id(url, [token])
+            else:
+                url_id = 0
         
         # Content с новым video_id
         content: Dict[str, Any] = {
