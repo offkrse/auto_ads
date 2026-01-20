@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.18"
+VERSION = "1.19"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -991,6 +991,7 @@ def process_moderation_file(filepath: Path) -> bool:
     
     groups_to_remove = []  # Группы для удаления из ad_groups_ids
     groups_to_keep_checking = []  # Группы которые нужно продолжать проверять
+    found_banned_groups = False  # Флаг - были ли найдены отклонённые группы
     
     # Проверяем каждую кампанию
     for company_id in company_ids:
@@ -1007,6 +1008,7 @@ def process_moderation_file(filepath: Path) -> bool:
         # Кампания полностью забанена
         if status == "BANNED":
             log.info("Campaign %s is BANNED (status=BANNED)", company_id)
+            found_banned_groups = True
             
             # Обрабатываем каждую группу объявлений
             for ag_info in ad_groups_ids:
@@ -1048,6 +1050,7 @@ def process_moderation_file(filepath: Path) -> bool:
                         log.info("Group %s has NO_ALLOWED_BANNERS", ag_id)
             
             if groups_with_problems:
+                found_banned_groups = True
                 # Обрабатываем группы с проблемами
                 for ag_info in ad_groups_ids:
                     for ag_id, ad_data in ag_info.items():
@@ -1097,6 +1100,7 @@ def process_moderation_file(filepath: Path) -> bool:
                         log.info("Group %s has NO_ALLOWED_BANNERS", ag_id)
             
             if groups_with_problems:
+                found_banned_groups = True
                 # Обрабатываем группы с проблемами
                 for ag_info in ad_groups_ids:
                     for ag_id, ad_data in ag_info.items():
@@ -1154,19 +1158,29 @@ def process_moderation_file(filepath: Path) -> bool:
     save_sets(user_id, cabinet_id, sets)
     
     # Удаляем обработанные группы из данных файла
+    log.info("Groups to remove: %s, groups to keep: %s, found_banned: %s", 
+             groups_to_remove, groups_to_keep_checking, found_banned_groups)
     for group_id in groups_to_remove:
         if group_id not in groups_to_keep_checking:
             remove_group_from_moderation_data(data, group_id)
     
     # Проверяем остались ли группы для отслеживания
     remaining_groups = data.get("ad_groups_ids", [])
-    if not remaining_groups:
-        log.info("All groups processed, file can be deleted")
+    log.info("Remaining groups after processing: %d", len(remaining_groups))
+    
+    # Удаляем файл только если:
+    # 1. Все группы обработаны (remaining_groups пуст)
+    # 2. НЕ было найдено отклонённых групп (иначе ждём добавления новых групп)
+    if not remaining_groups and not found_banned_groups:
+        log.info("All groups processed and no banned found, file can be deleted")
         return True
     else:
         # Сохраняем обновлённый файл
         dump_json(filepath, data)
-        log.info("Updated moderation file, %d groups remaining", len(remaining_groups))
+        if found_banned_groups:
+            log.info("Found banned groups, keeping file for new groups. Remaining: %d", len(remaining_groups))
+        else:
+            log.info("Updated moderation file, %d groups remaining", len(remaining_groups))
         return False
 
 def process_all_moderation_files() -> None:
