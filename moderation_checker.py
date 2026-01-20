@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.23"
+VERSION = "1.24"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -935,6 +935,12 @@ def process_banned_group(
     
     # Получаем уже использованные тексты
     used_texts = get_used_texts(sets, original_video_id, cabinet_id, objective)
+    
+    # ВАЖНО: добавляем текущий текст в used_texts чтобы он обязательно изменился
+    # (иначе если текст уже содержит первый символ из списка, он не изменится)
+    if (short_desc, long_desc) not in used_texts:
+        used_texts.append((short_desc, long_desc))
+        log.info("Added current text to used_texts to force change")
     
     # Записываем статус BANNED
     update_moderation_status(
