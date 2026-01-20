@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.63"
+VersionCyclop = "1.64"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1844,13 +1844,20 @@ def find_approved_creative(
     }
     или None если не найдено.
     """
+    video_id_str = str(video_id)
+    textset_id_str = str(textset_id)
+    cabinet_id_str = str(cabinet_id)
+    
     for s in sets:
         for item in s.get("items", []):
             # Проверяем vkByCabinet
             vk_by_cabinet = item.get("vkByCabinet", {})
-            vk_id = str(vk_by_cabinet.get(str(cabinet_id), ""))
+            vk_id = str(vk_by_cabinet.get(cabinet_id_str, ""))
             
-            if vk_id != str(video_id):
+            # Проверяем совпадение video_id с vkByCabinet или с id item
+            item_match = (vk_id == video_id_str) or (str(item.get("id", "")) == video_id_str)
+            
+            if not item_match:
                 continue
             
             # Нашли креатив, ищем в moderation одобренный вариант
@@ -1860,7 +1867,8 @@ def find_approved_creative(
                     continue
                 
                 for record in mod_entry[objective]:
-                    if record.get("status") == "APPROVED" and record.get("textset_id") == textset_id:
+                    if record.get("status") == "APPROVED" and str(record.get("textset_id", "")) == textset_id_str:
+                        log.info("Found APPROVED creative: video=%s -> %s", video_id_str, record.get("video_id"))
                         return {
                             "video_id": record.get("video_id", video_id),
                             "text_short": record.get("text_short", ""),
@@ -1885,13 +1893,20 @@ def is_combination_banned(
     Возвращает True если найдена запись с status="BANNED" 
     для данного video_id, textset_id и тех же текстов.
     """
+    video_id_str = str(video_id)
+    textset_id_str = str(textset_id)
+    cabinet_id_str = str(cabinet_id)
+    
     for s in sets:
         for item in s.get("items", []):
-            # Проверяем vkByCabinet
+            # Проверяем vkByCabinet - нужно найти item по video_id
             vk_by_cabinet = item.get("vkByCabinet", {})
-            vk_id = str(vk_by_cabinet.get(str(cabinet_id), ""))
+            vk_id = str(vk_by_cabinet.get(cabinet_id_str, ""))
             
-            if vk_id != str(video_id):
+            # Проверяем совпадение video_id с vkByCabinet или с id item
+            item_match = (vk_id == video_id_str) or (str(item.get("id", "")) == video_id_str)
+            
+            if not item_match:
                 continue
             
             # Нашли креатив, ищем в moderation забаненный вариант
@@ -1901,10 +1916,20 @@ def is_combination_banned(
                     continue
                 
                 for record in mod_entry[objective]:
-                    if record.get("status") == "BANNED" and record.get("textset_id") == textset_id:
-                        # Проверяем совпадение текстов
-                        if record.get("text_short") == text_short and record.get("text_long") == text_long:
-                            return True
+                    if record.get("status") != "BANNED":
+                        continue
+                    
+                    # Проверяем textset_id
+                    if str(record.get("textset_id", "")) != textset_id_str:
+                        continue
+                    
+                    # Проверяем совпадение текстов
+                    record_short = record.get("text_short", "")
+                    record_long = record.get("text_long", "")
+                    
+                    if record_short == text_short and record_long == text_long:
+                        log.info("Found BANNED combination: video=%s, textset=%s", video_id_str, textset_id_str)
+                        return True
     
     return False
 
