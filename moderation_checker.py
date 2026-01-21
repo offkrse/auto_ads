@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.28"
+VERSION = "1.29"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_ADD_GROUPS_DIR = Path("/opt/auto_ads/data/one_add_groups")
@@ -808,7 +808,8 @@ def create_add_group_preset(
     new_long: str,
     textset_id: str,
     segments: List[int],
-    ad_plan_id: str = ""
+    ad_plan_id: str = "",
+    audience_name: str = ""
 ) -> Optional[Path]:
     """
     Создаёт пресет для добавления группы с обновлёнными видео и сегментами.
@@ -829,6 +830,7 @@ def create_add_group_preset(
             "new_video_id": new_video_id,
             "segments": segments,
             "ad_plan_id": ad_plan_id,
+            "audience_name": audience_name,  # Имя для токена {%AUD%}
         }
         
         # Обновляем время
@@ -845,10 +847,13 @@ def create_add_group_preset(
                 ad["shortDescription"] = new_short
                 ad["longDescription"] = new_long
         
-        # Обновляем сегменты в группах
-        if segments:
-            for group in new_preset.get("groups", []):
+        # Обновляем сегменты и имя аудитории в группах
+        for group in new_preset.get("groups", []):
+            if segments:
                 group["audienceIds"] = segments
+            # Устанавливаем audienceNames для токена {%AUD%}
+            if audience_name:
+                group["audienceNames"] = [audience_name]
         
         # Сохраняем
         random_id = random.randint(100000, 999999)
@@ -857,7 +862,7 @@ def create_add_group_preset(
         
         dump_json(filepath, new_preset)
         
-        log.info("Created add-group preset: %s (ad_plan_id=%s)", filepath, ad_plan_id)
+        log.info("Created add-group preset: %s (ad_plan_id=%s, audience=%s)", filepath, ad_plan_id, audience_name)
         return filepath
         
     except Exception as e:
@@ -918,6 +923,7 @@ def process_banned_group(
     short_desc = ad_data.get("short_description", "")
     long_desc = ad_data.get("long_description", "")
     segments = []
+    audience_name = ""  # Имя аудитории из названия группы VK
     
     # Загружаем textset для получения настроек символов
     textsets = load_textsets(user_id, cabinet_id)
@@ -937,6 +943,10 @@ def process_banned_group(
         targetings = group_details.get("targetings", {})
         segments = extract_segments_from_targetings(targetings)
         log.info("Group %s segments: %s", group_id, segments)
+        
+        # Извлекаем имя группы для {%AUD%}
+        audience_name = group_details.get("name", "")
+        log.info("Group %s name (for AUD token): %s", group_id, audience_name)
         
         # Получаем баннеры
         banners = group_details.get("banners", [])
@@ -997,7 +1007,8 @@ def process_banned_group(
             user_id, cabinet_id, preset_id, preset,
             new_video_id, video_id, original_video_id,
             new_short, new_long, textset_id, segments,
-            ad_plan_id=company_id
+            ad_plan_id=company_id,
+            audience_name=audience_name
         )
         
         return True
