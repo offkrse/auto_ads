@@ -22,7 +22,7 @@ import random
 
 app = FastAPI()
 
-VersionApp = "1.2"
+VersionApp = "1.21"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -306,6 +306,11 @@ def notifications_settings_path(user_id: str, cabinet_id: str) -> Path:
     p = USERS_DIR / str(user_id) / "settings" / str(cabinet_id)
     p.mkdir(parents=True, exist_ok=True)
     return p / "notifications.json"
+
+def auto_reupload_settings_path(user_id: str, cabinet_id: str) -> Path:
+    p = USERS_DIR / str(user_id) / "settings" / str(cabinet_id)
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "auto_reupload.json"
 
 # ===== helpers: VK users_lists =====
 
@@ -2181,30 +2186,40 @@ async def queue_status_set(payload: dict):
 def get_notifications(user_id: str = Query(...), cabinet_id: str = Query(...)):
     """
     Возвращает настройки уведомлений для кабинета.
-    По умолчанию notifyOnError = True
+    По умолчанию notifyOnError = True, остальные = False
     """
     try:
         ensure_user_structure(user_id)
         f = notifications_settings_path(user_id, cabinet_id)
         
+        defaults = {
+            "notifyOnError": True,
+            "notifyOnCreate": False,
+            "notifyOnReupload": False
+        }
+        
         if not f.exists():
-            return {"notifyOnError": True}
+            return defaults
         
         lock = f.with_suffix(".lock")
         try:
             with file_lock(lock, timeout=3):
                 raw = f.read_text(encoding="utf-8")
         except FileLockTimeout:
-            return {"notifyOnError": True}
+            return defaults
         
         try:
             data = json.loads(raw) if raw.strip() else {}
-            return {"notifyOnError": data.get("notifyOnError", True)}
+            return {
+                "notifyOnError": data.get("notifyOnError", True),
+                "notifyOnCreate": data.get("notifyOnCreate", False),
+                "notifyOnReupload": data.get("notifyOnReupload", False)
+            }
         except Exception:
-            return {"notifyOnError": True}
+            return defaults
     except Exception as e:
         log_error(f"notifications/get[{user_id}/{cabinet_id}] error: {repr(e)}")
-        return {"notifyOnError": True}
+        return {"notifyOnError": True, "notifyOnCreate": False, "notifyOnReupload": False}
 
 
 @secure_auto.post("/notifications/save")
@@ -2212,11 +2227,13 @@ def get_notifications(user_id: str = Query(...), cabinet_id: str = Query(...)):
 async def save_notifications(payload: dict):
     """
     Сохраняет настройки уведомлений.
-    Тело: { "userId": "...", "cabinetId": "...", "notifyOnError": true/false }
+    Тело: { "userId": "...", "cabinetId": "...", "notifyOnError": bool, "notifyOnCreate": bool, "notifyOnReupload": bool }
     """
     user_id = payload.get("userId")
     cabinet_id = payload.get("cabinetId")
     notify_on_error = payload.get("notifyOnError", True)
+    notify_on_create = payload.get("notifyOnCreate", False)
+    notify_on_reupload = payload.get("notifyOnReupload", False)
     
     if not user_id or cabinet_id is None:
         raise HTTPException(400, "Missing userId or cabinetId")
@@ -2226,17 +2243,117 @@ async def save_notifications(payload: dict):
         f = notifications_settings_path(str(user_id), str(cabinet_id))
         lock = f.with_suffix(".lock")
         
+        settings = {
+            "notifyOnError": bool(notify_on_error),
+            "notifyOnCreate": bool(notify_on_create),
+            "notifyOnReupload": bool(notify_on_reupload)
+        }
+        
         try:
             with file_lock(lock, timeout=3):
-                atomic_write_json(f, {"notifyOnError": bool(notify_on_error)})
+                atomic_write_json(f, settings)
         except FileLockTimeout:
             raise HTTPException(503, "Notifications storage busy, retry")
         
-        return {"status": "ok", "notifyOnError": bool(notify_on_error)}
+        return {"status": "ok", **settings}
     except FileLockTimeout:
         raise HTTPException(503, "Notifications storage busy, retry")
     except Exception as e:
         log_error(f"notifications/save[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+
+# -------------------------------------
+#   AUTO-REUPLOAD SETTINGS
+# -------------------------------------
+
+@secure_auto.get("/auto-reupload/get")
+@secure_api.get("/auto-reupload/get")
+def get_auto_reupload(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """
+    Возвращает настройки авто-перезалива для кабинета.
+    """
+    try:
+        ensure_user_structure(user_id)
+        f = auto_reupload_settings_path(user_id, cabinet_id)
+        
+        defaults = {
+            "enabled": False,
+            "deleteRejected": False,
+            "skipModerationFail": False,
+            "timeStart": "09:00",
+            "timeEnd": "21:00"
+        }
+        
+        if not f.exists():
+            return defaults
+        
+        lock = f.with_suffix(".lock")
+        try:
+            with file_lock(lock, timeout=3):
+                raw = f.read_text(encoding="utf-8")
+        except FileLockTimeout:
+            return defaults
+        
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+            return {
+                "enabled": data.get("enabled", False),
+                "deleteRejected": data.get("deleteRejected", False),
+                "skipModerationFail": data.get("skipModerationFail", False),
+                "timeStart": data.get("timeStart", "09:00"),
+                "timeEnd": data.get("timeEnd", "21:00")
+            }
+        except Exception:
+            return defaults
+    except Exception as e:
+        log_error(f"auto-reupload/get[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return {"enabled": False, "deleteRejected": False, "skipModerationFail": False, "timeStart": "09:00", "timeEnd": "21:00"}
+
+
+@secure_auto.post("/auto-reupload/save")
+@secure_api.post("/auto-reupload/save")
+async def save_auto_reupload(payload: dict):
+    """
+    Сохраняет настройки авто-перезалива.
+    Тело: { "userId": "...", "cabinetId": "...", "enabled": bool, "deleteRejected": bool, 
+            "skipModerationFail": bool, "timeStart": "HH:MM", "timeEnd": "HH:MM" }
+    """
+    user_id = payload.get("userId")
+    cabinet_id = payload.get("cabinetId")
+    enabled = payload.get("enabled", False)
+    delete_rejected = payload.get("deleteRejected", False)
+    skip_moderation_fail = payload.get("skipModerationFail", False)
+    time_start = payload.get("timeStart", "09:00")
+    time_end = payload.get("timeEnd", "21:00")
+    
+    if not user_id or cabinet_id is None:
+        raise HTTPException(400, "Missing userId or cabinetId")
+    
+    try:
+        ensure_user_structure(str(user_id))
+        f = auto_reupload_settings_path(str(user_id), str(cabinet_id))
+        lock = f.with_suffix(".lock")
+        
+        settings = {
+            "enabled": bool(enabled),
+            "deleteRejected": bool(delete_rejected),
+            "skipModerationFail": bool(skip_moderation_fail),
+            "timeStart": str(time_start),
+            "timeEnd": str(time_end)
+        }
+        
+        try:
+            with file_lock(lock, timeout=3):
+                atomic_write_json(f, settings)
+        except FileLockTimeout:
+            raise HTTPException(503, "Auto-reupload storage busy, retry")
+        
+        return {"status": "ok", **settings}
+    except FileLockTimeout:
+        raise HTTPException(503, "Auto-reupload storage busy, retry")
+    except Exception as e:
+        log_error(f"auto-reupload/save[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 # -------------------------------------------------------------------
