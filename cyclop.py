@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.68"
+VersionCyclop = "1.69"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -686,10 +686,15 @@ def _replace_day_tokens_in_name(name: str, *, now_local: datetime) -> List[str]:
         # делаем одну замену для каждого токена последовательно, сохраняя только один вариант (offset применён).
         def repl_day(m: re.Match) -> str:
             fmt_raw, offset = _parse_day_token(m)
+            log.info("repl_day: match=%r, fmt_raw=%r, offset=%d", m.group(0), fmt_raw, offset)
+            log.info("repl_day: now_local=%s, SERVER_SHIFT_HOURS=%d", now_local, SERVER_SHIFT_HOURS)
             base_date = (now_local + timedelta(hours=SERVER_SHIFT_HOURS)).date()
+            log.info("repl_day: base_date after shift=%s", base_date)
             base_date = base_date + timedelta(days=offset)
+            log.info("repl_day: final_date after offset=%s", base_date)
             return _format_day_for_token(base_date, fmt_raw)
         replaced = _day_token_re.sub(repl_day, name)
+        log.info("repl_day: '%s' -> '%s'", name, replaced)
         candidates = [replaced]
         return candidates
 
