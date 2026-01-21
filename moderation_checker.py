@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.24"
+VERSION = "1.25"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -219,27 +219,45 @@ def check_campaign_status(token: str, campaign_id: str) -> Tuple[Optional[str], 
     log.info("Campaign %s status: %s, major_status: %s", campaign_id, status, major_status)
     return status, major_status
 
-def get_ad_groups_issues(token: str, group_ids: List[str]) -> Dict[str, List[Dict]]:
+def get_ad_groups_issues(token: str, group_ids: List[str]) -> Dict[str, Dict]:
     """
-    Получает issues для групп объявлений.
-    Возвращает dict: {group_id: [issues]}
+    Получает issues и banners для групп объявлений.
+    Возвращает dict: {group_id: {"issues": [...], "banners": [...]}}
     """
     if not group_ids:
         return {}
     
     params = {
         "_id__in": ",".join(group_ids),
-        "fields": "id,name,issues"
+        "fields": "id,name,issues,banners"
     }
     data = vk_api_get("/api/v2/ad_groups.json", token, params)
     
     result = {}
     for item in data.get("items", []):
         group_id = str(item.get("id", ""))
-        issues = item.get("issues", [])
-        result[group_id] = issues
+        result[group_id] = {
+            "issues": item.get("issues", []),
+            "banners": item.get("banners", [])
+        }
     
     return result
+
+
+def get_banner_issues(token: str, banner_id: str) -> List[Dict]:
+    """
+    Получает issues для баннера.
+    """
+    params = {
+        "_id__in": str(banner_id),
+        "fields": "id,name,issues"
+    }
+    data = vk_api_get("/api/v2/banners.json", token, params)
+    
+    items = data.get("items", [])
+    if items:
+        return items[0].get("issues", [])
+    return []
 
 def get_ad_group_details(token: str, group_id: str) -> Optional[Dict]:
     """
@@ -1067,23 +1085,55 @@ def process_moderation_file(filepath: Path) -> bool:
                 log.warning("No group_ids found for campaign %s", company_id)
                 continue
             
-            # Проверяем issues групп
-            issues_by_group = get_ad_groups_issues(token, group_ids)
+            # Проверяем issues групп (теперь возвращает {group_id: {"issues": [...], "banners": [...]}})
+            groups_data = get_ad_groups_issues(token, group_ids)
             
-            groups_with_problems = []
+            # Классифицируем группы
+            groups_banned = []  # Группы с забаненными баннерами
+            groups_on_moderation = []  # Группы на модерации
+            groups_ok = []  # Группы без проблем
             
-            for ag_id, issues in issues_by_group.items():
-                for issue in issues:
-                    if issue.get("code") == "NO_ALLOWED_BANNERS":
-                        groups_with_problems.append(ag_id)
-                        log.info("Group %s has NO_ALLOWED_BANNERS", ag_id)
+            for ag_id, data in groups_data.items():
+                issues = data.get("issues", [])
+                banners = data.get("banners", [])
+                
+                has_no_allowed_banners = any(i.get("code") == "NO_ALLOWED_BANNERS" for i in issues)
+                
+                if has_no_allowed_banners:
+                    # Проверяем issues баннера
+                    if banners:
+                        banner_id = banners[0].get("id")
+                        if banner_id:
+                            banner_issues = get_banner_issues(token, str(banner_id))
+                            banner_codes = [i.get("code") for i in banner_issues]
+                            log.info("Group %s has NO_ALLOWED_BANNERS, banner %s issues: %s", ag_id, banner_id, banner_codes)
+                            
+                            if "BANNED" in banner_codes:
+                                groups_banned.append(ag_id)
+                                log.info("Group %s: banner is BANNED", ag_id)
+                            elif "ON_MODERATION" in banner_codes:
+                                groups_on_moderation.append(ag_id)
+                                log.info("Group %s: banner is ON_MODERATION, skipping", ag_id)
+                            else:
+                                # Другие issues - пока оставляем
+                                groups_on_moderation.append(ag_id)
+                                log.info("Group %s: banner has other issues, skipping for now", ag_id)
+                        else:
+                            groups_on_moderation.append(ag_id)
+                    else:
+                        groups_on_moderation.append(ag_id)
+                else:
+                    groups_ok.append(ag_id)
             
-            if groups_with_problems:
+            log.info("Groups classification: banned=%s, on_moderation=%s, ok=%s", 
+                    groups_banned, groups_on_moderation, groups_ok)
+            
+            # Обрабатываем забаненные группы
+            if groups_banned:
                 found_banned_groups = True
-                # Обрабатываем группы с проблемами
                 for ag_info in ad_groups_ids:
                     for ag_id, ad_data in ag_info.items():
-                        if ag_id in groups_with_problems:
+                        if ag_id in groups_banned:
                             success = process_banned_group(
                                 token, user_id, cabinet_id, preset_id, preset,
                                 ag_id, ad_data, sets, objective,
@@ -1094,30 +1144,30 @@ def process_moderation_file(filepath: Path) -> bool:
                                 groups_to_remove.append(ag_id)
                             else:
                                 groups_to_keep_checking.append(ag_id)
-                        else:
-                            # Группа без проблем - записываем APPROVED и удаляем из отслеживания
-                            video_id = ad_data.get("video_id", "")
-                            original_video_id = ad_data.get("original_video_id", video_id)
-                            textset_id = ad_data.get("textset_id", "")
-                            short_desc = ad_data.get("short_description", "")
-                            long_desc = ad_data.get("long_description", "")
-                            
-                            log.info("Group %s passed moderation (major_status=BANNED), writing APPROVED: video=%s, original=%s",
-                                    ag_id, video_id, original_video_id)
-                            
-                            if video_id:
-                                result = update_moderation_status(
-                                    sets, video_id, cabinet_id, objective,
-                                    "APPROVED", textset_id, short_desc, long_desc, original_video_id
-                                )
-                                log.info("update_moderation_status(APPROVED) returned: %s", result)
-                            groups_to_remove.append(ag_id)
-            else:
-                log.warning("Campaign %s has major_status=BANNED but no groups with NO_ALLOWED_BANNERS", company_id)
-                # Оставляем для повторной проверки
-                for ag_info in ad_groups_ids:
-                    for ag_id in ag_info.keys():
-                        groups_to_keep_checking.append(ag_id)
+            
+            # Группы на модерации - оставляем для повторной проверки
+            for ag_id in groups_on_moderation:
+                groups_to_keep_checking.append(ag_id)
+            
+            # Группы без проблем - записываем APPROVED
+            for ag_info in ad_groups_ids:
+                for ag_id, ad_data in ag_info.items():
+                    if ag_id in groups_ok:
+                        video_id = ad_data.get("video_id", "")
+                        original_video_id = ad_data.get("original_video_id", video_id)
+                        textset_id = ad_data.get("textset_id", "")
+                        short_desc = ad_data.get("short_description", "")
+                        long_desc = ad_data.get("long_description", "")
+                        
+                        log.info("Group %s passed moderation, writing APPROVED: video=%s", ag_id, video_id)
+                        
+                        if video_id:
+                            result = update_moderation_status(
+                                sets, video_id, cabinet_id, objective,
+                                "APPROVED", textset_id, short_desc, long_desc, original_video_id
+                            )
+                            log.info("update_moderation_status(APPROVED) returned: %s", result)
+                        groups_to_remove.append(ag_id)
         
         elif status == "ACTIVE":
             log.info("Campaign %s is ACTIVE, checking groups for NO_ALLOWED_BANNERS", company_id)
@@ -1132,23 +1182,55 @@ def process_moderation_file(filepath: Path) -> bool:
                 log.warning("No group_ids found for campaign %s", company_id)
                 continue
             
-            # Проверяем issues групп
-            issues_by_group = get_ad_groups_issues(token, group_ids)
+            # Проверяем issues групп (теперь возвращает {group_id: {"issues": [...], "banners": [...]}})
+            groups_data = get_ad_groups_issues(token, group_ids)
             
-            groups_with_problems = []
+            # Классифицируем группы
+            groups_banned = []  # Группы с забаненными баннерами
+            groups_on_moderation = []  # Группы на модерации
+            groups_ok = []  # Группы без проблем
             
-            for ag_id, issues in issues_by_group.items():
-                for issue in issues:
-                    if issue.get("code") == "NO_ALLOWED_BANNERS":
-                        groups_with_problems.append(ag_id)
-                        log.info("Group %s has NO_ALLOWED_BANNERS", ag_id)
+            for ag_id, data in groups_data.items():
+                issues = data.get("issues", [])
+                banners = data.get("banners", [])
+                
+                has_no_allowed_banners = any(i.get("code") == "NO_ALLOWED_BANNERS" for i in issues)
+                
+                if has_no_allowed_banners:
+                    # Проверяем issues баннера
+                    if banners:
+                        banner_id = banners[0].get("id")
+                        if banner_id:
+                            banner_issues = get_banner_issues(token, str(banner_id))
+                            banner_codes = [i.get("code") for i in banner_issues]
+                            log.info("Group %s has NO_ALLOWED_BANNERS, banner %s issues: %s", ag_id, banner_id, banner_codes)
+                            
+                            if "BANNED" in banner_codes:
+                                groups_banned.append(ag_id)
+                                log.info("Group %s: banner is BANNED", ag_id)
+                            elif "ON_MODERATION" in banner_codes:
+                                groups_on_moderation.append(ag_id)
+                                log.info("Group %s: banner is ON_MODERATION, skipping", ag_id)
+                            else:
+                                # Другие issues - пока оставляем
+                                groups_on_moderation.append(ag_id)
+                                log.info("Group %s: banner has other issues, skipping for now", ag_id)
+                        else:
+                            groups_on_moderation.append(ag_id)
+                    else:
+                        groups_on_moderation.append(ag_id)
+                else:
+                    groups_ok.append(ag_id)
             
-            if groups_with_problems:
+            log.info("Groups classification: banned=%s, on_moderation=%s, ok=%s", 
+                    groups_banned, groups_on_moderation, groups_ok)
+            
+            # Обрабатываем забаненные группы
+            if groups_banned:
                 found_banned_groups = True
-                # Обрабатываем группы с проблемами
                 for ag_info in ad_groups_ids:
                     for ag_id, ad_data in ag_info.items():
-                        if ag_id in groups_with_problems:
+                        if ag_id in groups_banned:
                             success = process_banned_group(
                                 token, user_id, cabinet_id, preset_id, preset,
                                 ag_id, ad_data, sets, objective,
@@ -1159,45 +1241,29 @@ def process_moderation_file(filepath: Path) -> bool:
                                 groups_to_remove.append(ag_id)
                             else:
                                 groups_to_keep_checking.append(ag_id)
-                        else:
-                            # Группа прошла модерацию - записываем APPROVED и удаляем из отслеживания
-                            video_id = ad_data.get("video_id", "")
-                            original_video_id = ad_data.get("original_video_id", video_id)
-                            textset_id = ad_data.get("textset_id", "")
-                            short_desc = ad_data.get("short_description", "")
-                            long_desc = ad_data.get("long_description", "")
-                            
-                            log.info("Group %s passed moderation, writing APPROVED: video=%s, original=%s",
-                                    ag_id, video_id, original_video_id)
-                            
-                            if video_id:
-                                result = update_moderation_status(
-                                    sets, video_id, cabinet_id, objective,
-                                    "APPROVED", textset_id, short_desc, long_desc, original_video_id
-                                )
-                                log.info("update_moderation_status(APPROVED) returned: %s", result)
-                            groups_to_remove.append(ag_id)
-            else:
-                # Все группы прошли модерацию - записываем APPROVED
-                log.info("All groups in campaign %s passed moderation, writing APPROVED to sets.json", company_id)
-                
-                for ag_info in ad_groups_ids:
-                    for ag_id, ad_data in ag_info.items():
+            
+            # Группы на модерации - оставляем для повторной проверки
+            for ag_id in groups_on_moderation:
+                groups_to_keep_checking.append(ag_id)
+            
+            # Группы без проблем - записываем APPROVED
+            for ag_info in ad_groups_ids:
+                for ag_id, ad_data in ag_info.items():
+                    if ag_id in groups_ok:
                         video_id = ad_data.get("video_id", "")
                         original_video_id = ad_data.get("original_video_id", video_id)
                         textset_id = ad_data.get("textset_id", "")
                         short_desc = ad_data.get("short_description", "")
                         long_desc = ad_data.get("long_description", "")
                         
-                        log.info("Writing APPROVED for group %s: video=%s, original=%s, textset=%s",
-                                ag_id, video_id, original_video_id, textset_id)
+                        log.info("Group %s passed moderation, writing APPROVED: video=%s", ag_id, video_id)
                         
                         if video_id:
                             result = update_moderation_status(
                                 sets, video_id, cabinet_id, objective,
                                 "APPROVED", textset_id, short_desc, long_desc, original_video_id
                             )
-                            log.info("update_moderation_status returned: %s", result)
+                            log.info("update_moderation_status(APPROVED) returned: %s", result)
                         groups_to_remove.append(ag_id)
         else:
             # Другой статус (PENDING и т.д.) - оставляем для повторной проверки
@@ -1222,15 +1288,16 @@ def process_moderation_file(filepath: Path) -> bool:
     
     # Удаляем файл только если:
     # 1. Все группы обработаны (remaining_groups пуст)
-    # 2. НЕ было найдено отклонённых групп (иначе ждём добавления новых групп)
+    # 2. НЕ было найдено групп с NO_ALLOWED_BANNERS (found_banned_groups = False)
+    # Если были NO_ALLOWED_BANNERS - файл остаётся для отслеживания новых групп после перезалива
     if not remaining_groups and not found_banned_groups:
-        log.info("All groups processed and no banned found, file can be deleted")
+        log.info("All groups processed and no NO_ALLOWED_BANNERS found, file can be deleted")
         return True
     else:
         # Сохраняем обновлённый файл
         dump_json(filepath, data)
         if found_banned_groups:
-            log.info("Found banned groups, keeping file for new groups. Remaining: %d", len(remaining_groups))
+            log.info("Found groups with NO_ALLOWED_BANNERS, keeping file for new groups. Remaining: %d", len(remaining_groups))
         else:
             log.info("Updated moderation file, %d groups remaining", len(remaining_groups))
         return False
