@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.25"
+VERSION = "1.26"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
@@ -47,6 +47,9 @@ USERS_ROOT = Path("/opt/auto_ads/users")
 ENV_FILE = Path("/opt/auto_ads/.env")
 LOGS_DIR = Path("/opt/auto_ads/logs")
 CREO_STORAGE_ROOT = Path("/mnt/data/auto_ads_storage/video")
+
+# Часовой пояс для timeStart/timeEnd в auto_reupload.json
+REUPLOAD_TZ = tz.gettz("Etc/GMT-4")  # UTC+4
 
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "UTC"))
@@ -160,6 +163,83 @@ def get_cabinet_token(user_id: str, cabinet_id: str) -> Optional[str]:
     except Exception as e:
         log.error("Failed to get cabinet token: %s", e)
     return None
+
+# ============================ Auto Reupload Settings ============================
+
+def get_auto_reupload_settings(user_id: str, cabinet_id: str) -> Dict:
+    """
+    Загружает настройки auto_reupload.json для кабинета.
+    Возвращает дефолтные значения если файл не существует.
+    """
+    settings_path = USERS_ROOT / str(user_id) / "settings" / str(cabinet_id) / "auto_reupload.json"
+    
+    default_settings = {
+        "enabled": True,
+        "deleteRejected": False,
+        "skipModerationFail": False,
+        "timeStart": "00:00",
+        "timeEnd": "23:59"
+    }
+    
+    if not settings_path.exists():
+        return default_settings
+    
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+        # Заполняем отсутствующие поля дефолтами
+        for key, value in default_settings.items():
+            if key not in settings:
+                settings[key] = value
+        return settings
+    except Exception as e:
+        log.error("Failed to load auto_reupload.json: %s", e)
+        return default_settings
+
+
+def is_within_time_range(time_start: str, time_end: str) -> bool:
+    """
+    Проверяет находится ли текущее время (UTC+4) в диапазоне timeStart-timeEnd.
+    """
+    try:
+        now = datetime.now(REUPLOAD_TZ)
+        current_time = now.strftime("%H:%M")
+        
+        # Простое сравнение строк работает для формата HH:MM
+        return time_start <= current_time <= time_end
+    except Exception as e:
+        log.error("Error checking time range: %s", e)
+        return True  # По умолчанию разрешаем
+
+
+def get_tomorrow_date_utc() -> str:
+    """
+    Возвращает завтрашнюю дату в формате YYYY-MM-DD по UTC.
+    """
+    tomorrow = datetime.utcnow().date() + timedelta(days=1)
+    return tomorrow.isoformat()
+
+
+def delete_ad_group(token: str, group_id: str) -> bool:
+    """
+    Удаляет группу объявлений через API.
+    POST /api/v2/ad_groups/<id>.json с {"status": "deleted"}
+    """
+    url = f"{API_BASE}/api/v2/ad_groups/{group_id}.json"
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"status": "deleted"}
+    
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=VK_HTTP_TIMEOUT)
+        if resp.status_code in (200, 204):
+            log.info("Deleted ad group %s", group_id)
+            return True
+        else:
+            log.error("Failed to delete ad group %s: %s %s", group_id, resp.status_code, resp.text[:200])
+            return False
+    except Exception as e:
+        log.error("Exception deleting ad group %s: %s", group_id, e)
+        return False
 
 # ============================ VK API ============================
 
@@ -1021,11 +1101,24 @@ def process_moderation_file(filepath: Path) -> bool:
         log.warning("Invalid data in %s", filepath)
         return True
     
+    # Загружаем настройки auto_reupload
+    reupload_settings = get_auto_reupload_settings(user_id, cabinet_id)
+    log.info("Auto reupload settings for cabinet %s: enabled=%s, deleteRejected=%s", 
+            cabinet_id, reupload_settings.get("enabled"), reupload_settings.get("deleteRejected"))
+    
+    # Если enabled=false, удаляем файл без обработки
+    if not reupload_settings.get("enabled", True):
+        log.info("Auto reupload disabled for cabinet %s, deleting file without processing", cabinet_id)
+        return True
+    
     # Получаем токен
     token = get_cabinet_token(user_id, cabinet_id)
     if not token:
         log.error("No token for user %s cabinet %s", user_id, cabinet_id)
         return False  # Не удаляем, попробуем позже
+    
+    # Флаг deleteRejected - удалять ли забаненные группы
+    delete_rejected = reupload_settings.get("deleteRejected", False)
     
     # Очищаем кэш rehash для этого файла (чтобы одинаковые video_id в одном файле 
     # использовали один и тот же новый video_id)
@@ -1134,6 +1227,10 @@ def process_moderation_file(filepath: Path) -> bool:
                 for ag_info in ad_groups_ids:
                     for ag_id, ad_data in ag_info.items():
                         if ag_id in groups_banned:
+                            # Если deleteRejected=true, удаляем группу через API
+                            if delete_rejected:
+                                log.info("deleteRejected=true, deleting banned group %s", ag_id)
+                                delete_ad_group(token, ag_id)
                             success = process_banned_group(
                                 token, user_id, cabinet_id, preset_id, preset,
                                 ag_id, ad_data, sets, objective,
@@ -1231,6 +1328,10 @@ def process_moderation_file(filepath: Path) -> bool:
                 for ag_info in ad_groups_ids:
                     for ag_id, ad_data in ag_info.items():
                         if ag_id in groups_banned:
+                            # Если deleteRejected=true, удаляем группу через API
+                            if delete_rejected:
+                                log.info("deleteRejected=true, deleting banned group %s", ag_id)
+                                delete_ad_group(token, ag_id)
                             success = process_banned_group(
                                 token, user_id, cabinet_id, preset_id, preset,
                                 ag_id, ad_data, sets, objective,
