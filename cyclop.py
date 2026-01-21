@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.67"
+VersionCyclop = "1.68"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -630,19 +630,19 @@ def _dump_vk_validation(err_json: Dict[str, Any]) -> None:
         log.error("VALIDATION: dump failed: %s", ex)
 
 # ---------- НОВЫЕ/ОБНОВЛЁННЫЕ УТИЛИТЫ ДЛЯ {day} / {*} -------------
-_day_token_re = re.compile(r"\{day(?:\(([^\}]*)\))?(?:-([+-]?\d+))?\}", flags=re.I)
-_day_token_ru_re = re.compile(r"\{день(?:-([+-]?\d+))?\}", flags=re.I)  # старый рус.: число, поддержка -1 fallback
+_day_token_re = re.compile(r"\{day(?:\(([^\}]*)\))?([+-]\d+)?\}", flags=re.I)
+_day_token_ru_re = re.compile(r"\{день([+-]\d+)?\}", flags=re.I)  # старый рус.: число, поддержка -1 fallback
 _wildcard_re = re.compile(r"\{\*\}")
 
 def _parse_day_token(match: re.Match) -> Tuple[Optional[str], int]:
     """
-    Парсит матч {day(format)-N}:
+    Парсит матч {day(format)+/-N}:
       group(1) = формат (строка) или None
-      group(2) = смещение в днях как строка или None
+      group(2) = смещение со знаком (например "-1", "+2") или None
     Возвращает (fmt_raw, offset_int)
     """
     fmt_raw = match.group(1)  # может быть None
-    offset_raw = match.group(2)
+    offset_raw = match.group(2)  # например "-1", "+2" или None
     offset = int(offset_raw) if offset_raw else 0
     return fmt_raw, offset
 
@@ -698,9 +698,23 @@ def _replace_day_tokens_in_name(name: str, *, now_local: datetime) -> List[str]:
     if _day_token_ru_re.search(name):
         # вычислим базовый день-номер
         base_dn = compute_day_number(now_local)
-        # подставим base и base-1
-        v0 = _day_token_ru_re.sub(str(base_dn), name)
-        v1 = _day_token_ru_re.sub(str(base_dn - 1), name)
+        
+        # Проверяем есть ли offset в токене {день-1} или {день+2}
+        def repl_ru_day(m: re.Match) -> str:
+            offset_raw = m.group(1)  # например "-1", "+2" или None
+            offset = int(offset_raw) if offset_raw else 0
+            return str(base_dn + offset)
+        
+        v0 = _day_token_ru_re.sub(repl_ru_day, name)
+        
+        # Для fallback делаем -1 от полученного значения
+        def repl_ru_day_fallback(m: re.Match) -> str:
+            offset_raw = m.group(1)
+            offset = int(offset_raw) if offset_raw else 0
+            return str(base_dn + offset - 1)
+        
+        v1 = _day_token_ru_re.sub(repl_ru_day_fallback, name)
+        
         # порядок: сначала текущий, потом -1
         return [v0, v1]
 
