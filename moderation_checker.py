@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.27"
+VERSION = "1.28"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_ADD_GROUPS_DIR = Path("/opt/auto_ads/data/one_add_groups")
@@ -1095,9 +1095,9 @@ def process_moderation_file(filepath: Path) -> bool:
             groups_on_moderation = []
             groups_ok = []
             
-            for ag_id, data in groups_data.items():
-                issues = data.get("issues", [])
-                banners = data.get("banners", [])
+            for ag_id, group_info in groups_data.items():
+                issues = group_info.get("issues", [])
+                banners = group_info.get("banners", [])
                 
                 has_no_allowed_banners = any(i.get("code") == "NO_ALLOWED_BANNERS" for i in issues)
                 
@@ -1195,9 +1195,9 @@ def process_moderation_file(filepath: Path) -> bool:
             groups_on_moderation = []  # Группы на модерации
             groups_ok = []  # Группы без проблем
             
-            for ag_id, data in groups_data.items():
-                issues = data.get("issues", [])
-                banners = data.get("banners", [])
+            for ag_id, group_info in groups_data.items():
+                issues = group_info.get("issues", [])
+                banners = group_info.get("banners", [])
                 
                 has_no_allowed_banners = any(i.get("code") == "NO_ALLOWED_BANNERS" for i in issues)
                 
@@ -1296,9 +1296,9 @@ def process_moderation_file(filepath: Path) -> bool:
             groups_on_moderation = []  # Группы на модерации
             groups_ok = []  # Группы без проблем
             
-            for ag_id, data in groups_data.items():
-                issues = data.get("issues", [])
-                banners = data.get("banners", [])
+            for ag_id, group_info in groups_data.items():
+                issues = group_info.get("issues", [])
+                banners = group_info.get("banners", [])
                 
                 has_no_allowed_banners = any(i.get("code") == "NO_ALLOWED_BANNERS" for i in issues)
                 
