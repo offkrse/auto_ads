@@ -38,10 +38,9 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.26"
+VERSION = "1.27"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
-ONE_SHOT_PRESETS_DIR = Path("/opt/auto_ads/data/one_shot_presets")
 ONE_ADD_GROUPS_DIR = Path("/opt/auto_ads/data/one_add_groups")
 USERS_ROOT = Path("/opt/auto_ads/users")
 ENV_FILE = Path("/opt/auto_ads/.env")
@@ -56,7 +55,6 @@ LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "UTC"))
 
 # Создаём директории
 CHECK_MODERATION_DIR.mkdir(parents=True, exist_ok=True)
-ONE_SHOT_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
 ONE_ADD_GROUPS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Дефолтные символы для замены (используются если не заданы в textset)
@@ -65,8 +63,8 @@ DEFAULT_SHORT_TEXT_SYMBOLS = "🌟;🔥;🏅;🚀;🥇;🌠;🎯;🎁"
 DEFAULT_LONG_TEXT_SWAP = "🌟"
 DEFAULT_LONG_TEXT_SYMBOLS = "🌟;🔥;🏅;🚀;🥇;🌠;🎯;🎁"
 
-# Сдвиг времени для one-shot пресетов (часов от текущего времени)
-ONE_SHOT_TIME_OFFSET_HOURS = 7
+# Сдвиг времени для add-group пресетов (часов от текущего времени)
+ADD_GROUP_TIME_OFFSET_HOURS = 7
 
 # Ретраи и таймауты
 RETRY_MAX = 3
@@ -798,67 +796,6 @@ def find_textset(textsets: List[Dict], textset_id: str) -> Optional[Dict]:
 
 # ============================ One-shot пресеты ============================
 
-def create_one_shot_preset(
-    user_id: str,
-    cabinet_id: str,
-    preset_id: str,
-    original_preset: Dict,
-    new_video_id: str,
-    old_video_id: str,
-    original_video_id: str,
-    new_short: str,
-    new_long: str,
-    textset_id: str
-) -> Optional[Path]:
-    """
-    Создаёт one-shot пресет с изменённым видео и текстом.
-    Время устанавливается на +7 часов от текущего.
-    """
-    try:
-        # Копируем пресет
-        new_preset = json.loads(json.dumps(original_preset, ensure_ascii=False))
-        
-        # Добавляем user_id и cabinet_id для cyclop
-        new_preset["_user_id"] = str(user_id)
-        new_preset["_cabinet_id"] = str(cabinet_id)
-        
-        # Добавляем информацию об оригинальном видео
-        new_preset["_moderation_info"] = {
-            "original_video_id": original_video_id,
-            "old_video_id": old_video_id,
-            "new_video_id": new_video_id,
-        }
-        
-        # Обновляем время
-        trigger_time = datetime.now(LOCAL_TZ) + timedelta(hours=ONE_SHOT_TIME_OFFSET_HOURS)
-        new_preset["company"]["time"] = trigger_time.strftime("%H:%M")
-        
-        # Обновляем видео и текст во всех объявлениях
-        for ad in new_preset.get("ads", []):
-            # Заменяем video_id
-            video_ids = ad.get("videoIds", [])
-            if old_video_id in video_ids:
-                ad["videoIds"] = [new_video_id if v == old_video_id else v for v in video_ids]
-            
-            # Заменяем текст если textset совпадает
-            if ad.get("textSetId") == textset_id or not textset_id:
-                ad["shortDescription"] = new_short
-                ad["longDescription"] = new_long
-        
-        # Сохраняем
-        random_id = random.randint(100000, 999999)
-        filename = f"os_preset_{random_id}.json"
-        filepath = ONE_SHOT_PRESETS_DIR / filename
-        
-        dump_json(filepath, new_preset)
-        
-        log.info("Created one-shot preset: %s", filepath)
-        return filepath
-        
-    except Exception as e:
-        log.error("Failed to create one-shot preset: %s", e)
-        return None
-
 def create_add_group_preset(
     user_id: str,
     cabinet_id: str,
@@ -895,7 +832,7 @@ def create_add_group_preset(
         }
         
         # Обновляем время
-        trigger_time = datetime.now(LOCAL_TZ) + timedelta(hours=ONE_SHOT_TIME_OFFSET_HOURS)
+        trigger_time = datetime.now(LOCAL_TZ) + timedelta(hours=ADD_GROUP_TIME_OFFSET_HOURS)
         new_preset["company"]["time"] = trigger_time.strftime("%H:%M")
         
         # Обновляем видео и текст во всех объявлениях
@@ -1055,22 +992,13 @@ def process_banned_group(
         # Меняем текст (передаём textset для получения настроек символов)
         new_short, new_long = swap_text_symbols(short_desc, long_desc, used_texts, textset)
         
-        # Создаём пресет в зависимости от типа проблемы
-        if is_no_allowed_banners:
-            # Создаём пресет для добавления группы с сегментами
-            create_add_group_preset(
-                user_id, cabinet_id, preset_id, preset,
-                new_video_id, video_id, original_video_id,
-                new_short, new_long, textset_id, segments,
-                ad_plan_id=company_id
-            )
-        else:
-            # Создаём one-shot пресет
-            create_one_shot_preset(
-                user_id, cabinet_id, preset_id, preset,
-                new_video_id, video_id, original_video_id,
-                new_short, new_long, textset_id
-            )
+        # Создаём пресет для добавления группы с сегментами
+        create_add_group_preset(
+            user_id, cabinet_id, preset_id, preset,
+            new_video_id, video_id, original_video_id,
+            new_short, new_long, textset_id, segments,
+            ad_plan_id=company_id
+        )
         
         return True
     else:
@@ -1145,24 +1073,105 @@ def process_moderation_file(filepath: Path) -> bool:
                     groups_to_keep_checking.append(ag_id)
             continue
         
-        # Кампания полностью забанена
+        # Кампания полностью забанена - проверяем каждую группу через API
         if status == "BANNED":
-            log.info("Campaign %s is BANNED (status=BANNED)", company_id)
-            found_banned_groups = True
+            log.info("Campaign %s is BANNED (status=BANNED), checking each group", company_id)
             
-            # Обрабатываем каждую группу объявлений
+            # Получаем все group_ids
+            group_ids = []
+            for ag_info in ad_groups_ids:
+                for ag_id in ag_info.keys():
+                    group_ids.append(ag_id)
+            
+            if not group_ids:
+                log.warning("No group_ids found for campaign %s", company_id)
+                continue
+            
+            # Проверяем issues групп
+            groups_data = get_ad_groups_issues(token, group_ids)
+            
+            # Классифицируем группы
+            groups_banned = []
+            groups_on_moderation = []
+            groups_ok = []
+            
+            for ag_id, data in groups_data.items():
+                issues = data.get("issues", [])
+                banners = data.get("banners", [])
+                
+                has_no_allowed_banners = any(i.get("code") == "NO_ALLOWED_BANNERS" for i in issues)
+                
+                if has_no_allowed_banners:
+                    if banners:
+                        banner_id = banners[0].get("id")
+                        if banner_id:
+                            banner_issues = get_banner_issues(token, str(banner_id))
+                            banner_codes = [i.get("code") for i in banner_issues]
+                            log.info("Group %s has NO_ALLOWED_BANNERS, banner %s issues: %s", ag_id, banner_id, banner_codes)
+                            
+                            if "BANNED" in banner_codes:
+                                groups_banned.append(ag_id)
+                                log.info("Group %s: banner is BANNED", ag_id)
+                            elif "ON_MODERATION" in banner_codes:
+                                groups_on_moderation.append(ag_id)
+                                log.info("Group %s: banner is ON_MODERATION, skipping", ag_id)
+                            else:
+                                groups_on_moderation.append(ag_id)
+                                log.info("Group %s: banner has other issues, skipping for now", ag_id)
+                        else:
+                            groups_on_moderation.append(ag_id)
+                    else:
+                        groups_on_moderation.append(ag_id)
+                else:
+                    groups_ok.append(ag_id)
+            
+            log.info("Groups classification (status=BANNED): banned=%s, on_moderation=%s, ok=%s", 
+                    groups_banned, groups_on_moderation, groups_ok)
+            
+            # Обрабатываем забаненные группы (создаём add_group пресеты)
+            if groups_banned:
+                found_banned_groups = True
+                for ag_info in ad_groups_ids:
+                    for ag_id, ad_data in ag_info.items():
+                        if ag_id in groups_banned:
+                            if delete_rejected:
+                                log.info("deleteRejected=true, deleting group %s", ag_id)
+                                delete_ad_group(token, ag_id)
+                            
+                            success = process_banned_group(
+                                token, user_id, cabinet_id, preset_id, preset,
+                                ag_id, ad_data, sets, objective,
+                                is_no_allowed_banners=True,  # Всегда создаём add_group пресет
+                                company_id=company_id
+                            )
+                            if success:
+                                groups_to_remove.append(ag_id)
+                            else:
+                                groups_to_keep_checking.append(ag_id)
+            
+            # Группы на модерации - оставляем для повторной проверки
+            for ag_id in groups_on_moderation:
+                groups_to_keep_checking.append(ag_id)
+            
+            # Группы без проблем - записываем APPROVED
             for ag_info in ad_groups_ids:
                 for ag_id, ad_data in ag_info.items():
-                    success = process_banned_group(
-                        token, user_id, cabinet_id, preset_id, preset,
-                        ag_id, ad_data, sets, objective,
-                        is_no_allowed_banners=False,
-                        company_id=company_id
-                    )
-                    if success:
+                    if ag_id in groups_ok:
+                        video_id = ad_data.get("video_id", "")
+                        original_video_id = ad_data.get("original_video_id", video_id)
+                        textset_id = ad_data.get("textset_id", "")
+                        short_desc = ad_data.get("short_description", "")
+                        long_desc = ad_data.get("long_description", "")
+                        
+                        log.info("Group %s passed moderation, writing APPROVED: video=%s", ag_id, video_id)
+                        
+                        if video_id:
+                            result = update_moderation_status(
+                                sets, video_id, cabinet_id, objective,
+                                "APPROVED", textset_id, short_desc, long_desc, original_video_id
+                            )
+                            log.info("update_moderation_status(APPROVED) returned: %s", result)
                         groups_to_remove.append(ag_id)
-                    else:
-                        groups_to_keep_checking.append(ag_id)
         
         # major_status=BANNED но status не BANNED - проверяем каждую группу
         elif major_status == "BANNED":
