@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.70"
+VersionCyclop = "1.71"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -3465,9 +3465,16 @@ def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments:
             # Создаём URL через API (как в create_ad_plan)
             url_id = create_leadads_url(str(leadform_id).strip(), [token])
         else:
-            url = company.get("url", "")
+            # Сначала проверяем bannerUrl, потом company.url
+            banner_url_raw = (
+                (ad.get("bannerUrl") or "").strip()
+                or (company.get("bannerUrl") or "").strip()
+                or (preset.get("bannerUrl") or "").strip()
+            )
+            url = banner_url_raw or company.get("url", "")
             if url:
                 url_id = resolve_url_id(url, [token])
+                log.info("build_add_group_payload: URL resolved: %s -> %s", url, url_id)
             else:
                 url_id = 0
         
@@ -3513,10 +3520,18 @@ def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments:
         day_number = compute_day_number(datetime.now(LOCAL_TZ))
         
         # Получаем имена аудиторий
+        # Сначала проверяем _moderation_info.audience_name, потом group.audienceNames
+        mod_info = preset.get("_moderation_info", {})
+        mod_audience_name = mod_info.get("audience_name", "")
+        
         aud_names = list(group.get("audienceNames") or [])
         abs_names = list(group.get("abstractAudiences") or [])
         if not aud_names and abs_names:
             aud_names = expand_abstract_names(abs_names, day_number)
+        # Если всё ещё пусто - используем имя из moderation_info
+        if not aud_names and mod_audience_name:
+            aud_names = [mod_audience_name]
+            log.info("Using audience_name from _moderation_info: %s", mod_audience_name)
         
         # Рендерим название группы
         group_name = truncate_name(
