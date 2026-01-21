@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.69"
+VersionCyclop = "1.70"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -60,6 +60,8 @@ CREO_STORAGE_ROOT = Path("/mnt/data/auto_ads_storage/video")
 # Если сервер в UTC — дефолт уже UTC
 LOCAL_TZ = tz.gettz(os.getenv("LOCAL_TZ", "UTC"))
 UTC_TZ = tz.gettz("UTC")
+# Часовой пояс для timeStart/timeEnd в auto_reupload.json
+REUPLOAD_TZ = tz.gettz("Etc/GMT-4")  # UTC+4
 
 BASE_DATE = datetime(2025, 7, 14)
 BASE_NUMBER = 53
@@ -1034,6 +1036,59 @@ def dump_json(path: Path, payload: Any) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+def get_auto_reupload_settings(user_id: str, cabinet_id: str) -> Dict:
+    """
+    Загружает настройки auto_reupload.json для кабинета.
+    Возвращает дефолтные значения если файл не существует.
+    """
+    settings_path = USERS_ROOT / str(user_id) / "settings" / str(cabinet_id) / "auto_reupload.json"
+    
+    default_settings = {
+        "enabled": True,
+        "deleteRejected": False,
+        "skipModerationFail": False,
+        "timeStart": "00:00",
+        "timeEnd": "23:59"
+    }
+    
+    if not settings_path.exists():
+        return default_settings
+    
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+        # Заполняем отсутствующие поля дефолтами
+        for key, value in default_settings.items():
+            if key not in settings:
+                settings[key] = value
+        return settings
+    except Exception as e:
+        log.error("Failed to load auto_reupload.json: %s", e)
+        return default_settings
+
+
+def is_within_reupload_time_range(time_start: str, time_end: str) -> bool:
+    """
+    Проверяет находится ли текущее время (UTC+4) в диапазоне timeStart-timeEnd.
+    """
+    try:
+        now = datetime.now(REUPLOAD_TZ)
+        current_time = now.strftime("%H:%M")
+        return time_start <= current_time <= time_end
+    except Exception as e:
+        log.error("Error checking time range: %s", e)
+        return True
+
+
+def get_tomorrow_date_utc() -> str:
+    """
+    Возвращает завтрашнюю дату в формате YYYY-MM-DD по UTC.
+    """
+    tomorrow = datetime.utcnow().date() + timedelta(days=1)
+    return tomorrow.isoformat()
+
 
 def append_result_entry(user_id: str, cabinet_id: str, entry: Dict[str, Any]) -> None:
     """
@@ -2024,10 +2079,15 @@ def load_sets_for_cabinet(user_id: str, cabinet_id: str) -> List[Dict]:
 
 def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                    user_id: str, cabinet_id: str,
-                   preset_id: str, preset_name: str, trigger_time: str) -> List[Dict[str, Any]]:
+                   preset_id: str, preset_name: str, trigger_time: str,
+                   date_start_override: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     При ошибке пишет файл error с понятным текстом и техническим кодом (append в created.json).
     При успехе — пишет success с массивом id_company из всех ответов.
+    
+    Args:
+        date_start_override: Если задан, используется как date_start для групп.
+    
     Возвращает список «сырого» ответа VK (для внутренней отладки).
     """
     company = preset["company"]
@@ -2350,6 +2410,9 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         ad_groups = payload_try.get("ad_groups", [])
         for gi, g in enumerate(ad_groups):
             g["banners"] = [banners_by_group[gi]]
+            # Если задан date_start_override - применяем к каждой группе
+            if date_start_override:
+                g["date_start"] = date_start_override
 
         # sanity-лог
         for gi, g in enumerate(ad_groups, start=1):
@@ -2436,11 +2499,15 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 # ============================ FAST ПЛАН ============================
 def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         user_id: str, cabinet_id: str,
-                        preset_id: str, preset_name: str, trigger_time: str) -> List[Dict[str, Any]]:
+                        preset_id: str, preset_name: str, trigger_time: str,
+                        date_start_override: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     FAST: на каждый контейнер → отдельная группа; в каждой группе создаём баннер
     под КАЖДЫЙ креатив из ads[*].videoIds и ads[*].imageIds.
     Если контейнеров нет — используем аудитории самой группы.
+    
+    Args:
+        date_start_override: Если задан, используется как date_start для групп.
     """
     company = preset["company"]
     url = company.get("url")
@@ -2748,7 +2815,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
                         "budget_limit_day": budget_day,
-                        "date_start": today.isoformat(),
+                        "date_start": date_start_override if date_start_override else today.isoformat(),
                         "date_end": None,
                         "age_restrictions": "18+",
                         "package_id": pkg_id,
@@ -2846,7 +2913,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         "autobidding_mode": "max_goals",
                         "budget_limit": None,
                         "budget_limit_day": budget_day,
-                        "date_start": today.isoformat(),
+                        "date_start": date_start_override if date_start_override else today.isoformat(),
                         "date_end": None,
                         "age_restrictions": "18+",
                         "package_id": pkg_id,
@@ -3085,6 +3152,18 @@ def process_one_shot_presets() -> None:
                 log.error("one_shot preset %s missing _user_id or _cabinet_id", filepath.name)
                 continue
             
+            # Загружаем настройки auto_reupload
+            reupload_settings = get_auto_reupload_settings(user_id, cabinet_id)
+            time_start = reupload_settings.get("timeStart", "00:00")
+            time_end = reupload_settings.get("timeEnd", "23:59")
+            
+            # Проверяем время - если вне диапазона, добавляем date_start на завтра
+            date_start_override = None
+            if not is_within_reupload_time_range(time_start, time_end):
+                date_start_override = get_tomorrow_date_utc()
+                log.info("Outside reupload time range (%s-%s), will set date_start=%s", 
+                        time_start, time_end, date_start_override)
+            
             # Получаем токены
             tokens = get_tokens_for_cabinet(user_id, cabinet_id)
             if not tokens:
@@ -3104,12 +3183,14 @@ def process_one_shot_presets() -> None:
             if fast_flag:
                 create_ad_plan_fast(
                     preset, tokens, 1, user_id, cabinet_id,
-                    preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time
+                    preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time,
+                    date_start_override=date_start_override
                 )
             else:
                 create_ad_plan(
                     preset, tokens, 1, user_id, cabinet_id,
-                    preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time
+                    preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time,
+                    date_start_override=date_start_override
                 )
             
             # Удаляем файл после успешной обработки
@@ -3197,6 +3278,18 @@ def process_one_add_groups() -> None:
                 log.error("add-group preset %s missing _user_id or _cabinet_id", filepath.name)
                 continue
             
+            # Загружаем настройки auto_reupload
+            reupload_settings = get_auto_reupload_settings(user_id, cabinet_id)
+            time_start = reupload_settings.get("timeStart", "00:00")
+            time_end = reupload_settings.get("timeEnd", "23:59")
+            
+            # Проверяем время - если вне диапазона, добавляем date_start на завтра
+            date_start_override = None
+            if not is_within_reupload_time_range(time_start, time_end):
+                date_start_override = get_tomorrow_date_utc()
+                log.info("Outside reupload time range (%s-%s), will set date_start=%s", 
+                        time_start, time_end, date_start_override)
+            
             # Получаем токен
             tokens = get_tokens_for_cabinet(user_id, cabinet_id)
             if not tokens:
@@ -3213,7 +3306,8 @@ def process_one_add_groups() -> None:
             log.info("Groups before adding: %s", groups_before)
             
             # Собираем payload для добавления группы
-            payload = build_add_group_payload(preset, new_video_id, segments, token)
+            payload = build_add_group_payload(preset, new_video_id, segments, token, 
+                                             date_start_override=date_start_override)
             
             if not payload:
                 log.error("Failed to build add-group payload for %s", filepath.name)
@@ -3287,9 +3381,13 @@ def process_one_add_groups() -> None:
             log.exception("Failed to process add-group preset %s: %s", filepath.name, e)
 
 
-def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments: List[int], token: str) -> Optional[Dict]:
+def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments: List[int], token: str, 
+                           date_start_override: Optional[str] = None) -> Optional[Dict]:
     """
     Собирает payload для добавления группы в существующую кампанию.
+    
+    Args:
+        date_start_override: Если задан, используется как date_start вместо сегодняшней даты.
     
     Возвращает структуру:
     {
@@ -3342,8 +3440,12 @@ def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments:
         max_price = compute_group_max_price(group)
         
         # Дата старта
-        start_date = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
-        start_date_str = start_date.strftime("%Y-%m-%d")
+        if date_start_override:
+            start_date_str = date_start_override
+            log.info("Using date_start_override: %s", start_date_str)
+        else:
+            start_date = (datetime.now(LOCAL_TZ) + timedelta(hours=SERVER_SHIFT_HOURS)).date()
+            start_date_str = start_date.strftime("%Y-%m-%d")
         
         # Собираем баннер
         icon_id = ad.get("logoId") or company.get("logoId")
