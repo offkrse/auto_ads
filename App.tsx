@@ -37,6 +37,10 @@ type TextSet = {
   shortDescription: string;
   longDescription: string;
   button?: string;
+  short_text_swap?: string;
+  short_text_symbols?: string;
+  long_text_swap?: string;
+  long_text_symbols?: string;
 };
 
 type CreativeItem = {
@@ -4101,10 +4105,19 @@ const App: React.FC = () => {
 
   // -------- SETTINGS TAB ---------
   // После других useState в App
-  const [settingsTab, setSettingsTab] = useState<"general" | "notifications">("general");
+  const [settingsTab, setSettingsTab] = useState<"general" | "notifications" | "autoReupload">("general");
   const [notifyOnError, setNotifyOnError] = useState<boolean>(true);
+  const [notifyOnCreate, setNotifyOnCreate] = useState<boolean>(false);
+  const [notifyOnReupload, setNotifyOnReupload] = useState<boolean>(false);
+  
+  // Авто-перезалив
+  const [autoReuploadEnabled, setAutoReuploadEnabled] = useState<boolean>(false);
+  const [deleteRejected, setDeleteRejected] = useState<boolean>(false);
+  const [skipModerationFail, setSkipModerationFail] = useState<boolean>(false);
+  const [reuploadTimeStart, setReuploadTimeStart] = useState<string>("09:00");
+  const [reuploadTimeEnd, setReuploadTimeEnd] = useState<string>("21:00");
 
-  // Загрузка настроек уведомлений
+  // Загрузка настроек уведомлений и авто-перезалива
   useEffect(() => {
     if (!userId || !selectedCabinetId || selectedCabinetId === "all") return;
     
@@ -4114,14 +4127,42 @@ const App: React.FC = () => {
           `${API_BASE}/notifications/get?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}`
         );
         setNotifyOnError(j?.notifyOnError !== false); // по умолчанию true
+        setNotifyOnCreate(j?.notifyOnCreate === true);
+        setNotifyOnReupload(j?.notifyOnReupload === true);
       } catch {
         setNotifyOnError(true);
+        setNotifyOnCreate(false);
+        setNotifyOnReupload(false);
+      }
+    })();
+    
+    // Загрузка настроек авто-перезалива
+    (async () => {
+      try {
+        const j = await apiJson(
+          `${API_BASE}/auto-reupload/get?user_id=${encodeURIComponent(userId)}&cabinet_id=${encodeURIComponent(selectedCabinetId)}`
+        );
+        setAutoReuploadEnabled(j?.enabled === true);
+        setDeleteRejected(j?.deleteRejected === true);
+        setSkipModerationFail(j?.skipModerationFail === true);
+        setReuploadTimeStart(j?.timeStart || "09:00");
+        setReuploadTimeEnd(j?.timeEnd || "21:00");
+      } catch {
+        setAutoReuploadEnabled(false);
+        setDeleteRejected(false);
+        setSkipModerationFail(false);
+        setReuploadTimeStart("09:00");
+        setReuploadTimeEnd("21:00");
       }
     })();
   }, [userId, selectedCabinetId]);
 
   // Сохранение настроек уведомлений
-  const saveNotificationSettings = async (value: boolean) => {
+  const saveNotificationSettings = async (settings: {
+    notifyOnError?: boolean;
+    notifyOnCreate?: boolean;
+    notifyOnReupload?: boolean;
+  }) => {
     if (!userId || !selectedCabinetId || selectedCabinetId === "all") return;
     
     try {
@@ -4131,13 +4172,52 @@ const App: React.FC = () => {
         body: JSON.stringify({
           userId,
           cabinetId: selectedCabinetId,
-          notifyOnError: value,
+          notifyOnError: settings.notifyOnError ?? notifyOnError,
+          notifyOnCreate: settings.notifyOnCreate ?? notifyOnCreate,
+          notifyOnReupload: settings.notifyOnReupload ?? notifyOnReupload,
         }),
       });
-      setNotifyOnError(value);
+      if (settings.notifyOnError !== undefined) setNotifyOnError(settings.notifyOnError);
+      if (settings.notifyOnCreate !== undefined) setNotifyOnCreate(settings.notifyOnCreate);
+      if (settings.notifyOnReupload !== undefined) setNotifyOnReupload(settings.notifyOnReupload);
     } catch (e) {
       console.error("Failed to save notification settings", e);
       showPopup("Ошибка сохранения настроек");
+    }
+  };
+  
+  // Сохранение настроек авто-перезалива
+  const saveAutoReuploadSettings = async (settings: {
+    enabled?: boolean;
+    deleteRejected?: boolean;
+    skipModerationFail?: boolean;
+    timeStart?: string;
+    timeEnd?: string;
+  }) => {
+    if (!userId || !selectedCabinetId || selectedCabinetId === "all") return;
+    
+    try {
+      await fetchSecured(`${API_BASE}/auto-reupload/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          cabinetId: selectedCabinetId,
+          enabled: settings.enabled ?? autoReuploadEnabled,
+          deleteRejected: settings.deleteRejected ?? deleteRejected,
+          skipModerationFail: settings.skipModerationFail ?? skipModerationFail,
+          timeStart: settings.timeStart ?? reuploadTimeStart,
+          timeEnd: settings.timeEnd ?? reuploadTimeEnd,
+        }),
+      });
+      if (settings.enabled !== undefined) setAutoReuploadEnabled(settings.enabled);
+      if (settings.deleteRejected !== undefined) setDeleteRejected(settings.deleteRejected);
+      if (settings.skipModerationFail !== undefined) setSkipModerationFail(settings.skipModerationFail);
+      if (settings.timeStart !== undefined) setReuploadTimeStart(settings.timeStart);
+      if (settings.timeEnd !== undefined) setReuploadTimeEnd(settings.timeEnd);
+    } catch (e) {
+      console.error("Failed to save auto-reupload settings", e);
+      showPopup("Ошибка сохранения настроек авто-перезалива");
     }
   };
 
@@ -5423,6 +5503,8 @@ const App: React.FC = () => {
             )
           ) {
             const exists = nextTextSets.some(s => s.id === ad.textSetId);
+            // Находим существующий набор для сохранения полей text_swap/text_symbols
+            const existingSet = nextTextSets.find(s => s.id === ad.textSetId);
             const newSet: TextSet = {
               id: ad.textSetId!,
               name: ad.newTextSetName.trim() || "(без названия)",
@@ -5432,6 +5514,11 @@ const App: React.FC = () => {
               ...(ad.advertiserInfo ? { advertiserInfo: ad.advertiserInfo } : {}),
               ...(ad.button ? { button: ad.button } : {}),
               ...(ad.logoId ? { logoId: ad.logoId } : {}),
+              // Сохраняем поля text_swap/text_symbols из существующего набора
+              ...(existingSet?.short_text_swap ? { short_text_swap: existingSet.short_text_swap } : {}),
+              ...(existingSet?.short_text_symbols ? { short_text_symbols: existingSet.short_text_symbols } : {}),
+              ...(existingSet?.long_text_swap ? { long_text_swap: existingSet.long_text_swap } : {}),
+              ...(existingSet?.long_text_symbols ? { long_text_symbols: existingSet.long_text_symbols } : {}),
             };
             nextTextSets = exists
               ? nextTextSets.map(s => s.id === ad.textSetId ? newSet : s)
@@ -6273,8 +6360,8 @@ const App: React.FC = () => {
     </header>
   );
 
-  const CAN_COMPANIES_USER_ID = "1342381428";
-  const canAccessCompanies = userId === CAN_COMPANIES_USER_ID;
+  //const CAN_COMPANIES_USER_ID = "1342381428";
+  const canAccessCompanies = true;
 
   const renderSidebar = () => (
     <>
@@ -6486,6 +6573,12 @@ const App: React.FC = () => {
           >
             Уведомления
           </button>
+          <button
+            className={`settings-tab ${settingsTab === "autoReupload" ? "active" : ""}`}
+            onClick={() => setSettingsTab("autoReupload")}
+          >
+            Авто-перезалив
+          </button>
         </div>
 
         {/* Контент вкладок */}
@@ -6501,10 +6594,82 @@ const App: React.FC = () => {
               <input
                 type="checkbox"
                 checked={notifyOnError}
-                onChange={(e) => saveNotificationSettings(e.target.checked)}
+                onChange={(e) => saveNotificationSettings({ notifyOnError: e.target.checked })}
               />
               <span>Уведомлять при ошибке создания компании</span>
             </label>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={notifyOnCreate}
+                onChange={(e) => saveNotificationSettings({ notifyOnCreate: e.target.checked })}
+              />
+              <span>Уведомлять при создании</span>
+            </label>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={notifyOnReupload}
+                onChange={(e) => saveNotificationSettings({ notifyOnReupload: e.target.checked })}
+              />
+              <span>Уведомлять при перезаливе</span>
+            </label>
+          </div>
+        )}
+
+        {settingsTab === "autoReupload" && (
+          <div className="settings-content">
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={autoReuploadEnabled}
+                onChange={(e) => saveAutoReuploadSettings({ enabled: e.target.checked })}
+              />
+              <span>Включить авто-перезалив</span>
+            </label>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={deleteRejected}
+                onChange={(e) => saveAutoReuploadSettings({ deleteRejected: e.target.checked })}
+              />
+              <span>Удалять отклоненные компании/группы</span>
+            </label>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={skipModerationFail}
+                onChange={(e) => saveAutoReuploadSettings({ skipModerationFail: e.target.checked })}
+              />
+              <span>Не заливать компании/группы которые не пройдут модерацию</span>
+            </label>
+            
+            <div className="settings-time-range">
+              <span className="settings-time-label">Пересоздавать в диапазоне</span>
+              <input
+                type="time"
+                className="settings-time-input"
+                value={reuploadTimeStart}
+                onChange={(e) => saveAutoReuploadSettings({ timeStart: e.target.value })}
+              />
+              <span className="settings-time-separator">—</span>
+              <input
+                type="time"
+                className="settings-time-input"
+                value={reuploadTimeEnd}
+                onChange={(e) => saveAutoReuploadSettings({ timeEnd: e.target.value })}
+              />
+              <span 
+                className="settings-tooltip-icon"
+                title="Перезаливы вне этого диапазона будут перенесены на следующий день"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style={{marginLeft:410,marginTop:-26}}>
+                  <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/>
+                  <path d="M8 7V11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  <circle cx="8" cy="5" r="0.75" fill="currentColor"/>
+                </svg>
+              </span>
+            </div>
           </div>
         )}
       </div>
