@@ -38,7 +38,7 @@ from dotenv import dotenv_values
 
 # ============================ Конфигурация ============================
 
-VERSION = "1.29"
+VERSION = "1.30"
 
 CHECK_MODERATION_DIR = Path("/opt/auto_ads/data/check_moderation")
 ONE_ADD_GROUPS_DIR = Path("/opt/auto_ads/data/one_add_groups")
@@ -828,6 +828,8 @@ def create_add_group_preset(
             "original_video_id": original_video_id,
             "old_video_id": old_video_id,
             "new_video_id": new_video_id,
+            "new_media_id": new_video_id,  # Универсальное поле для видео/картинки
+            "media_type": "video",  # Тип медиа: video или image
             "segments": segments,
             "ad_plan_id": ad_plan_id,
             "audience_name": audience_name,  # Имя для токена {%AUD%}
@@ -841,6 +843,8 @@ def create_add_group_preset(
         for ad in new_preset.get("ads", []):
             # Заменяем video_id на новый
             ad["videoIds"] = [new_video_id]
+            # Очищаем imageIds
+            ad["imageIds"] = []
             
             # Заменяем текст если textset совпадает
             if ad.get("textSetId") == textset_id or not textset_id:
