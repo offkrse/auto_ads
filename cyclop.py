@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.73"
+VersionCyclop = "1.74"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -3521,14 +3521,19 @@ def build_add_group_payload(preset: Dict[str, Any], new_media_id: str, segments:
             else:
                 url_id = 0
         
+        # Получаем cabinet_id для detect_image_media_kind
+        cabinet_id_str = preset.get("_cabinet_id", "")
+        
         # Content в зависимости от типа медиа
         content: Dict[str, Any] = {
             "icon_256x256": {"id": int(icon_id) if icon_id else 0},
         }
         
         if media_type == "image":
-            # Для картинок используем image_1080x1920
-            content["image_1080x1920"] = {"id": int(new_media_id)}
+            # Определяем правильный media_kind для изображения
+            image_media_kind = detect_image_media_kind(int(new_media_id), cabinet_id_str)
+            content[image_media_kind] = {"id": int(new_media_id)}
+            log.info("build_add_group_payload: using image media_kind=%s for id=%s", image_media_kind, new_media_id)
         else:
             # Для видео используем video_portrait_*
             content["video_portrait_9_16_30s"] = {"id": int(new_media_id)}
