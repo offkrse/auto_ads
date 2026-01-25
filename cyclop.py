@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.75"
+VersionCyclop = "1.76"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1544,9 +1544,20 @@ def with_retries(method: str, url: str, tokens: List[str], **kwargs) -> Dict[str
                         resp.status_code, url, len(body), body)
             # Логируем payload при ошибке валидации
             if code in {"validation_failed", "bad_request"}:
+                # Пробуем получить payload из json или data
                 payload_data = kwargs.get("json")
+                if not payload_data:
+                    raw_data = kwargs.get("data")
+                    if raw_data:
+                        try:
+                            if isinstance(raw_data, bytes):
+                                payload_data = json.loads(raw_data.decode("utf-8"))
+                            elif isinstance(raw_data, str):
+                                payload_data = json.loads(raw_data)
+                        except Exception:
+                            payload_data = f"<raw data len={len(raw_data) if raw_data else 0}>"
                 if payload_data:
-                    log.error("Failed payload: %s", json.dumps(payload_data, ensure_ascii=False))
+                    log.error("Failed payload: %s", json.dumps(payload_data, ensure_ascii=False) if isinstance(payload_data, dict) else payload_data)
                 # НЕМЕДЛЕННО — никакого ретрая
                 raise ApiHTTPError(resp.status_code, body, resp.headers, url)
             # иные 4xx — можно подретраить чуть-чуть
