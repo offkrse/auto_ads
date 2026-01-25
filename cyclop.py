@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.72"
+VersionCyclop = "1.73"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -2080,13 +2080,15 @@ def load_sets_for_cabinet(user_id: str, cabinet_id: str) -> List[Dict]:
 def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                    user_id: str, cabinet_id: str,
                    preset_id: str, preset_name: str, trigger_time: str,
-                   date_start_override: Optional[str] = None) -> List[Dict[str, Any]]:
+                   date_start_override: Optional[str] = None,
+                   skip_moderation_check: bool = False) -> List[Dict[str, Any]]:
     """
     При ошибке пишет файл error с понятным текстом и техническим кодом (append в created.json).
     При успехе — пишет success с массивом id_company из всех ответов.
     
     Args:
         date_start_override: Если задан, используется как date_start для групп.
+        skip_moderation_check: Если True, не проверять модерацию в sets.json (skipModerationFail=false).
     
     Возвращает список «сырого» ответа VK (для внутренней отладки).
     """
@@ -2186,26 +2188,30 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
     sets_data = load_sets_for_cabinet(user_id, cabinet_id)
     log.info("Loaded sets_data with %d sets, checking %d ads", len(sets_data), len(ads))
     
-    # 2.2) Проверяем объявления и фильтруем забаненные
-    approved_ads = []
-    for i, ad in enumerate(ads):
-        approved_data = check_and_get_approved_creative(ad, sets_data, objective, str(cabinet_id), i)
-        if approved_data:
-            # Обновляем объявление одобренными данными
-            ad["videoIds"] = [approved_data["video_id"]]
-            if approved_data.get("text_short"):
-                ad["shortDescription"] = approved_data["text_short"]
-            if approved_data.get("text_long"):
-                ad["longDescription"] = approved_data["text_long"]
-            approved_ads.append(ad)
-        else:
-            log.warning("ads[%d] is BANNED and no APPROVED replacement, skipping", i)
-    
-    # Проверяем остались ли объявления
-    if not approved_ads:
-        write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                           "Компания отклонена", "All ads are BANNED with no APPROVED replacements")
-        raise RuntimeError("All ads are BANNED")
+    # 2.2) Проверяем объявления и фильтруем забаненные (если не skip_moderation_check)
+    if skip_moderation_check:
+        log.info("skip_moderation_check=True, skipping moderation validation")
+        approved_ads = ads
+    else:
+        approved_ads = []
+        for i, ad in enumerate(ads):
+            approved_data = check_and_get_approved_creative(ad, sets_data, objective, str(cabinet_id), i)
+            if approved_data:
+                # Обновляем объявление одобренными данными
+                ad["videoIds"] = [approved_data["video_id"]]
+                if approved_data.get("text_short"):
+                    ad["shortDescription"] = approved_data["text_short"]
+                if approved_data.get("text_long"):
+                    ad["longDescription"] = approved_data["text_long"]
+                approved_ads.append(ad)
+            else:
+                log.warning("ads[%d] is BANNED and no APPROVED replacement, skipping", i)
+        
+        # Проверяем остались ли объявления
+        if not approved_ads:
+            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
+                               "Компания отклонена", "All ads are BANNED with no APPROVED replacements")
+            raise RuntimeError("All ads are BANNED")
     
     # Заменяем ads на отфильтрованный список
     ads = approved_ads
@@ -2500,7 +2506,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         user_id: str, cabinet_id: str,
                         preset_id: str, preset_name: str, trigger_time: str,
-                        date_start_override: Optional[str] = None) -> List[Dict[str, Any]]:
+                        date_start_override: Optional[str] = None,
+                        skip_moderation_check: bool = False) -> List[Dict[str, Any]]:
     """
     FAST: на каждый контейнер → отдельная группа; в каждой группе создаём баннер
     под КАЖДЫЙ креатив из ads[*].videoIds и ads[*].imageIds.
@@ -2508,6 +2515,7 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
     
     Args:
         date_start_override: Если задан, используется как date_start для групп.
+        skip_moderation_check: Если True, не проверять модерацию в sets.json.
     """
     company = preset["company"]
     url = company.get("url")
@@ -2723,14 +2731,14 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                     except Exception:
                         continue
 
-                    # Проверяем модерацию для этого конкретного видео
+                    # Проверяем модерацию для этого конкретного видео (если не skip)
                     video_id_str = str(media_id)
                     textset_id = ad.get("textSetId") or ""
                     text_short = ad.get("shortDescription") or ""
                     text_long = ad.get("longDescription") or ""
                     
                     # Проверяем не забанен ли этот текст для этого видео
-                    if is_text_banned_for_original_video(
+                    if not skip_moderation_check and is_text_banned_for_original_video(
                         sets_data, video_id_str, textset_id,
                         text_short, text_long, objective, str(cabinet_id)
                     ):
@@ -3103,16 +3111,25 @@ def process_queue_once() -> None:
             preset_name = str((preset.get("company") or {}).get("presetName") or "")
             log.info("Processing %s/%s preset=%s repeats=%s", user_id, cabinet_id, preset_id, count_repeats)
 
+            # Загружаем настройки auto_reupload для skipModerationFail
+            reupload_settings = get_auto_reupload_settings(user_id, cabinet_id)
+            skip_moderation = not reupload_settings.get("skipModerationFail", True)
+            # skipModerationFail=false означает "не пропускать при ошибке модерации" = заливать всё
+            # skipModerationFail=true означает "пропускать при ошибке модерации" = проверять модерацию
+            # Инвертируем: skip_moderation_check = NOT skipModerationFail
+            
             try:
                 if fast_flag:
                     _ = create_ad_plan_fast(
                         preset, tokens, count_repeats, user_id, cabinet_id,
-                        preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time
+                        preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time,
+                        skip_moderation_check=skip_moderation
                     )
                 else:
                     _ = create_ad_plan(
                         preset, tokens, count_repeats, user_id, cabinet_id,
-                        preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time
+                        preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time,
+                        skip_moderation_check=skip_moderation
                     )
             except Exception:
                 # ошибка уже записана write_result_error внутри create_ad_plan
@@ -3156,6 +3173,7 @@ def process_one_shot_presets() -> None:
             reupload_settings = get_auto_reupload_settings(user_id, cabinet_id)
             time_start = reupload_settings.get("timeStart", "00:00")
             time_end = reupload_settings.get("timeEnd", "23:59")
+            skip_moderation = not reupload_settings.get("skipModerationFail", True)
             
             # Проверяем время - если вне диапазона, добавляем date_start на завтра
             date_start_override = None
@@ -3184,13 +3202,15 @@ def process_one_shot_presets() -> None:
                 create_ad_plan_fast(
                     preset, tokens, 1, user_id, cabinet_id,
                     preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time,
-                    date_start_override=date_start_override
+                    date_start_override=date_start_override,
+                    skip_moderation_check=skip_moderation
                 )
             else:
                 create_ad_plan(
                     preset, tokens, 1, user_id, cabinet_id,
                     preset_id=preset_id, preset_name=preset_name, trigger_time=trigger_time,
-                    date_start_override=date_start_override
+                    date_start_override=date_start_override,
+                    skip_moderation_check=skip_moderation
                 )
             
             # Удаляем файл после успешной обработки
@@ -3258,12 +3278,13 @@ def process_one_add_groups() -> None:
                 continue
             
             # Получаем данные из _moderation_info
-            new_video_id = mod_info.get("new_video_id")
+            new_media_id = mod_info.get("new_media_id") or mod_info.get("new_video_id")
+            media_type = mod_info.get("media_type", "video")
             segments = mod_info.get("segments", [])
             ad_plan_id = mod_info.get("ad_plan_id")
             
-            if not new_video_id:
-                log.error("add-group preset %s missing new_video_id", filepath.name)
+            if not new_media_id:
+                log.error("add-group preset %s missing new_media_id/new_video_id", filepath.name)
                 continue
             
             if not ad_plan_id:
@@ -3298,16 +3319,17 @@ def process_one_add_groups() -> None:
             
             token = tokens[0]
             
-            log.info("Processing add-group preset: %s (ad_plan=%s, video=%s, segments=%s)",
-                    filepath.name, ad_plan_id, new_video_id, segments)
+            log.info("Processing add-group preset: %s (ad_plan=%s, media_id=%s, media_type=%s, segments=%s)",
+                    filepath.name, ad_plan_id, new_media_id, media_type, segments)
             
             # Получаем список групп ДО добавления
             groups_before = get_ad_plan_groups(token, ad_plan_id)
             log.info("Groups before adding: %s", groups_before)
             
             # Собираем payload для добавления группы
-            payload = build_add_group_payload(preset, new_video_id, segments, token, 
-                                             date_start_override=date_start_override)
+            payload = build_add_group_payload(preset, new_media_id, segments, token, 
+                                             date_start_override=date_start_override,
+                                             media_type=media_type)
             
             if not payload:
                 log.error("Failed to build add-group payload for %s", filepath.name)
@@ -3356,9 +3378,10 @@ def process_one_add_groups() -> None:
                     for new_group_id in new_group_ids:
                         new_group_info = {
                             str(new_group_id): {
-                                "video_id": new_video_id,
-                                "original_video_id": mod_info.get("original_video_id", new_video_id),
-                                "image_id": "",
+                                "video_id": new_media_id if media_type == "video" else "",
+                                "original_video_id": mod_info.get("original_video_id", new_media_id) if media_type == "video" else "",
+                                "image_id": new_media_id if media_type == "image" else "",
+                                "original_image_id": mod_info.get("original_video_id", new_media_id) if media_type == "image" else "",
                                 "textset_id": ad.get("textSetId", ""),
                                 "short_description": ad.get("shortDescription", ""),
                                 "long_description": ad.get("longDescription", ""),
@@ -3377,6 +3400,8 @@ def process_one_add_groups() -> None:
                 error_text = resp.text[:1000] if resp.text else ""
                 log.error("Add-group failed for %s: %s %s", 
                          filepath.name, resp.status_code, error_text)
+                # Логируем полный payload для отладки
+                log.error("Add-group payload that failed: %s", json.dumps(payload, ensure_ascii=False))
                 
                 # Удаляем файл при неисправимых ошибках
                 if resp.status_code == 400:
@@ -3396,12 +3421,15 @@ def process_one_add_groups() -> None:
             log.exception("Failed to process add-group preset %s: %s", filepath.name, e)
 
 
-def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments: List[int], token: str, 
-                           date_start_override: Optional[str] = None) -> Optional[Dict]:
+def build_add_group_payload(preset: Dict[str, Any], new_media_id: str, segments: List[int], token: str, 
+                           date_start_override: Optional[str] = None,
+                           media_type: str = "video") -> Optional[Dict]:
     """
     Собирает payload для добавления группы в существующую кампанию.
     
     Args:
+        new_media_id: ID нового видео или картинки
+        media_type: Тип медиа - "video" или "image"
         date_start_override: Если задан, используется как date_start вместо сегодняшней даты.
     
     Возвращает структуру:
@@ -3493,12 +3521,18 @@ def build_add_group_payload(preset: Dict[str, Any], new_video_id: str, segments:
             else:
                 url_id = 0
         
-        # Content с новым video_id
+        # Content в зависимости от типа медиа
         content: Dict[str, Any] = {
             "icon_256x256": {"id": int(icon_id) if icon_id else 0},
-            "video_portrait_9_16_30s": {"id": int(new_video_id)},
-            "video_portrait_9_16_180s": {"id": int(new_video_id)},
         }
+        
+        if media_type == "image":
+            # Для картинок используем image_1080x1920
+            content["image_1080x1920"] = {"id": int(new_media_id)}
+        else:
+            # Для видео используем video_portrait_*
+            content["video_portrait_9_16_30s"] = {"id": int(new_media_id)}
+            content["video_portrait_9_16_180s"] = {"id": int(new_media_id)}
         
         # Textblocks
         if objective == "leadads":
