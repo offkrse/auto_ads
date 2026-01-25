@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.71"
+VersionCyclop = "1.72"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -3374,8 +3374,23 @@ def process_one_add_groups() -> None:
                 filepath.unlink()
                 log.info("Add-group preset processed and deleted: %s", filepath.name)
             else:
+                error_text = resp.text[:1000] if resp.text else ""
                 log.error("Add-group failed for %s: %s %s", 
-                         filepath.name, resp.status_code, resp.text[:300])
+                         filepath.name, resp.status_code, error_text)
+                
+                # Удаляем файл при неисправимых ошибках
+                if resp.status_code == 400:
+                    try:
+                        error_data = resp.json()
+                        error_code = error_data.get("error", {}).get("code", "")
+                        # deleted_ad_plan - компания удалена, нет смысла повторять
+                        # validation_failed - ошибка валидации, скорее всего не исправится
+                        if error_code in ("deleted_ad_plan", "validation_failed"):
+                            filepath.unlink()
+                            log.info("Deleted add-group preset %s due to unrecoverable error: %s", 
+                                    filepath.name, error_code)
+                    except Exception:
+                        pass
             
         except Exception as e:
             log.exception("Failed to process add-group preset %s: %s", filepath.name, e)
