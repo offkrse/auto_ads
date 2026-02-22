@@ -1027,11 +1027,18 @@ const AudiencesMultiSelect: React.FC<AudiencesMultiSelectProps> = ({
     return () => window.clearTimeout(t);
   }, [q, userId, cabinetId, apiBase, open]);
 
-  const toggleVk = async (id: string) => {
-    const exists = selectedVkIds.includes(id);
+  const toggleVk = async (id: string, shiftKey: boolean = false) => {
+    // При Shift-клике добавляем с минусом (исключение аудитории)
+    const idToSave = shiftKey ? `-${id}` : id;
+    
+    // Проверяем, есть ли уже этот id (с минусом или без)
+    const existsPositive = selectedVkIds.includes(id);
+    const existsNegative = selectedVkIds.includes(`-${id}`);
+    const exists = existsPositive || existsNegative;
 
     if (!exists) {
-      const name = resolveName(id);
+      const baseName = resolveName(id);
+      const nameToSave = shiftKey ? `-${baseName}` : baseName;
 
       // по желанию: если аудитория пришла из поиска (remote), допишем её в локальный список на бэкенде
       const existsLocal = vkAudiences.some(a => a.id === id);
@@ -1052,12 +1059,15 @@ const AudiencesMultiSelect: React.FC<AudiencesMultiSelectProps> = ({
       }
 
       onChange({
-        vkIds:   [...selectedVkIds, id],
-        vkNames: [...selectedVkNames, name],
+        vkIds:   [...selectedVkIds, idToSave],
+        vkNames: [...selectedVkNames, nameToSave],
         abstractNames: selectedAbstractNames
       });
     } else {
-      const idx = selectedVkIds.indexOf(id);
+      // Удаляем либо положительный, либо отрицательный id
+      const idxPositive = selectedVkIds.indexOf(id);
+      const idxNegative = selectedVkIds.indexOf(`-${id}`);
+      const idx = idxPositive >= 0 ? idxPositive : idxNegative;
       onChange({
         vkIds:   selectedVkIds.filter((_, i) => i !== idx),
         vkNames: selectedVkNames.filter((_, i) => i !== idx),
@@ -1141,12 +1151,14 @@ const AudiencesMultiSelect: React.FC<AudiencesMultiSelectProps> = ({
             </span>
           ))}
           {selectedVkIds.map((id, i) => {
-            const name = selectedVkNames[i] || resolveName(id);
+            const isNegative = id.startsWith('-');
+            const baseId = isNegative ? id.slice(1) : id;
+            const name = selectedVkNames[i] || resolveName(baseId);
             return (
               <span
                 key={id}
-                className="pill active"
-                onClick={(e)=>{ e.stopPropagation(); toggleVk(id); }}
+                className={`pill active ${isNegative ? "negative" : ""}`}
+                onClick={(e)=>{ e.stopPropagation(); toggleVk(baseId); }}
               >
                 {name} ✕
               </span>
@@ -1216,19 +1228,20 @@ const AudiencesMultiSelect: React.FC<AudiencesMultiSelectProps> = ({
           {q && loading && <div className="hint">Поиск…</div>}
           <div className="menu-list" style={{display:"flex", flexDirection:"column", gap:6}}>
             {list.map(a => {
-              const active = selectedVkIds.includes(a.id);
+              const active = selectedVkIds.includes(a.id) || selectedVkIds.includes(`-${a.id}`);
+              const isNegative = selectedVkIds.includes(`-${a.id}`);
               return (
                 <button
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
                   key={a.id}
-                  className={`pill ${active ? "active": ""}`}
-                  onClick={() => toggleVk(a.id)}
+                  className={`pill ${active ? "active": ""} ${isNegative ? "negative" : ""}`}
+                  onClick={(e) => toggleVk(a.id, e.shiftKey)}
                   style={{textAlign:"left"}}
-                  title={a.created || ""}
+                  title={a.created ? `${a.created}${isNegative ? " (исключение)" : ""}` : (isNegative ? "Исключение" : "")}
                 >
                   {/* В ИНТЕРФЕЙСЕ id не показываем */}
-                  {a.name}
+                  {isNegative ? `−${a.name}` : a.name}
                 </button>
               );
             })}
@@ -1812,7 +1825,7 @@ const PlacementsTreeSelect: React.FC<{
 
 // ===== Дерево регионов с поиском и чипсами =====
 type RegionItem = { id: number; name: string; parent_id?: number };
-const regionNameCache: Record<number, string> = { 188: "Россия" };
+const regionNameCache: Record<number, string> = { "-1": "Весь мир", 188: "Россия" };
 
 const RegionsTreeSelect: React.FC<{
   selected: number[];
@@ -1820,7 +1833,7 @@ const RegionsTreeSelect: React.FC<{
 }> = ({ selected, onChange }) => {
   const [items, setItems] = React.useState<RegionItem[]>([]);
   const [byParent, setByParent] = React.useState<Record<string, RegionItem[]>>({});
-  const [nameById, setNameById] = React.useState<Record<number, string>>({ ...regionNameCache });
+  const [nameById, setNameById] = React.useState<Record<number, string>>({ [-1]: "Весь мир", ...regionNameCache });
   const [expanded, setExpanded] = React.useState<Record<number, boolean>>({});
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [q, setQ] = React.useState("");
@@ -1860,6 +1873,7 @@ const RegionsTreeSelect: React.FC<{
           nm[it.id] = it.name;
         }
         if (!nm[ROOT_ID]) nm[ROOT_ID] = "Россия";
+        nm[-1] = "Весь мир"; // Всегда добавляем "Весь мир"
         Object.keys(mp).forEach(k => mp[k].sort((a, b) => a.name.localeCompare(b.name, "ru")));
         setByParent(mp);
         Object.assign(regionNameCache, nm);
@@ -1880,6 +1894,28 @@ const RegionsTreeSelect: React.FC<{
     const minusId = -Math.abs(id);
     let next = [...selected];
 
+    // Спец-обработка для "Весь мир" (id === -1 как plusId)
+    if (plusId === 1 && id === -1) {
+      // Это клик на "Весь мир" — особая логика
+      if (wantMinus) {
+        // Нельзя исключить "Весь мир" — игнорируем
+        return;
+      } else {
+        // Включаем "Весь мир"
+        if (next.includes(-1)) {
+          // Уже включён — снимаем
+          next = next.filter(v => v !== -1);
+          if (next.length === 0) next = [188]; // Если всё сняли — возврат к России
+        } else {
+          // Включаем "Весь мир": убираем 188 (Россию) и все положительные регионы, оставляем минусы регионов внутри России
+          next = next.filter(v => v < 0 && v !== -1); // оставляем только минусы (исключённые регионы внутри России)
+          next = [-1, ...next];
+        }
+        onChange(next);
+        return;
+      }
+    }
+
     if (wantMinus) {
       // переключаем конкретный минус
       next = next.filter(v => v !== plusId); // убираем возможный плюс того же региона
@@ -1887,15 +1923,23 @@ const RegionsTreeSelect: React.FC<{
         ? next.filter(v => v !== minusId)
         : [...next, minusId];
 
-      // спец-правило: при наличии любых минусов Россия (188) ДОЛЖНА быть включена
-      // т.е. разрешаем комбо [188] + (отрицательные регионы)
-      next = next.filter(v => v !== -188); // -188 не бывает
-      if (next.some(v => v < 0) && !next.includes(188)) {
-        next = [188, ...next];
-      }
+      // Если выбран "Весь мир", то минусы работают в контексте "Весь мир"
+      if (next.includes(-1)) {
+        // Убираем 188 и любые положительные (кроме -1)
+        next = next.filter(v => v < 0 || v === -1);
+        // Убедимся, что -1 есть
+        if (!next.includes(-1)) next = [-1, ...next];
+      } else {
+        // спец-правило: при наличии любых минусов Россия (188) ДОЛЖНА быть включена
+        // т.е. разрешаем комбо [188] + (отрицательные регионы)
+        next = next.filter(v => v !== -188); // -188 не бывает
+        if (next.some(v => v < 0) && !next.includes(188)) {
+          next = [188, ...next];
+        }
 
-      // не допускаем других плюсов, кроме 188
-      next = next.filter(v => v < 0 || v === 188);
+        // не допускаем других плюсов, кроме 188
+        next = next.filter(v => v < 0 || v === 188);
+      }
 
     } else {
       // режим включить
@@ -1904,13 +1948,18 @@ const RegionsTreeSelect: React.FC<{
         ? next.filter(v => v !== plusId)
         : [...next, plusId];
 
+      // Если включаем конкретный регион, убираем "Весь мир" и переходим в стандартный режим
+      if (plusId !== 1 && next.includes(-1)) {
+        next = next.filter(v => v !== -1);
+      }
+
       // в режиме включения 188 убираем, если выбраны какие-то плюсы
-      if (next.some(v => v > 0 && v !== 188)) {
+      if (next.some(v => v > 0 && v !== 188 && v !== -1)) {
         next = next.filter(v => Math.abs(v) !== 188);
       }
 
       // и никаких минусов вместе с плюсами
-      next = next.filter(v => v > 0);
+      next = next.filter(v => v > 0 || v === -1);
     }
 
     // если вдруг всё сняли — вернуть дефолт 188
@@ -2006,8 +2055,8 @@ const RegionsTreeSelect: React.FC<{
   const keepIds = buildKeepIds(q);
 
   const chips = selected.map(id => {
-    const neg = id < 0;
-    const pure = Math.abs(id);
+    const neg = id < 0 && id !== -1; // -1 это "Весь мир", не негатив
+    const pure = id === -1 ? -1 : Math.abs(id);
     const nm = nameById[pure] ?? String(pure);
     return (
       <span key={`chip_r_${id}`} className="pill active" onClick={e => { e.stopPropagation(); onChange(selected.filter(v => v !== id)); }}>
@@ -2018,7 +2067,7 @@ const RegionsTreeSelect: React.FC<{
   });
 
   const hasPlusNow = selected.some(v => v > 0);
-  const hasMinusNow = selected.some(v => v < 0);
+  const hasMinusNow = selected.some(v => v < 0 && v !== -1); // -1 это "Весь мир", не минус
 
   return (
     <div ref={wrapRef} className="aud-ms" style={{ position: "relative" }}>
@@ -2054,11 +2103,33 @@ const RegionsTreeSelect: React.FC<{
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
             <div style={{ fontWeight: 600 }}>Регионы</div>
             <div className="hint" style={{ fontSize: 12 }}>
-              {hasPlusNow && "Режим: включить"}
-              {hasMinusNow && "Режим: исключить"}
-              {!hasPlusNow && !hasMinusNow && "По умолчанию: 188"}
+              {selected.includes(-1) && "Режим: весь мир"}
+              {!selected.includes(-1) && hasPlusNow && "Режим: включить"}
+              {!selected.includes(-1) && hasMinusNow && "Режим: исключить"}
+              {!selected.includes(-1) && !hasPlusNow && !hasMinusNow && "По умолчанию: 188"}
             </div>
           </div>
+
+          {/* Весь мир - всегда первый */}
+          {(!q.trim() || "весь мир".includes(q.trim().toLowerCase())) && (
+            <div className="tree-card" style={{ margin: 6 }}>
+              <div className="tree-head">
+                <span style={{ width: 18 }} />
+                <span className="tree-title" style={{ fontWeight: 600 }}>
+                  🌍 Весь мир
+                </span>
+                <div className="tree-actions">
+                  <button
+                    className={`pill ${selected.includes(-1) ? "active" : ""}`}
+                    onClick={() => applyToggle(-1, false)}
+                    onMouseDown={(e) => e.preventDefault()}
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {renderBranchRoot(keepIds)}
         </div>
@@ -8180,10 +8251,15 @@ const App: React.FC = () => {
             onChange={(arr) => {
               let next = [...arr];
             
-              const hasMinus = next.some(v => v < 0);
+              const hasWorldwide = next.includes(-1);
+              const hasMinus = next.some(v => v < 0 && v !== -1); // исключённые регионы (не считая -1)
               const hasPlusOtherThan188 = next.some(v => v > 0 && v !== 188);
             
-              if (hasMinus) {
+              if (hasWorldwide) {
+                // Режим «Весь мир»: разрешаем -1 + любые минусы (исключённые регионы внутри России)
+                next = next.filter(v => v === -1 || (v < 0 && v !== -1));
+                if (!next.includes(-1)) next = [-1, ...next];
+              } else if (hasMinus) {
                 // Режим «исключать»: разрешаем 188 + любые минусы
                 next = next.filter(v => v < 0 || v === 188);
                 if (!next.includes(188)) next = [188, ...next]; // страховка
