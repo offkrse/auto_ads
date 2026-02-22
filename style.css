@@ -2434,7 +2434,7 @@ code {
 }
 
 .cabinet-dd-trigger {
-  width: 260px;
+  width: 340px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3112,6 +3112,15 @@ code {
   margin-top: 20px;
 }
 
+.settings-time-label{
+  margin-right: 5px;
+}
+
+.settings-time-separator{
+  margin-left: 4px;
+  margin-right: 4px;
+}
+
 .settings-checkbox {
   display: flex;
   align-items: center;
@@ -3123,6 +3132,7 @@ code {
   background: rgba(255,255,255,0.04);
   border: 1px solid var(--border-soft);
   transition: background 0.15s;
+  margin-bottom: 5px;
 }
 
 .settings-checkbox:hover {
