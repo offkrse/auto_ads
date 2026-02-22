@@ -22,7 +22,7 @@ import random
 
 app = FastAPI()
 
-VersionApp = "1.21"
+VersionApp = "1.22"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3931,6 +3931,110 @@ def vk_checker_filters(user_id: str = Query(...)):
     except Exception as e:
         log_error(f"vk_checker/filters error: {repr(e)}")
         return {"templates": []}
+
+
+# -------------------------------------
+#   AI PARAMETERS API
+# -------------------------------------
+def ai_parameters_path(user_id: str, cabinet_id: str) -> Path:
+    return USERS_DIR / user_id / "presets" / cabinet_id / "parameters_ai.json"
+
+def ai_info_banner_path(user_id: str, cabinet_id: str) -> Path:
+    return USERS_DIR / user_id / "presets" / cabinet_id / "info_banners_ai.json"
+
+@secure_api.get("/ai/parameters")
+@secure_auto.get("/ai/parameters")
+def get_ai_parameters(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get AI parameters for user/cabinet"""
+    ensure_user_structure(user_id)
+    fpath = ai_parameters_path(user_id, cabinet_id)
+    if not fpath.exists():
+        return {
+            "dailyBudget": "",
+            "duplication": "15",
+            "topVideos": "30",
+            "newVideos": "5",
+            "imitation": "20",
+            "experimentation": "15",
+            "testing": "15"
+        }
+    try:
+        with open(fpath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        log_error(f"get_ai_parameters error: {repr(e)}")
+        return {}
+
+@secure_api.post("/ai/parameters")
+@secure_auto.post("/ai/parameters")
+async def save_ai_parameters(request: Request):
+    """Save AI parameters for user/cabinet"""
+    try:
+        body = await request.json()
+        user_id = body.get("user_id")
+        cabinet_id = body.get("cabinet_id")
+        if not user_id or not cabinet_id:
+            raise HTTPException(400, "user_id and cabinet_id required")
+        
+        ensure_user_structure(user_id)
+        fpath = ai_parameters_path(user_id, cabinet_id)
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        
+        data = {
+            "dailyBudget": body.get("dailyBudget", ""),
+            "duplication": body.get("duplication", "15"),
+            "topVideos": body.get("topVideos", "30"),
+            "newVideos": body.get("newVideos", "5"),
+            "imitation": body.get("imitation", "20"),
+            "experimentation": body.get("experimentation", "15"),
+            "testing": body.get("testing", "15")
+        }
+        
+        atomic_write_json(fpath, data)
+        return {"status": "ok"}
+    except Exception as e:
+        log_error(f"save_ai_parameters error: {repr(e)}")
+        raise HTTPException(500, str(e))
+
+@secure_api.get("/ai/info-banner")
+@secure_auto.get("/ai/info-banner")
+def get_ai_info_banner(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get AI info banner for user/cabinet"""
+    ensure_user_structure(user_id)
+    fpath = ai_info_banner_path(user_id, cabinet_id)
+    if not fpath.exists():
+        return {"advertiserInfo": ""}
+    try:
+        with open(fpath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        log_error(f"get_ai_info_banner error: {repr(e)}")
+        return {"advertiserInfo": ""}
+
+@secure_api.post("/ai/info-banner")
+@secure_auto.post("/ai/info-banner")
+async def save_ai_info_banner(request: Request):
+    """Save AI info banner for user/cabinet"""
+    try:
+        body = await request.json()
+        user_id = body.get("user_id")
+        cabinet_id = body.get("cabinet_id")
+        if not user_id or not cabinet_id:
+            raise HTTPException(400, "user_id and cabinet_id required")
+        
+        ensure_user_structure(user_id)
+        fpath = ai_info_banner_path(user_id, cabinet_id)
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        
+        data = {
+            "advertiserInfo": body.get("advertiserInfo", "")
+        }
+        
+        atomic_write_json(fpath, data)
+        return {"status": "ok"}
+    except Exception as e:
+        log_error(f"save_ai_info_banner error: {repr(e)}")
+        raise HTTPException(500, str(e))
 
 
 # -------------------------------------
