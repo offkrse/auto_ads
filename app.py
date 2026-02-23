@@ -22,7 +22,7 @@ import random
 
 app = FastAPI()
 
-VersionApp = "1.22"
+VersionApp = "1.23"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3937,10 +3937,10 @@ def vk_checker_filters(user_id: str = Query(...)):
 #   AI PARAMETERS API
 # -------------------------------------
 def ai_parameters_path(user_id: str, cabinet_id: str) -> Path:
-    return USERS_DIR / user_id / "presets" / cabinet_id / "parameters_ai.json"
+    return USERS_DIR / user_id / "ai" / f"parameters_ai_{cabinet_id}.json"
 
 def ai_info_banner_path(user_id: str, cabinet_id: str) -> Path:
-    return USERS_DIR / user_id / "presets" / cabinet_id / "info_banners_ai.json"
+    return USERS_DIR / user_id / "ai" / f"info_banners_ai_{cabinet_id}.json"
 
 @secure_api.get("/ai/parameters")
 @secure_auto.get("/ai/parameters")
