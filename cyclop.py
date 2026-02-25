@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.76"
+VersionCyclop = "1.77"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -40,6 +40,17 @@ ONE_SHOT_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
 # Директория для добавления групп в существующие кампании
 ONE_ADD_GROUPS_DIR = Path("/opt/auto_ads/data/one_add_groups")
 ONE_ADD_GROUPS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Директория для AI-сгенерированных кампаний
+AI_QUEUE_DIR = Path("/opt/auto_ads/data/ai_queue")
+AI_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Директория для обработанных AI-файлов
+AI_QUEUE_DONE_DIR = Path("/opt/auto_ads/data/ai_queue_done")
+AI_QUEUE_DONE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Часовой пояс для time_start в AI queue файлах (UTC+3 Москва)
+AI_QUEUE_TZ = tz.gettz("Etc/GMT-3")  # UTC+3
 
 API_BASE = os.getenv("VK_API_BASE", "https://ads.vk.com")
 
@@ -3711,6 +3722,417 @@ def get_tokens_for_cabinet(user_id: str, cabinet_id: str) -> List[str]:
         return []
 
 
+# ============================ Обработка AI Queue ============================
+
+def convert_ai_queue_time_to_utc4(time_start_utc3: str) -> str:
+    """
+    Конвертирует время из UTC+3 (Москва) в UTC+4 (формат cyclop).
+    time_start_utc3: "HH:MM" в UTC+3
+    Возвращает: "HH:MM" в UTC+4 (прибавляем 1 час)
+    """
+    try:
+        parts = time_start_utc3.strip().split(":")
+        if len(parts) != 2:
+            return time_start_utc3
+        
+        hour = int(parts[0])
+        minute = int(parts[1])
+        
+        # Прибавляем 1 час (UTC+3 -> UTC+4)
+        hour = (hour + 1) % 24
+        
+        return f"{hour:02d}:{minute:02d}"
+    except Exception as e:
+        log.warning("convert_ai_queue_time error: %s, returning original: %s", e, time_start_utc3)
+        return time_start_utc3
+
+
+def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str]) -> Optional[Dict[str, Any]]:
+    """
+    Конвертирует AI Queue JSON в payload для VK API.
+    
+    Формат ai_data:
+    {
+        "user_id": "...",
+        "cabinet_name": "...",
+        "cabinet_id": 29009721,
+        "banners": [
+            {
+                "id_video": "...",
+                "id_image": "",
+                "icon_id": "...",
+                "title": "...",
+                "text_short": "...",
+                "text_long": "...",
+                "cta": "write",
+                "name_banner": "...",
+                "name_group": "...",
+                "name_company": "...",
+                "geo_regions": "188,-66,...",
+                "sex": "male,female",
+                "age": "21-65",
+                "pads": "1010345,1265106,2243453",
+                "budget_limit_day_group": "880",
+                "date_start_group": "25.02.2026",
+                "objective_group": "socialengagement",
+                "package_id": "3127",
+                "utm": "...",
+                "banner_url": "https://vk.com/...",
+                "banner_url_id": "...",
+                ...
+            }
+        ]
+    }
+    """
+    try:
+        banners = ai_data.get("banners", [])
+        if not banners:
+            log.error("AI Queue: no banners in data")
+            return None
+        
+        first_banner = banners[0]
+        
+        # Получаем общие данные из первого баннера
+        company_name = first_banner.get("name_company", "AI Кампания")
+        objective = first_banner.get("objective_company", "socialengagement")
+        
+        # Дата старта
+        date_start_raw = first_banner.get("date_start_company") or first_banner.get("date_start_group", "")
+        if date_start_raw:
+            # Формат DD.MM.YYYY -> YYYY-MM-DD
+            try:
+                parts = date_start_raw.split(".")
+                if len(parts) == 3:
+                    start_date_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
+                else:
+                    start_date_str = datetime.now(LOCAL_TZ).date().isoformat()
+            except:
+                start_date_str = datetime.now(LOCAL_TZ).date().isoformat()
+        else:
+            start_date_str = datetime.now(LOCAL_TZ).date().isoformat()
+        
+        # URL объекта
+        banner_url = first_banner.get("banner_url", "")
+        banner_url_id = first_banner.get("banner_url_id", "")
+        
+        # Пытаемся использовать готовый banner_url_id или резолвим
+        if banner_url_id and str(banner_url_id).strip():
+            try:
+                ad_object_id = int(banner_url_id)
+            except:
+                ad_object_id = resolve_url_id(banner_url, tokens) if banner_url else 0
+        elif banner_url:
+            ad_object_id = resolve_url_id(banner_url, tokens)
+        else:
+            log.error("AI Queue: no banner_url or banner_url_id")
+            return None
+        
+        package_id = int(first_banner.get("package_id", "3127") or "3127")
+        
+        ad_groups_payload = []
+        
+        for idx, banner in enumerate(banners, start=1):
+            group_name = banner.get("name_group", f"Группа {idx}")
+            banner_name = banner.get("name_banner", f"Баннер {idx}")
+            
+            # Таргетинги
+            regions = as_int_list(banner.get("geo_regions", ""))
+            age_str = banner.get("age", "")
+            gender_str = banner.get("sex", "")
+            placements = as_int_list(banner.get("pads", ""))
+            segments = as_int_list(banner.get("segments", ""))
+            interests_list = as_int_list(banner.get("interests", ""))
+            
+            genders = split_gender(gender_str)
+            age_list = build_age_list(age_str)
+            
+            targetings: Dict[str, Any] = {"geo": {"regions": regions}}
+            if genders:
+                targetings["sex"] = genders
+            if segments:
+                targetings["segments"] = segments
+            if interests_list:
+                targetings["interests"] = interests_list
+            if age_list:
+                targetings["age"] = {"age_list": age_list}
+            if placements:
+                targetings["pads"] = placements
+            
+            budget_day = int(banner.get("budget_limit_day_group", "0") or "0")
+            
+            # max_price
+            max_price_raw = banner.get("max_price_group", "0.00")
+            try:
+                max_price = f"{float(max_price_raw):.2f}"
+            except:
+                max_price = "0.00"
+            
+            # UTM
+            utm = banner.get("utm") or "ref_source={{banner_id}}&ref={{campaign_id}}"
+            
+            # Контент баннера
+            icon_id = banner.get("icon_id", "")
+            video_id = banner.get("id_video", "")
+            image_id = banner.get("id_image", "")
+            
+            content: Dict[str, Any] = {}
+            if icon_id:
+                content["icon_256x256"] = {"id": int(icon_id)}
+            
+            if video_id:
+                content["video_portrait_9_16_30s"] = {"id": int(video_id)}
+                content["video_portrait_9_16_180s"] = {"id": int(video_id)}
+            elif image_id:
+                content["image_1080x607"] = {"id": int(image_id)}
+            
+            # Текстовые блоки
+            title = banner.get("title", "")
+            text_short = banner.get("text_short", "")
+            text_long = banner.get("text_long", "")
+            text_additional = banner.get("text_additional", "")
+            cta = banner.get("cta", "write")
+            
+            objective_group = banner.get("objective_group", objective)
+            
+            if objective_group == "leadads":
+                textblocks = {
+                    "about_company_115": {"text": "", "title": ""},
+                    "cta_leadads": {"text": cta, "title": ""},
+                    "text_90": {"text": text_short, "title": ""},
+                    "text_220": {"text": text_long, "title": ""},
+                    "title_40_vkads": {"text": title, "title": ""},
+                }
+                if text_additional:
+                    textblocks["title_30_additional"] = {"text": text_additional, "title": ""}
+            else:
+                textblocks = {
+                    "about_company_115": {"text": "", "title": ""},
+                    "cta_community_vk": {"text": cta, "title": ""},
+                    "text_2000": {"text": text_short, "title": ""},
+                    "title_40_vkads": {"text": title, "title": ""},
+                }
+            
+            # URL для баннера
+            b_url_id = banner.get("banner_url_id", "")
+            if b_url_id and str(b_url_id).strip():
+                try:
+                    banner_url_id_int = int(b_url_id)
+                except:
+                    banner_url_id_int = ad_object_id
+            else:
+                banner_url_id_int = ad_object_id
+            
+            banner_payload = {
+                "name": banner_name,
+                "urls": {"primary": {"id": banner_url_id_int}},
+                "content": content,
+                "textblocks": textblocks,
+            }
+            
+            group_payload: Dict[str, Any] = {
+                "name": group_name,
+                "targetings": targetings,
+                "autobidding_mode": "max_goals",
+                "budget_limit": None,
+                "max_price": max_price,
+                "budget_limit_day": budget_day,
+                "date_start": start_date_str,
+                "date_end": None,
+                "age_restrictions": "18+",
+                "package_id": package_id,
+                "banners": [banner_payload],
+            }
+            
+            if utm and objective_group != "leadads":
+                group_payload["utm"] = utm
+            
+            # priced_goal если есть
+            pg_name = banner.get("priced_goal_name_group", "0")
+            pg_source = banner.get("priced_goal_source_id_group", "0")
+            if pg_name and pg_name != "0" and pg_source and pg_source != "0":
+                group_payload["priced_goal"] = {
+                    "goal_name": pg_name,
+                    "goal_source_id": int(pg_source),
+                }
+            
+            ad_groups_payload.append(group_payload)
+        
+        # Итоговый payload
+        payload = {
+            "name": company_name,
+            "status": "active",
+            "date_start": start_date_str,
+            "date_end": None,
+            "autobidding_mode": None,
+            "budget_limit_day": None,
+            "budget_limit": None,
+            "max_price": 0,
+            "objective": objective,
+            "ad_object_id": ad_object_id,
+            "ad_object_type": "url",
+            "ad_groups": ad_groups_payload,
+        }
+        
+        # priced_goal для кампании если есть
+        pg_name_c = first_banner.get("priced_goal_name_company", "0")
+        pg_source_c = first_banner.get("priced_goal_source_id_company", "0")
+        if pg_name_c and pg_name_c != "0" and pg_source_c and pg_source_c != "0":
+            payload["priced_goal"] = {
+                "goal_name": pg_name_c,
+                "goal_source_id": int(pg_source_c),
+            }
+        
+        return payload
+        
+    except Exception as e:
+        log.exception("build_ai_queue_payload error: %s", e)
+        return None
+
+
+def process_ai_queue() -> None:
+    """
+    Обрабатывает JSON файлы из /opt/auto_ads/data/ai_queue/
+    
+    Файлы имеют формат: {cabinet_name}_{user_id}_{timestamp}.json
+    Пример: MAIN_1_20260224_214103.json
+    
+    time_start указано в UTC+3, cyclop работает на UTC+4,
+    поэтому конвертируем время прибавляя 1 час.
+    """
+    if not AI_QUEUE_DIR.exists():
+        return
+    
+    json_files = list(AI_QUEUE_DIR.glob("*.json"))
+    if not json_files:
+        return
+    
+    log.info("AI Queue: found %d file(s) to process", len(json_files))
+    
+    for json_file in json_files:
+        try:
+            ai_data = load_json(json_file)
+            
+            user_id = str(ai_data.get("user_id", ""))
+            cabinet_id = str(ai_data.get("cabinet_id", ""))
+            cabinet_name = ai_data.get("cabinet_name", "")
+            banners = ai_data.get("banners", [])
+            
+            if not user_id or not cabinet_id:
+                log.error("AI Queue: missing user_id or cabinet_id in %s", json_file.name)
+                continue
+            
+            if not banners:
+                log.error("AI Queue: no banners in %s", json_file.name)
+                continue
+            
+            first_banner = banners[0]
+            
+            # Получаем время старта (UTC+3) и конвертируем в UTC+4
+            time_start_utc3 = first_banner.get("time_start", "")
+            if not time_start_utc3:
+                log.error("AI Queue: no time_start in %s", json_file.name)
+                continue
+            
+            trigger_time = convert_ai_queue_time_to_utc4(time_start_utc3)
+            
+            # Проверяем время триггера
+            now_local = datetime.now(LOCAL_TZ)
+            match, info = check_trigger(trigger_time, now_local)
+            
+            if not match:
+                log.info("[AI_QUEUE WAIT] %s | file=%s | trigger_utc3=%s | trigger_utc4=%s | target=%s | now(+%sh)=%s | delta=%ss",
+                         cabinet_name, json_file.name, time_start_utc3, trigger_time,
+                         info.get("TARGET_SHIFTED"), SERVER_SHIFT_HOURS,
+                         info.get("ADJUSTED_NOW"), info.get("DELTA_SEC"))
+                continue
+            
+            log.info("[AI_QUEUE MATCH] %s | file=%s | trigger=%s -> %s | processing...",
+                     cabinet_name, json_file.name, time_start_utc3, trigger_time)
+            
+            # Получаем токены для кабинета
+            tokens = get_tokens_for_cabinet(user_id, cabinet_id)
+            if not tokens:
+                log.error("AI Queue: no tokens for user=%s cabinet=%s", user_id, cabinet_id)
+                # Перемещаем файл в done с ошибкой
+                error_file = AI_QUEUE_DONE_DIR / f"ERROR_NO_TOKEN_{json_file.name}"
+                json_file.rename(error_file)
+                continue
+            
+            # Строим payload
+            payload = build_ai_queue_payload(ai_data, tokens)
+            if not payload:
+                log.error("AI Queue: failed to build payload for %s", json_file.name)
+                error_file = AI_QUEUE_DONE_DIR / f"ERROR_PAYLOAD_{json_file.name}"
+                json_file.rename(error_file)
+                continue
+            
+            # Отправляем в VK API
+            endpoint = f"{API_BASE}/api/v2/ad_plans.json"
+            
+            if DEBUG_DRY_RUN:
+                log.warning("[DRY RUN] AI Queue: would POST to %s", endpoint)
+                log.info("Payload: %s", json.dumps(payload, ensure_ascii=False, indent=2)[:2000])
+                # Перемещаем в done
+                done_file = AI_QUEUE_DONE_DIR / f"DRYRUN_{json_file.name}"
+                json_file.rename(done_file)
+                continue
+            
+            if DEBUG_SAVE_PAYLOAD:
+                debug_file = AI_QUEUE_DONE_DIR / f"DEBUG_PAYLOAD_{json_file.name}"
+                with open(debug_file, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+            
+            try:
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                response = with_retries("POST", endpoint, tokens, data=body, timeout=VK_HTTP_TIMEOUT_POST)
+                
+                company_id = response.get("id", 0)
+                campaigns = response.get("campaigns", [])
+                
+                log.info("AI Queue SUCCESS: file=%s | company_id=%s | groups=%d",
+                         json_file.name, company_id, len(campaigns))
+                
+                # Записываем результат успеха
+                company_name = first_banner.get("name_company", "AI Кампания")
+                write_result_success(
+                    user_id, cabinet_id,
+                    preset_id=f"ai_queue_{json_file.stem}",
+                    preset_name=company_name,
+                    trigger_time=trigger_time,
+                    id_company=[company_id] if company_id else []
+                )
+                
+                # Перемещаем файл в done
+                done_file = AI_QUEUE_DONE_DIR / f"SUCCESS_{json_file.name}"
+                json_file.rename(done_file)
+                
+            except Exception as e:
+                log.exception("AI Queue API error for %s: %s", json_file.name, e)
+                
+                company_name = first_banner.get("name_company", "AI Кампания")
+                write_result_error(
+                    user_id, cabinet_id,
+                    preset_id=f"ai_queue_{json_file.stem}",
+                    preset_name=company_name,
+                    trigger_time=trigger_time,
+                    human="Ошибка создания AI кампании",
+                    tech=repr(e)
+                )
+                
+                # Перемещаем файл в done с ошибкой
+                error_file = AI_QUEUE_DONE_DIR / f"ERROR_API_{json_file.name}"
+                json_file.rename(error_file)
+                
+        except Exception as e:
+            log.exception("AI Queue file processing error %s: %s", json_file.name, e)
+            # Перемещаем с ошибкой
+            try:
+                error_file = AI_QUEUE_DONE_DIR / f"ERROR_PARSE_{json_file.name}"
+                json_file.rename(error_file)
+            except:
+                pass
+
+
 def main_loop() -> None:
     load_tokens_from_envfile()
     now_local = datetime.now(LOCAL_TZ)
@@ -3726,6 +4148,8 @@ def main_loop() -> None:
     while True:
         try:
             process_queue_once()
+            # Обрабатываем AI-сгенерированные кампании
+            process_ai_queue()
             # Обрабатываем one-shot пресеты после основной очереди
             process_one_shot_presets()
             # Обрабатываем add-group пресеты в последнюю очередь
