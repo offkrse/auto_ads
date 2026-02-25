@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.24"
+VersionApp = "1.25"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -4271,6 +4271,226 @@ async def toggle_ai_segment(request: Request):
     except Exception as e:
         log_error(f"toggle_ai_segment error: {repr(e)}")
         raise HTTPException(500, str(e))
+
+
+# -------------------------------------
+#   AI STATISTICS API
+# -------------------------------------
+
+@secure_api.get("/ai/stats/videos")
+@secure_auto.get("/ai/stats/videos")
+def get_ai_stats_videos(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get video statistics for statistics page"""
+    ensure_user_structure(user_id)
+    
+    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    if not acc_name:
+        return {"items": [], "error": "Cabinet not found"}
+    
+    csv_path = Path(f"/opt/auto_ads/ai_global/statistics/{acc_name}/01_video_stats.csv")
+    if not csv_path.exists():
+        return {"items": [], "error": f"File not found: {csv_path}"}
+    
+    try:
+        df = pd.read_csv(csv_path, sep=";")
+        items = []
+        for _, row in df.iterrows():
+            items.append({
+                "id_video": str(row.get("id_video", "")),
+                "shows": float(row.get("shows", 0)) if pd.notna(row.get("shows")) else 0,
+                "clicks": float(row.get("clicks", 0)) if pd.notna(row.get("clicks")) else 0,
+                "spent": float(row.get("spent", 0)) if pd.notna(row.get("spent")) else 0,
+                "goals": float(row.get("goals", 0)) if pd.notna(row.get("goals")) else 0,
+                "income": float(row.get("income", 0)) if pd.notna(row.get("income")) else 0,
+                "uniques_total": float(row.get("uniques_total", 0)) if pd.notna(row.get("uniques_total")) else 0,
+                "banners_count": int(row.get("banners_count", 0)) if pd.notna(row.get("banners_count")) else 0,
+                "video_url": str(row.get("video_url", "")),
+                "video_preview_url": str(row.get("video_preview_url", "")),
+                "viewed_25_percent_rate": float(row.get("viewed_25_percent_rate", 0)) if pd.notna(row.get("viewed_25_percent_rate")) else 0,
+                "viewed_50_percent_rate": float(row.get("viewed_50_percent_rate", 0)) if pd.notna(row.get("viewed_50_percent_rate")) else 0,
+                "viewed_75_percent_rate": float(row.get("viewed_75_percent_rate", 0)) if pd.notna(row.get("viewed_75_percent_rate")) else 0,
+                "viewed_100_percent_rate": float(row.get("viewed_100_percent_rate", 0)) if pd.notna(row.get("viewed_100_percent_rate")) else 0,
+                "cpm": float(row.get("cpm", 0)) if pd.notna(row.get("cpm")) else 0,
+                "cpc": float(row.get("cpc", 0)) if pd.notna(row.get("cpc")) else 0,
+                "ctr": float(row.get("ctr", 0)) if pd.notna(row.get("ctr")) else 0,
+                "cpa": float(row.get("cpa", 0)) if pd.notna(row.get("cpa")) else 0,
+                "cr": float(row.get("cr", 0)) if pd.notna(row.get("cr")) else 0,
+                "roi": float(row.get("roi", 0)) if pd.notna(row.get("roi")) else 0,
+            })
+        return {"items": items}
+    except Exception as e:
+        log_error(f"get_ai_stats_videos error: {repr(e)}")
+        return {"items": [], "error": str(e)}
+
+
+@secure_api.get("/ai/stats/segments")
+@secure_auto.get("/ai/stats/segments")
+def get_ai_stats_segments(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get segment statistics for statistics page"""
+    ensure_user_structure(user_id)
+    
+    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    if not acc_name:
+        return {"items": [], "error": "Cabinet not found"}
+    
+    csv_path = Path(f"/opt/auto_ads/ai_global/statistics/{acc_name}/02_segment_stats.csv")
+    if not csv_path.exists():
+        return {"items": [], "error": f"File not found: {csv_path}"}
+    
+    try:
+        df = pd.read_csv(csv_path, sep=";")
+        items = []
+        for _, row in df.iterrows():
+            items.append({
+                "segment_id": str(row.get("segment_id", "")),
+                "segment_name": str(row.get("segment_name", "")),
+                "relations_object_type": str(row.get("relations_object_type", "")),
+                "people_counts": float(row.get("people_counts", 0)) if pd.notna(row.get("people_counts")) else 0,
+                "shows": float(row.get("shows", 0)) if pd.notna(row.get("shows")) else 0,
+                "clicks": float(row.get("clicks", 0)) if pd.notna(row.get("clicks")) else 0,
+                "spent": float(row.get("spent", 0)) if pd.notna(row.get("spent")) else 0,
+                "goals": float(row.get("goals", 0)) if pd.notna(row.get("goals")) else 0,
+                "income": float(row.get("income", 0)) if pd.notna(row.get("income")) else 0,
+                "uniques_total": float(row.get("uniques_total", 0)) if pd.notna(row.get("uniques_total")) else 0,
+                "uniques_frequency": float(row.get("uniques_frequency", 0)) if pd.notna(row.get("uniques_frequency")) else 0,
+                "banners_count": int(row.get("banners_count", 0)) if pd.notna(row.get("banners_count")) else 0,
+                "cpm": float(row.get("cpm", 0)) if pd.notna(row.get("cpm")) else 0,
+                "cpc": float(row.get("cpc", 0)) if pd.notna(row.get("cpc")) else 0,
+                "ctr": float(row.get("ctr", 0)) if pd.notna(row.get("ctr")) else 0,
+                "cpa": float(row.get("cpa", 0)) if pd.notna(row.get("cpa")) else 0,
+                "cr": float(row.get("cr", 0)) if pd.notna(row.get("cr")) else 0,
+                "roi": float(row.get("roi", 0)) if pd.notna(row.get("roi")) else 0,
+            })
+        return {"items": items}
+    except Exception as e:
+        log_error(f"get_ai_stats_segments error: {repr(e)}")
+        return {"items": [], "error": str(e)}
+
+
+@secure_api.get("/ai/stats/categories")
+@secure_auto.get("/ai/stats/categories")
+def get_ai_stats_categories(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get category statistics for statistics page"""
+    ensure_user_structure(user_id)
+    
+    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    if not acc_name:
+        return {"items": [], "error": "Cabinet not found"}
+    
+    csv_path = Path(f"/opt/auto_ads/ai_global/statistics/{acc_name}/03_category_stats.csv")
+    if not csv_path.exists():
+        return {"items": [], "error": f"File not found: {csv_path}"}
+    
+    try:
+        df = pd.read_csv(csv_path, sep=";")
+        items = []
+        for _, row in df.iterrows():
+            items.append({
+                "category": str(row.get("category", "")),
+                "shows": float(row.get("shows", 0)) if pd.notna(row.get("shows")) else 0,
+                "clicks": float(row.get("clicks", 0)) if pd.notna(row.get("clicks")) else 0,
+                "spent": float(row.get("spent", 0)) if pd.notna(row.get("spent")) else 0,
+                "goals": float(row.get("goals", 0)) if pd.notna(row.get("goals")) else 0,
+                "income": float(row.get("income", 0)) if pd.notna(row.get("income")) else 0,
+                "uniques_total": float(row.get("uniques_total", 0)) if pd.notna(row.get("uniques_total")) else 0,
+                "uniques_frequency": float(row.get("uniques_frequency", 0)) if pd.notna(row.get("uniques_frequency")) else 0,
+                "segments_count": int(row.get("segments_count", 0)) if pd.notna(row.get("segments_count")) else 0,
+                "cpm": float(row.get("cpm", 0)) if pd.notna(row.get("cpm")) else 0,
+                "cpc": float(row.get("cpc", 0)) if pd.notna(row.get("cpc")) else 0,
+                "ctr": float(row.get("ctr", 0)) if pd.notna(row.get("ctr")) else 0,
+                "cpa": float(row.get("cpa", 0)) if pd.notna(row.get("cpa")) else 0,
+                "cr": float(row.get("cr", 0)) if pd.notna(row.get("cr")) else 0,
+                "roi": float(row.get("roi", 0)) if pd.notna(row.get("roi")) else 0,
+            })
+        return {"items": items}
+    except Exception as e:
+        log_error(f"get_ai_stats_categories error: {repr(e)}")
+        return {"items": [], "error": str(e)}
+
+
+@secure_api.get("/ai/stats/texts")
+@secure_auto.get("/ai/stats/texts")
+def get_ai_stats_texts(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get text statistics for statistics page"""
+    ensure_user_structure(user_id)
+    
+    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    if not acc_name:
+        return {"items": [], "error": "Cabinet not found"}
+    
+    csv_path = Path(f"/opt/auto_ads/ai_global/statistics/{acc_name}/04_text_stats.csv")
+    if not csv_path.exists():
+        return {"items": [], "error": f"File not found: {csv_path}"}
+    
+    try:
+        df = pd.read_csv(csv_path, sep=";")
+        items = []
+        for _, row in df.iterrows():
+            items.append({
+                "title": str(row.get("title", "")),
+                "text_short": str(row.get("text_short", "")),
+                "text_long": str(row.get("text_long", "")),
+                "text_additional": str(row.get("text_additional", "")),
+                "cta": str(row.get("cta", "")),
+                "banner_url": str(row.get("banner_url", "")),
+                "banner_url_id": str(row.get("banner_url_id", "")),
+                "shows": float(row.get("shows", 0)) if pd.notna(row.get("shows")) else 0,
+                "clicks": float(row.get("clicks", 0)) if pd.notna(row.get("clicks")) else 0,
+                "spent": float(row.get("spent", 0)) if pd.notna(row.get("spent")) else 0,
+                "goals": float(row.get("goals", 0)) if pd.notna(row.get("goals")) else 0,
+                "income": float(row.get("income", 0)) if pd.notna(row.get("income")) else 0,
+                "uniques_total": float(row.get("uniques_total", 0)) if pd.notna(row.get("uniques_total")) else 0,
+                "banners_count": int(row.get("banners_count", 0)) if pd.notna(row.get("banners_count")) else 0,
+                "cpm": float(row.get("cpm", 0)) if pd.notna(row.get("cpm")) else 0,
+                "cpc": float(row.get("cpc", 0)) if pd.notna(row.get("cpc")) else 0,
+                "ctr": float(row.get("ctr", 0)) if pd.notna(row.get("ctr")) else 0,
+                "cpa": float(row.get("cpa", 0)) if pd.notna(row.get("cpa")) else 0,
+                "cr": float(row.get("cr", 0)) if pd.notna(row.get("cr")) else 0,
+                "roi": float(row.get("roi", 0)) if pd.notna(row.get("roi")) else 0,
+            })
+        return {"items": items}
+    except Exception as e:
+        log_error(f"get_ai_stats_texts error: {repr(e)}")
+        return {"items": [], "error": str(e)}
+
+
+@secure_api.get("/ai/stats/launch-time")
+@secure_auto.get("/ai/stats/launch-time")
+def get_ai_stats_launch_time(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get launch time statistics for statistics page"""
+    ensure_user_structure(user_id)
+    
+    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    if not acc_name:
+        return {"items": [], "error": "Cabinet not found"}
+    
+    csv_path = Path(f"/opt/auto_ads/ai_global/statistics/{acc_name}/05_launch_time_stats.csv")
+    if not csv_path.exists():
+        return {"items": [], "error": f"File not found: {csv_path}"}
+    
+    try:
+        df = pd.read_csv(csv_path, sep=";")
+        items = []
+        for _, row in df.iterrows():
+            items.append({
+                "hour": int(row.get("hour", 0)) if pd.notna(row.get("hour")) else 0,
+                "hour_range": str(row.get("hour_range", "")),
+                "banners_count": int(row.get("banners_count", 0)) if pd.notna(row.get("banners_count")) else 0,
+                "hooked_count": int(row.get("hooked_count", 0)) if pd.notna(row.get("hooked_count")) else 0,
+                "hooked_pct": float(row.get("hooked_pct", 0)) if pd.notna(row.get("hooked_pct")) else 0,
+                "profitable_count": int(row.get("profitable_count", 0)) if pd.notna(row.get("profitable_count")) else 0,
+                "profitable_pct": float(row.get("profitable_pct", 0)) if pd.notna(row.get("profitable_pct")) else 0,
+                "total_spent": float(row.get("total_spent", 0)) if pd.notna(row.get("total_spent")) else 0,
+                "total_clicks": int(row.get("total_clicks", 0)) if pd.notna(row.get("total_clicks")) else 0,
+                "total_goals": int(row.get("total_goals", 0)) if pd.notna(row.get("total_goals")) else 0,
+                "day_income": float(row.get("day_income", 0)) if pd.notna(row.get("day_income")) else 0,
+                "total_income": float(row.get("total_income", 0)) if pd.notna(row.get("total_income")) else 0,
+                "score": float(row.get("score", 0)) if pd.notna(row.get("score")) else 0,
+            })
+        return {"items": items}
+    except Exception as e:
+        log_error(f"get_ai_stats_launch_time error: {repr(e)}")
+        return {"items": [], "error": str(e)}
 
 
 # -------------------------------------
