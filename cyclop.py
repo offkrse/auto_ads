@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.77"
+VersionCyclop = "1.78"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -3724,6 +3724,26 @@ def get_tokens_for_cabinet(user_id: str, cabinet_id: str) -> List[str]:
 
 # ============================ Обработка AI Queue ============================
 
+def get_ai_advertiser_info(user_id: str, cabinet_id: str) -> str:
+    """
+    Получает advertiserInfo из файла /opt/auto_ads/users/{user_id}/ai/info_banners_ai_{cabinet_id}.json
+    """
+    info_file = USERS_ROOT / str(user_id) / "ai" / f"info_banners_ai_{cabinet_id}.json"
+    if not info_file.exists():
+        log.warning("AI advertiser info file not found: %s", info_file)
+        return ""
+    
+    try:
+        data = load_json(info_file)
+        adv_info = data.get("advertiserInfo", "")
+        if adv_info:
+            log.info("Loaded advertiserInfo from %s: %s", info_file.name, adv_info[:50])
+        return adv_info
+    except Exception as e:
+        log.warning("Failed to load AI advertiser info from %s: %s", info_file, e)
+        return ""
+
+
 def convert_ai_queue_time_to_utc4(time_start_utc3: str) -> str:
     """
     Конвертирует время из UTC+3 (Москва) в UTC+4 (формат cyclop).
@@ -3747,7 +3767,7 @@ def convert_ai_queue_time_to_utc4(time_start_utc3: str) -> str:
         return time_start_utc3
 
 
-def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str]) -> Optional[Dict[str, Any]]:
+def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str], advertiser_info: str = "") -> Optional[Dict[str, Any]]:
     """
     Конвертирует AI Queue JSON в payload для VK API.
     
@@ -3896,7 +3916,7 @@ def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str]) -> Option
             
             if objective_group == "leadads":
                 textblocks = {
-                    "about_company_115": {"text": "", "title": ""},
+                    "about_company_115": {"text": advertiser_info, "title": ""},
                     "cta_leadads": {"text": cta, "title": ""},
                     "text_90": {"text": text_short, "title": ""},
                     "text_220": {"text": text_long, "title": ""},
@@ -3906,7 +3926,7 @@ def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str]) -> Option
                     textblocks["title_30_additional"] = {"text": text_additional, "title": ""}
             else:
                 textblocks = {
-                    "about_company_115": {"text": "", "title": ""},
+                    "about_company_115": {"text": advertiser_info, "title": ""},
                     "cta_community_vk": {"text": cta, "title": ""},
                     "text_2000": {"text": text_short, "title": ""},
                     "title_40_vkads": {"text": title, "title": ""},
@@ -4058,8 +4078,11 @@ def process_ai_queue() -> None:
                 json_file.rename(error_file)
                 continue
             
+            # Получаем advertiserInfo из info_banners_ai файла
+            advertiser_info = get_ai_advertiser_info(user_id, cabinet_id)
+            
             # Строим payload
-            payload = build_ai_queue_payload(ai_data, tokens)
+            payload = build_ai_queue_payload(ai_data, tokens, advertiser_info)
             if not payload:
                 log.error("AI Queue: failed to build payload for %s", json_file.name)
                 error_file = AI_QUEUE_DONE_DIR / f"ERROR_PAYLOAD_{json_file.name}"
