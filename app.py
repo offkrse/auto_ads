@@ -19,10 +19,11 @@ import errno
 import uuid
 import time
 import random
+import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.23"
+VersionApp = "1.24"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -4034,6 +4035,241 @@ async def save_ai_info_banner(request: Request):
         return {"status": "ok"}
     except Exception as e:
         log_error(f"save_ai_info_banner error: {repr(e)}")
+        raise HTTPException(500, str(e))
+
+
+# -------------------------------------
+#   AI VIDEOS & SEGMENTS API
+# -------------------------------------
+
+def ai_disabled_videos_path(user_id: str) -> Path:
+    return USERS_DIR / user_id / "ai" / "disabled_videos.json"
+
+def ai_disabled_segments_path(user_id: str) -> Path:
+    return USERS_DIR / user_id / "ai" / "disabled_segments.json"
+
+def get_acc_name_for_cabinet(cabinet_id: str) -> str | None:
+    """
+    Find acc_name (e.g. MAIN_1) for given cabinet_id from enabled_users.json
+    """
+    enabled_users_path = Path("/opt/auto_ads/ai_global/enabled_users.json")
+    if not enabled_users_path.exists():
+        return None
+    
+    try:
+        with open(enabled_users_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        users = data.get("users", {})
+        for user_name, user_data in users.items():
+            active_cabinets = user_data.get("active_cabinets", [])
+            for cab_dict in active_cabinets:
+                if isinstance(cab_dict, dict):
+                    for acc_name, cab_id in cab_dict.items():
+                        if str(cab_id) == str(cabinet_id):
+                            return acc_name
+        return None
+    except Exception as e:
+        log_error(f"get_acc_name_for_cabinet error: {repr(e)}")
+        return None
+
+
+@secure_api.get("/ai/videos")
+@secure_auto.get("/ai/videos")
+def get_ai_videos(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get video stats for categorization tab"""
+    ensure_user_structure(user_id)
+    
+    # Get acc_name for this cabinet
+    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    if not acc_name:
+        return {"videos": [], "disabled_videos": [], "error": "Cabinet not found in enabled_users.json"}
+    
+    # Read video stats CSV
+    csv_path = Path(f"/opt/auto_ads/ai_global/statistics/{acc_name}/01_video_stats.csv")
+    if not csv_path.exists():
+        return {"videos": [], "disabled_videos": [], "error": f"Video stats file not found: {csv_path}"}
+    
+    try:
+        df = pd.read_csv(csv_path, sep=";")
+        videos = []
+        for _, row in df.iterrows():
+            videos.append({
+                "id_video": str(row.get("id_video", "")),
+                "shows": float(row.get("shows", 0)) if pd.notna(row.get("shows")) else 0,
+                "clicks": float(row.get("clicks", 0)) if pd.notna(row.get("clicks")) else 0,
+                "spent": float(row.get("spent", 0)) if pd.notna(row.get("spent")) else 0,
+                "goals": float(row.get("goals", 0)) if pd.notna(row.get("goals")) else 0,
+                "income": float(row.get("income", 0)) if pd.notna(row.get("income")) else 0,
+                "uniques_total": float(row.get("uniques_total", 0)) if pd.notna(row.get("uniques_total")) else 0,
+                "banners_count": int(row.get("banners_count", 0)) if pd.notna(row.get("banners_count")) else 0,
+                "video_url": str(row.get("video_url", "")),
+                "video_preview_url": str(row.get("video_preview_url", "")),
+                "viewed_25_percent_rate": float(row.get("viewed_25_percent_rate", 0)) if pd.notna(row.get("viewed_25_percent_rate")) else 0,
+                "viewed_50_percent_rate": float(row.get("viewed_50_percent_rate", 0)) if pd.notna(row.get("viewed_50_percent_rate")) else 0,
+                "viewed_75_percent_rate": float(row.get("viewed_75_percent_rate", 0)) if pd.notna(row.get("viewed_75_percent_rate")) else 0,
+                "viewed_100_percent_rate": float(row.get("viewed_100_percent_rate", 0)) if pd.notna(row.get("viewed_100_percent_rate")) else 0,
+                "cpm": float(row.get("cpm", 0)) if pd.notna(row.get("cpm")) else 0,
+                "cpc": float(row.get("cpc", 0)) if pd.notna(row.get("cpc")) else 0,
+                "ctr": float(row.get("ctr", 0)) if pd.notna(row.get("ctr")) else 0,
+                "cpa": float(row.get("cpa", 0)) if pd.notna(row.get("cpa")) else 0,
+                "cr": float(row.get("cr", 0)) if pd.notna(row.get("cr")) else 0,
+                "roi": float(row.get("roi", 0)) if pd.notna(row.get("roi")) else 0,
+            })
+    except Exception as e:
+        log_error(f"get_ai_videos CSV parse error: {repr(e)}")
+        return {"videos": [], "disabled_videos": [], "error": str(e)}
+    
+    # Get disabled videos
+    disabled_path = ai_disabled_videos_path(user_id)
+    disabled_videos = []
+    if disabled_path.exists():
+        try:
+            with open(disabled_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                disabled_videos = data.get("disabled", [])
+        except Exception as e:
+            log_error(f"get_ai_videos disabled read error: {repr(e)}")
+    
+    return {"videos": videos, "disabled_videos": disabled_videos}
+
+
+@secure_api.post("/ai/videos/toggle")
+@secure_auto.post("/ai/videos/toggle")
+async def toggle_ai_video(request: Request):
+    """Toggle video enabled/disabled state"""
+    try:
+        body = await request.json()
+        user_id = body.get("user_id")
+        video_id = body.get("video_id")
+        enabled = body.get("enabled", True)
+        
+        if not user_id or not video_id:
+            raise HTTPException(400, "user_id and video_id required")
+        
+        ensure_user_structure(user_id)
+        disabled_path = ai_disabled_videos_path(user_id)
+        disabled_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Read current disabled list
+        disabled_videos = []
+        if disabled_path.exists():
+            try:
+                with open(disabled_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    disabled_videos = data.get("disabled", [])
+            except Exception:
+                pass
+        
+        video_id_str = str(video_id)
+        
+        if enabled:
+            # Remove from disabled list
+            disabled_videos = [v for v in disabled_videos if str(v) != video_id_str]
+        else:
+            # Add to disabled list
+            if video_id_str not in disabled_videos:
+                disabled_videos.append(video_id_str)
+        
+        atomic_write_json(disabled_path, {"disabled": disabled_videos})
+        return {"status": "ok", "disabled_videos": disabled_videos}
+    except Exception as e:
+        log_error(f"toggle_ai_video error: {repr(e)}")
+        raise HTTPException(500, str(e))
+
+
+@secure_api.get("/ai/segments")
+@secure_auto.get("/ai/segments")
+def get_ai_segments(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get segments for categorization tab"""
+    ensure_user_structure(user_id)
+    
+    # Get acc_name for this cabinet
+    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    if not acc_name:
+        return {"segments": [], "disabled_segments": [], "error": "Cabinet not found in enabled_users.json"}
+    
+    # Read segments parquet
+    parquet_path = Path(f"/opt/stat_tracker/data/segments/{acc_name}_segments.parquet")
+    if not parquet_path.exists():
+        return {"segments": [], "disabled_segments": [], "error": f"Segments file not found: {parquet_path}"}
+    
+    try:
+        df = pd.read_parquet(parquet_path)
+        segments = []
+        # Reverse order - newest first
+        for _, row in df.iloc[::-1].iterrows():
+            segments.append({
+                "account_name": str(row.get("account_name", "")),
+                "id": str(row.get("id", "")),
+                "name": str(row.get("name", "")),
+                "created": str(row.get("created", "")),
+                "relations_object_type": str(row.get("relations_object_type", "")),
+                "pass_condition": str(row.get("pass_condition", "")),
+                "relations_object_id": str(row.get("relations_object_id", "")),
+                "relations_source_id": str(row.get("relations_source_id", "")),
+                "relations_type": str(row.get("relations_type", "")),
+                "people_counts": int(row.get("people_counts", 0)) if pd.notna(row.get("people_counts")) else 0,
+            })
+    except Exception as e:
+        log_error(f"get_ai_segments parquet parse error: {repr(e)}")
+        return {"segments": [], "disabled_segments": [], "error": str(e)}
+    
+    # Get disabled segments
+    disabled_path = ai_disabled_segments_path(user_id)
+    disabled_segments = []
+    if disabled_path.exists():
+        try:
+            with open(disabled_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                disabled_segments = data.get("disabled", [])
+        except Exception as e:
+            log_error(f"get_ai_segments disabled read error: {repr(e)}")
+    
+    return {"segments": segments, "disabled_segments": disabled_segments}
+
+
+@secure_api.post("/ai/segments/toggle")
+@secure_auto.post("/ai/segments/toggle")
+async def toggle_ai_segment(request: Request):
+    """Toggle segment enabled/disabled state"""
+    try:
+        body = await request.json()
+        user_id = body.get("user_id")
+        segment_id = body.get("segment_id")
+        enabled = body.get("enabled", True)
+        
+        if not user_id or not segment_id:
+            raise HTTPException(400, "user_id and segment_id required")
+        
+        ensure_user_structure(user_id)
+        disabled_path = ai_disabled_segments_path(user_id)
+        disabled_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Read current disabled list
+        disabled_segments = []
+        if disabled_path.exists():
+            try:
+                with open(disabled_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    disabled_segments = data.get("disabled", [])
+            except Exception:
+                pass
+        
+        segment_id_str = str(segment_id)
+        
+        if enabled:
+            # Remove from disabled list
+            disabled_segments = [s for s in disabled_segments if str(s) != segment_id_str]
+        else:
+            # Add to disabled list
+            if segment_id_str not in disabled_segments:
+                disabled_segments.append(segment_id_str)
+        
+        atomic_write_json(disabled_path, {"disabled": disabled_segments})
+        return {"status": "ok", "disabled_segments": disabled_segments}
+    except Exception as e:
+        log_error(f"toggle_ai_segment error: {repr(e)}")
         raise HTTPException(500, str(e))
 
 
