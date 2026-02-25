@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.25"
+VersionApp = "1.26"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -4271,6 +4271,293 @@ async def toggle_ai_segment(request: Request):
     except Exception as e:
         log_error(f"toggle_ai_segment error: {repr(e)}")
         raise HTTPException(500, str(e))
+
+
+# -------------------------------------
+#   AI ABSTRACT AUDIENCES API
+# -------------------------------------
+
+def ai_disabled_abstract_path(user_id: str) -> Path:
+    return USERS_DIR / user_id / "ai" / "disabled_abstract.json"
+
+def ai_added_excluded_path(user_id: str) -> Path:
+    return USERS_DIR / user_id / "ai" / "added_excluded.json"
+
+def ai_disabled_excluded_path(user_id: str) -> Path:
+    return USERS_DIR / user_id / "ai" / "disabled_excluded.json"
+
+
+@secure_api.get("/ai/abstract-audiences")
+@secure_auto.get("/ai/abstract-audiences")
+def get_ai_abstract_audiences(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get abstract audiences list"""
+    ensure_user_structure(user_id)
+    
+    # Read abstract.json from user's audiences folder
+    abstract_path = USERS_DIR / user_id / "audiences" / cabinet_id / "abstract.json"
+    audiences = []
+    if abstract_path.exists():
+        try:
+            with open(abstract_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    audiences = [{"name": item.get("name", "")} for item in data if isinstance(item, dict)]
+        except Exception as e:
+            log_error(f"get_ai_abstract_audiences read error: {repr(e)}")
+    
+    # Get disabled abstract audiences
+    disabled_path = ai_disabled_abstract_path(user_id)
+    disabled = []
+    if disabled_path.exists():
+        try:
+            with open(disabled_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                disabled = data.get("disabled", [])
+        except Exception:
+            pass
+    
+    return {"audiences": audiences, "disabled": disabled}
+
+
+@secure_api.post("/ai/abstract-audiences/toggle")
+@secure_auto.post("/ai/abstract-audiences/toggle")
+async def toggle_ai_abstract_audience(request: Request):
+    """Toggle abstract audience enabled/disabled state"""
+    try:
+        body = await request.json()
+        user_id = body.get("user_id")
+        name = body.get("name")
+        enabled = body.get("enabled", True)
+        
+        if not user_id or not name:
+            raise HTTPException(400, "user_id and name required")
+        
+        ensure_user_structure(user_id)
+        disabled_path = ai_disabled_abstract_path(user_id)
+        disabled_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        disabled = []
+        if disabled_path.exists():
+            try:
+                with open(disabled_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    disabled = data.get("disabled", [])
+            except Exception:
+                pass
+        
+        if enabled:
+            disabled = [n for n in disabled if n != name]
+        else:
+            if name not in disabled:
+                disabled.append(name)
+        
+        atomic_write_json(disabled_path, {"disabled": disabled})
+        return {"status": "ok", "disabled": disabled}
+    except Exception as e:
+        log_error(f"toggle_ai_abstract_audience error: {repr(e)}")
+        raise HTTPException(500, str(e))
+
+
+@secure_api.get("/ai/excluded-segments")
+@secure_auto.get("/ai/excluded-segments")
+def get_ai_excluded_segments(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get excluded segments list with stats"""
+    ensure_user_structure(user_id)
+    
+    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    
+    # Read added_excluded.json
+    added_path = ai_added_excluded_path(user_id)
+    added_ids = set()
+    if added_path.exists():
+        try:
+            with open(added_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                added_ids = set(data.get("segments", []))
+        except Exception as e:
+            log_error(f"get_ai_excluded_segments added read error: {repr(e)}")
+    
+    # Read excluded stats CSV
+    segments = []
+    if acc_name:
+        csv_path = Path(f"/opt/auto_ads/ai_global/statistics/{acc_name}/02_segment_excluded_stats.csv")
+        if csv_path.exists():
+            try:
+                df = pd.read_csv(csv_path, sep=";")
+                for _, row in df.iterrows():
+                    segments.append({
+                        "segment_id": str(row.get("segment_id", "")),
+                        "segment_name": str(row.get("segment_name", "")),
+                        "shows": float(row.get("shows", 0)) if pd.notna(row.get("shows")) else 0,
+                        "clicks": float(row.get("clicks", 0)) if pd.notna(row.get("clicks")) else 0,
+                        "spent": float(row.get("spent", 0)) if pd.notna(row.get("spent")) else 0,
+                        "goals": float(row.get("goals", 0)) if pd.notna(row.get("goals")) else 0,
+                        "income": float(row.get("income", 0)) if pd.notna(row.get("income")) else 0,
+                        "cpa": float(row.get("cpa", 0)) if pd.notna(row.get("cpa")) else 0,
+                        "roi": float(row.get("roi", 0)) if pd.notna(row.get("roi")) else 0,
+                    })
+            except Exception as e:
+                log_error(f"get_ai_excluded_segments csv read error: {repr(e)}")
+    
+    # Add segments from added_excluded that might not be in CSV yet
+    existing_ids = {s["segment_id"] for s in segments}
+    for seg_id in added_ids:
+        if seg_id not in existing_ids:
+            segments.append({
+                "segment_id": seg_id,
+                "segment_name": f"Segment {seg_id}",
+                "shows": 0, "clicks": 0, "spent": 0, "goals": 0, "income": 0, "cpa": 0, "roi": 0
+            })
+    
+    # Get disabled excluded
+    disabled_path = ai_disabled_excluded_path(user_id)
+    disabled = []
+    if disabled_path.exists():
+        try:
+            with open(disabled_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                disabled = data.get("disabled", [])
+        except Exception:
+            pass
+    
+    return {"segments": segments, "disabled": disabled}
+
+
+@secure_api.post("/ai/excluded-segments/toggle")
+@secure_auto.post("/ai/excluded-segments/toggle")
+async def toggle_ai_excluded_segment(request: Request):
+    """Toggle excluded segment enabled/disabled state"""
+    try:
+        body = await request.json()
+        user_id = body.get("user_id")
+        segment_id = body.get("segment_id")
+        enabled = body.get("enabled", True)
+        
+        if not user_id or not segment_id:
+            raise HTTPException(400, "user_id and segment_id required")
+        
+        ensure_user_structure(user_id)
+        disabled_path = ai_disabled_excluded_path(user_id)
+        disabled_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        disabled = []
+        if disabled_path.exists():
+            try:
+                with open(disabled_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    disabled = data.get("disabled", [])
+            except Exception:
+                pass
+        
+        segment_id_str = str(segment_id)
+        if enabled:
+            disabled = [s for s in disabled if str(s) != segment_id_str]
+        else:
+            if segment_id_str not in disabled:
+                disabled.append(segment_id_str)
+        
+        atomic_write_json(disabled_path, {"disabled": disabled})
+        return {"status": "ok", "disabled": disabled}
+    except Exception as e:
+        log_error(f"toggle_ai_excluded_segment error: {repr(e)}")
+        raise HTTPException(500, str(e))
+
+
+@secure_api.post("/ai/segments/add-to-excluded")
+@secure_auto.post("/ai/segments/add-to-excluded")
+async def add_segment_to_excluded(request: Request):
+    """Add a segment to exclusions list"""
+    try:
+        body = await request.json()
+        user_id = body.get("user_id")
+        segment_id = body.get("segment_id")
+        segment_name = body.get("segment_name", "")
+        
+        if not user_id or not segment_id:
+            raise HTTPException(400, "user_id and segment_id required")
+        
+        ensure_user_structure(user_id)
+        added_path = ai_added_excluded_path(user_id)
+        added_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        segments = []
+        if added_path.exists():
+            try:
+                with open(added_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    segments = data.get("segments", [])
+            except Exception:
+                pass
+        
+        segment_id_str = str(segment_id)
+        if segment_id_str not in segments:
+            segments.append(segment_id_str)
+        
+        atomic_write_json(added_path, {"segments": segments})
+        return {"status": "ok", "segments": segments}
+    except Exception as e:
+        log_error(f"add_segment_to_excluded error: {repr(e)}")
+        raise HTTPException(500, str(e))
+
+
+# Update get_ai_segments to also return added_excluded
+@secure_api.get("/ai/segments")
+@secure_auto.get("/ai/segments")
+def get_ai_segments_updated(user_id: str = Query(...), cabinet_id: str = Query(...)):
+    """Get segments for categorization tab"""
+    ensure_user_structure(user_id)
+    
+    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    if not acc_name:
+        return {"segments": [], "disabled_segments": [], "added_excluded": [], "error": "Cabinet not found"}
+    
+    parquet_path = Path(f"/opt/stat_tracker/data/segments/{acc_name}_segments.parquet")
+    if not parquet_path.exists():
+        return {"segments": [], "disabled_segments": [], "added_excluded": [], "error": f"File not found: {parquet_path}"}
+    
+    try:
+        df = pd.read_parquet(parquet_path)
+        segments = []
+        for _, row in df.iloc[::-1].iterrows():
+            segments.append({
+                "account_name": str(row.get("account_name", "")),
+                "id": str(row.get("id", "")),
+                "name": str(row.get("name", "")),
+                "created": str(row.get("created", "")),
+                "relations_object_type": str(row.get("relations_object_type", "")),
+                "pass_condition": str(row.get("pass_condition", "")),
+                "relations_object_id": str(row.get("relations_object_id", "")),
+                "relations_source_id": str(row.get("relations_source_id", "")),
+                "relations_type": str(row.get("relations_type", "")),
+                "people_counts": int(row.get("people_counts", 0)) if pd.notna(row.get("people_counts")) else 0,
+            })
+    except Exception as e:
+        log_error(f"get_ai_segments parquet parse error: {repr(e)}")
+        return {"segments": [], "disabled_segments": [], "added_excluded": [], "error": str(e)}
+    
+    # Get disabled segments
+    disabled_path = ai_disabled_segments_path(user_id)
+    disabled_segments = []
+    if disabled_path.exists():
+        try:
+            with open(disabled_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                disabled_segments = data.get("disabled", [])
+        except Exception:
+            pass
+    
+    # Get added_excluded
+    added_path = ai_added_excluded_path(user_id)
+    added_excluded = []
+    if added_path.exists():
+        try:
+            with open(added_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                added_excluded = data.get("segments", [])
+        except Exception:
+            pass
+    
+    return {"segments": segments, "disabled_segments": disabled_segments, "added_excluded": added_excluded}
 
 
 # -------------------------------------
