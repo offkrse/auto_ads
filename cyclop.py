@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.78"
+VersionCyclop = "1.79"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -3744,6 +3744,54 @@ def get_ai_advertiser_info(user_id: str, cabinet_id: str) -> str:
         return ""
 
 
+def get_video_length(cabinet_id: str, video_id: str) -> Optional[int]:
+    """
+    Получает длительность видео из JSON файла в /mnt/data/auto_ads_storage/video/{cabinet_id}/
+    
+    Ищет файлы вида {video_id}_*.json и читает vk_response.variants.internal.length
+    
+    Возвращает длительность в секундах или None если не найдено.
+    """
+    video_dir = CREO_STORAGE_ROOT / str(cabinet_id)
+    if not video_dir.exists():
+        log.debug("Video storage dir not found: %s", video_dir)
+        return None
+    
+    # Ищем файл по паттерну {video_id}_*.json
+    pattern = f"{video_id}_*.json"
+    matching_files = list(video_dir.glob(pattern))
+    
+    if not matching_files:
+        log.debug("No video metadata file found for video_id=%s in %s", video_id, video_dir)
+        return None
+    
+    # Берём первый найденный файл
+    meta_file = matching_files[0]
+    
+    try:
+        data = load_json(meta_file)
+        vk_response = data.get("vk_response", {})
+        variants = vk_response.get("variants", {})
+        internal = variants.get("internal", {})
+        length = internal.get("length")
+        
+        if length is not None:
+            log.info("Video %s length: %d sec (from %s)", video_id, length, meta_file.name)
+            return int(length)
+        
+        # Fallback: попробовать float_length
+        float_length = internal.get("float_length")
+        if float_length is not None:
+            log.info("Video %s float_length: %.1f sec (from %s)", video_id, float_length, meta_file.name)
+            return int(float_length)
+        
+        return None
+        
+    except Exception as e:
+        log.warning("Failed to read video length from %s: %s", meta_file, e)
+        return None
+
+
 def convert_ai_queue_time_to_utc4(time_start_utc3: str) -> str:
     """
     Конвертирует время из UTC+3 (Москва) в UTC+4 (формат cyclop).
@@ -3767,7 +3815,7 @@ def convert_ai_queue_time_to_utc4(time_start_utc3: str) -> str:
         return time_start_utc3
 
 
-def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str], advertiser_info: str = "") -> Optional[Dict[str, Any]]:
+def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str], advertiser_info: str = "", cabinet_id: str = "") -> Optional[Dict[str, Any]]:
     """
     Конвертирует AI Queue JSON в payload для VK API.
     
@@ -3900,8 +3948,21 @@ def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str], advertise
                 content["icon_256x256"] = {"id": int(icon_id)}
             
             if video_id:
-                content["video_portrait_9_16_30s"] = {"id": int(video_id)}
-                content["video_portrait_9_16_180s"] = {"id": int(video_id)}
+                # Проверяем длительность видео
+                video_length = get_video_length(cabinet_id, video_id)
+                
+                if video_length is not None and video_length > 30:
+                    # Видео длиннее 30 секунд - используем только 180s формат
+                    content["video_portrait_9_16_180s"] = {"id": int(video_id)}
+                    log.info("AI Queue: video %s length=%ds > 30s, using only video_portrait_9_16_180s", 
+                             video_id, video_length)
+                else:
+                    # Видео <= 30 секунд или длина неизвестна - используем оба формата
+                    content["video_portrait_9_16_30s"] = {"id": int(video_id)}
+                    content["video_portrait_9_16_180s"] = {"id": int(video_id)}
+                    if video_length is not None:
+                        log.info("AI Queue: video %s length=%ds <= 30s, using both formats", 
+                                 video_id, video_length)
             elif image_id:
                 content["image_1080x607"] = {"id": int(image_id)}
             
@@ -4082,7 +4143,7 @@ def process_ai_queue() -> None:
             advertiser_info = get_ai_advertiser_info(user_id, cabinet_id)
             
             # Строим payload
-            payload = build_ai_queue_payload(ai_data, tokens, advertiser_info)
+            payload = build_ai_queue_payload(ai_data, tokens, advertiser_info, cabinet_id)
             if not payload:
                 log.error("AI Queue: failed to build payload for %s", json_file.name)
                 error_file = AI_QUEUE_DONE_DIR / f"ERROR_PAYLOAD_{json_file.name}"
