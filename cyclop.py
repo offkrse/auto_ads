@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.79"
+VersionCyclop = "1.80"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1730,7 +1730,8 @@ def make_banner_for_creative(url_id: int,
                              media_kind: str,
                              media_id: int,
                              objective: str = "",
-                             button_text: str = "") -> Dict[str, Any]:
+                             button_text: str = "",
+                             video_length: Optional[int] = None) -> Dict[str, Any]:
     """
     Собирает баннер с переданным media_kind ('image_600x600' или 'video_portrait_9_16_30s')
     и media_id. Остальные поля — как раньше.
@@ -1740,6 +1741,8 @@ def make_banner_for_creative(url_id: int,
     - text_220: длинное описание
     - cta_leadads: CTA кнопка
     - title_30_additional: текст на кнопке (из поля button_text)
+    
+    video_length: длительность видео в секундах. Если > 30, то video_portrait_9_16_30s не используется.
     """
     title = (ad.get("title") or "").strip()
     short = (ad.get("shortDescription") or "").strip()
@@ -1751,10 +1754,15 @@ def make_banner_for_creative(url_id: int,
         raise ValueError("Отсутствует logoId (icon_256x256.id).")
 
     content = {"icon_256x256": {"id": int(icon_id)}}
-    # Если это портретное видео 9:16 — кладём оба формата
+    # Если это портретное видео 9:16 — кладём оба формата (или только 180s если видео > 30 сек)
     if media_kind == "video_portrait_9_16_30s":
-        content["video_portrait_9_16_30s"] = {"id": int(media_id)}
-        content["video_portrait_9_16_180s"] = {"id": int(media_id)}
+        if video_length is not None and video_length > 30:
+            # Видео длиннее 30 секунд - используем только 180s формат
+            content["video_portrait_9_16_180s"] = {"id": int(media_id)}
+            log.info("Banner #%d: video length=%ds > 30s, using only video_portrait_9_16_180s", idx, video_length)
+        else:
+            content["video_portrait_9_16_30s"] = {"id": int(media_id)}
+            content["video_portrait_9_16_180s"] = {"id": int(media_id)}
     else:
         # Для картинок и любых других типов — как раньше
         content[media_kind] = {"id": int(media_id)}
@@ -2398,6 +2406,11 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
         try:
             media_kind, media_id = pick_creative(ad, cabinet_id=str(cabinet_id))
+            
+            # Получаем длительность видео если это видео
+            video_length = None
+            if media_kind == "video_portrait_9_16_30s":
+                video_length = get_video_length(str(cabinet_id), str(media_id))
 
             banner = make_banner_for_creative(
                 banner_url_id, ad, idx=gi + 1,
@@ -2405,7 +2418,8 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
                 banner_name=banner_name, cta_text=cta_text,
                 media_kind=media_kind, media_id=media_id,
                 objective=objective,
-                button_text=button_text_for_leadads
+                button_text=button_text_for_leadads,
+                video_length=video_length
             )
             banners_by_group.append(banner)
             
@@ -2826,12 +2840,16 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         200
                     )
 
+                    # Получаем длительность видео
+                    video_length = get_video_length(str(cabinet_id), str(media_id))
+
                     banner = make_banner_for_creative(
                         ad_url_id_for_banner, ad, idx=1,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
                         media_kind="video_portrait_9_16_30s", media_id=media_id, objective=objective,
-                        button_text=button_text_for_leadads
+                        button_text=button_text_for_leadads,
+                        video_length=video_length
                     )
 
                     safe_g_name = (g_name or "").strip()
@@ -2929,7 +2947,8 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         advertiser_info=adv_info, icon_id=int(icon_id),
                         banner_name=banner_name, cta_text=btn,
                         media_kind=media_kind, media_id=media_id, objective=objective,
-                        button_text=button_text_for_leadads
+                        button_text=button_text_for_leadads,
+                        video_length=None  # Картинки - длительность не применима
                     )
 
                     safe_g_name = (g_name or "").strip()
@@ -3561,9 +3580,15 @@ def build_add_group_payload(preset: Dict[str, Any], new_media_id: str, segments:
             content[image_media_kind] = {"id": int(new_media_id)}
             log.info("build_add_group_payload: using image media_kind=%s for id=%s", image_media_kind, new_media_id)
         else:
-            # Для видео используем video_portrait_*
-            content["video_portrait_9_16_30s"] = {"id": int(new_media_id)}
-            content["video_portrait_9_16_180s"] = {"id": int(new_media_id)}
+            # Для видео проверяем длительность
+            video_length = get_video_length(cabinet_id_str, str(new_media_id))
+            if video_length is not None and video_length > 30:
+                # Видео длиннее 30 секунд - используем только 180s формат
+                content["video_portrait_9_16_180s"] = {"id": int(new_media_id)}
+                log.info("build_add_group_payload: video %s length=%ds > 30s, using only 180s", new_media_id, video_length)
+            else:
+                content["video_portrait_9_16_30s"] = {"id": int(new_media_id)}
+                content["video_portrait_9_16_180s"] = {"id": int(new_media_id)}
         
         # Textblocks
         if objective == "leadads":
