@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.26"
+VersionApp = "1.27"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
