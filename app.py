@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.27"
+VersionApp = "1.28"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -4561,16 +4561,153 @@ def get_ai_segments_updated(user_id: str = Query(...), cabinet_id: str = Query(.
 
 
 # -------------------------------------
+#   ADMIN API
+# -------------------------------------
+
+@secure_api.get("/admin/users")
+@secure_auto.get("/admin/users")
+def get_admin_users():
+    """Get list of all users with their info and roles"""
+    users = []
+    
+    try:
+        for user_dir in USERS_DIR.iterdir():
+            if not user_dir.is_dir():
+                continue
+            
+            tg_user_id = user_dir.name
+            user_json_path = user_dir / f"{tg_user_id}.json"
+            
+            user_info = {
+                "tg_user_id": tg_user_id,
+                "name_tg": "",
+                "username": "",
+                "role": "user"  # default role
+            }
+            
+            if user_json_path.exists():
+                try:
+                    with open(user_json_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        user_info["name_tg"] = data.get("name_tg", "")
+                        user_info["username"] = data.get("username", "")
+                        user_info["role"] = data.get("role", "user")
+                except Exception:
+                    pass
+            
+            users.append(user_info)
+        
+        # Sort by tg_user_id
+        users.sort(key=lambda x: x["tg_user_id"])
+        
+    except Exception as e:
+        log_error(f"get_admin_users error: {repr(e)}")
+        return {"users": [], "error": str(e)}
+    
+    return {"users": users}
+
+
+@secure_api.post("/admin/users/role")
+@secure_auto.post("/admin/users/role")
+async def update_user_role(request: Request):
+    """Update user role"""
+    try:
+        body = await request.json()
+        tg_user_id = body.get("tg_user_id")
+        new_role = body.get("role")
+        
+        if not tg_user_id or not new_role:
+            raise HTTPException(400, "tg_user_id and role required")
+        
+        if new_role not in ["user", "user_plus", "admin"]:
+            raise HTTPException(400, "Invalid role. Must be: user, user_plus, or admin")
+        
+        user_dir = USERS_DIR / str(tg_user_id)
+        if not user_dir.exists():
+            raise HTTPException(404, "User not found")
+        
+        user_json_path = user_dir / f"{tg_user_id}.json"
+        
+        # Read existing data or create new
+        user_data = {}
+        if user_json_path.exists():
+            try:
+                with open(user_json_path, "r", encoding="utf-8") as f:
+                    user_data = json.load(f)
+            except Exception:
+                pass
+        
+        # Update role
+        user_data["role"] = new_role
+        
+        # Save
+        atomic_write_json(user_json_path, user_data)
+        
+        return {"status": "ok", "tg_user_id": tg_user_id, "role": new_role}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"update_user_role error: {repr(e)}")
+        raise HTTPException(500, str(e))
+
+
+@secure_api.get("/user/role")
+@secure_auto.get("/user/role")
+def get_user_role(user_id: str = Query(...)):
+    """Get current user's role"""
+    user_dir = USERS_DIR / str(user_id)
+    user_json_path = user_dir / f"{user_id}.json"
+    
+    role = "user"  # default
+    
+    if user_json_path.exists():
+        try:
+            with open(user_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                role = data.get("role", "user")
+        except Exception:
+            pass
+    
+    return {"role": role}
+
+
+# -------------------------------------
 #   AI STATISTICS API
 # -------------------------------------
 
+@secure_api.get("/ai/stats/cabinets")
+@secure_auto.get("/ai/stats/cabinets")
+def get_ai_stats_cabinets():
+    """Get list of available cabinets for statistics from user_ids.json"""
+    user_ids_path = Path("/opt/stat_tracker/user_ids.json")
+    cabinets = []
+    
+    if user_ids_path.exists():
+        try:
+            with open(user_ids_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for key, value in data.items():
+                    if isinstance(value, dict) and "name" in value:
+                        cabinets.append({
+                            "key": key,
+                            "name": value.get("name", key),
+                            "id": value.get("id", "")
+                        })
+        except Exception as e:
+            log_error(f"get_ai_stats_cabinets error: {repr(e)}")
+    
+    return {"cabinets": cabinets}
+
+
 @secure_api.get("/ai/stats/videos")
 @secure_auto.get("/ai/stats/videos")
-def get_ai_stats_videos(user_id: str = Query(...), cabinet_id: str = Query(...)):
+def get_ai_stats_videos(user_id: str = Query(...), acc_name: str = Query(None), cabinet_id: str = Query(None)):
     """Get video statistics for statistics page"""
     ensure_user_structure(user_id)
     
-    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    # Use acc_name directly if provided, otherwise get from cabinet_id
+    if not acc_name and cabinet_id:
+        acc_name = get_acc_name_for_cabinet(cabinet_id)
     if not acc_name:
         return {"items": [], "error": "Cabinet not found"}
     
@@ -4612,11 +4749,13 @@ def get_ai_stats_videos(user_id: str = Query(...), cabinet_id: str = Query(...))
 
 @secure_api.get("/ai/stats/segments")
 @secure_auto.get("/ai/stats/segments")
-def get_ai_stats_segments(user_id: str = Query(...), cabinet_id: str = Query(...)):
+def get_ai_stats_segments(user_id: str = Query(...), acc_name: str = Query(None), cabinet_id: str = Query(None)):
     """Get segment statistics for statistics page"""
     ensure_user_structure(user_id)
     
-    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    # Use acc_name directly if provided, otherwise get from cabinet_id
+    if not acc_name and cabinet_id:
+        acc_name = get_acc_name_for_cabinet(cabinet_id)
     if not acc_name:
         return {"items": [], "error": "Cabinet not found"}
     
@@ -4656,11 +4795,13 @@ def get_ai_stats_segments(user_id: str = Query(...), cabinet_id: str = Query(...
 
 @secure_api.get("/ai/stats/categories")
 @secure_auto.get("/ai/stats/categories")
-def get_ai_stats_categories(user_id: str = Query(...), cabinet_id: str = Query(...)):
+def get_ai_stats_categories(user_id: str = Query(...), acc_name: str = Query(None), cabinet_id: str = Query(None)):
     """Get category statistics for statistics page"""
     ensure_user_structure(user_id)
     
-    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    # Use acc_name directly if provided, otherwise get from cabinet_id
+    if not acc_name and cabinet_id:
+        acc_name = get_acc_name_for_cabinet(cabinet_id)
     if not acc_name:
         return {"items": [], "error": "Cabinet not found"}
     
@@ -4697,11 +4838,13 @@ def get_ai_stats_categories(user_id: str = Query(...), cabinet_id: str = Query(.
 
 @secure_api.get("/ai/stats/texts")
 @secure_auto.get("/ai/stats/texts")
-def get_ai_stats_texts(user_id: str = Query(...), cabinet_id: str = Query(...)):
+def get_ai_stats_texts(user_id: str = Query(...), acc_name: str = Query(None), cabinet_id: str = Query(None)):
     """Get text statistics for statistics page"""
     ensure_user_structure(user_id)
     
-    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    # Use acc_name directly if provided, otherwise get from cabinet_id
+    if not acc_name and cabinet_id:
+        acc_name = get_acc_name_for_cabinet(cabinet_id)
     if not acc_name:
         return {"items": [], "error": "Cabinet not found"}
     
@@ -4743,11 +4886,13 @@ def get_ai_stats_texts(user_id: str = Query(...), cabinet_id: str = Query(...)):
 
 @secure_api.get("/ai/stats/launch-time")
 @secure_auto.get("/ai/stats/launch-time")
-def get_ai_stats_launch_time(user_id: str = Query(...), cabinet_id: str = Query(...)):
+def get_ai_stats_launch_time(user_id: str = Query(...), acc_name: str = Query(None), cabinet_id: str = Query(None)):
     """Get launch time statistics for statistics page"""
     ensure_user_structure(user_id)
     
-    acc_name = get_acc_name_for_cabinet(cabinet_id)
+    # Use acc_name directly if provided, otherwise get from cabinet_id
+    if not acc_name and cabinet_id:
+        acc_name = get_acc_name_for_cabinet(cabinet_id)
     if not acc_name:
         return {"items": [], "error": "Cabinet not found"}
     
