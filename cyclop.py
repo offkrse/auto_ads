@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.80"
+VersionCyclop = "1.81"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1754,15 +1754,21 @@ def make_banner_for_creative(url_id: int,
         raise ValueError("Отсутствует logoId (icon_256x256.id).")
 
     content = {"icon_256x256": {"id": int(icon_id)}}
-    # Если это портретное видео 9:16 — кладём оба формата (или только 180s если видео > 30 сек)
+    # Если это портретное видео 9:16 — проверяем длину
     if media_kind == "video_portrait_9_16_30s":
-        if video_length is not None and video_length > 30:
+        if video_length is None:
+            # Длина неизвестна - безопаснее использовать только 180s
+            content["video_portrait_9_16_180s"] = {"id": int(media_id)}
+            log.info("Banner #%d: video length unknown, using only video_portrait_9_16_180s (safe)", idx)
+        elif video_length > 30:
             # Видео длиннее 30 секунд - используем только 180s формат
             content["video_portrait_9_16_180s"] = {"id": int(media_id)}
             log.info("Banner #%d: video length=%ds > 30s, using only video_portrait_9_16_180s", idx, video_length)
         else:
+            # Видео <= 30 секунд - используем оба формата
             content["video_portrait_9_16_30s"] = {"id": int(media_id)}
             content["video_portrait_9_16_180s"] = {"id": int(media_id)}
+            log.info("Banner #%d: video length=%ds <= 30s, using both formats", idx, video_length)
     else:
         # Для картинок и любых других типов — как раньше
         content[media_kind] = {"id": int(media_id)}
@@ -3582,13 +3588,19 @@ def build_add_group_payload(preset: Dict[str, Any], new_media_id: str, segments:
         else:
             # Для видео проверяем длительность
             video_length = get_video_length(cabinet_id_str, str(new_media_id))
-            if video_length is not None and video_length > 30:
+            if video_length is None:
+                # Длина неизвестна - безопаснее использовать только 180s
+                content["video_portrait_9_16_180s"] = {"id": int(new_media_id)}
+                log.info("build_add_group_payload: video %s length unknown, using only 180s (safe)", new_media_id)
+            elif video_length > 30:
                 # Видео длиннее 30 секунд - используем только 180s формат
                 content["video_portrait_9_16_180s"] = {"id": int(new_media_id)}
                 log.info("build_add_group_payload: video %s length=%ds > 30s, using only 180s", new_media_id, video_length)
             else:
+                # Видео <= 30 секунд - используем оба формата
                 content["video_portrait_9_16_30s"] = {"id": int(new_media_id)}
                 content["video_portrait_9_16_180s"] = {"id": int(new_media_id)}
+                log.info("build_add_group_payload: video %s length=%ds <= 30s, using both", new_media_id, video_length)
         
         # Textblocks
         if objective == "leadads":
@@ -3976,18 +3988,19 @@ def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str], advertise
                 # Проверяем длительность видео
                 video_length = get_video_length(cabinet_id, video_id)
                 
-                if video_length is not None and video_length > 30:
+                if video_length is None:
+                    # Длина неизвестна - безопаснее использовать только 180s
+                    content["video_portrait_9_16_180s"] = {"id": int(video_id)}
+                    log.info("AI Queue: video %s length unknown, using only 180s (safe)", video_id)
+                elif video_length > 30:
                     # Видео длиннее 30 секунд - используем только 180s формат
                     content["video_portrait_9_16_180s"] = {"id": int(video_id)}
-                    log.info("AI Queue: video %s length=%ds > 30s, using only video_portrait_9_16_180s", 
-                             video_id, video_length)
+                    log.info("AI Queue: video %s length=%ds > 30s, using only 180s", video_id, video_length)
                 else:
-                    # Видео <= 30 секунд или длина неизвестна - используем оба формата
+                    # Видео <= 30 секунд - используем оба формата
                     content["video_portrait_9_16_30s"] = {"id": int(video_id)}
                     content["video_portrait_9_16_180s"] = {"id": int(video_id)}
-                    if video_length is not None:
-                        log.info("AI Queue: video %s length=%ds <= 30s, using both formats", 
-                                 video_id, video_length)
+                    log.info("AI Queue: video %s length=%ds <= 30s, using both formats", video_id, video_length)
             elif image_id:
                 content["image_1080x607"] = {"id": int(image_id)}
             
