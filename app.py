@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.28"
+VersionApp = "1.29"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -540,9 +540,12 @@ def _rehash_one_file(user_id: str, cabinet_id: str, fname: str) -> dict:
     1) Берём старый файл + мету.
     2) Делаем "слегка изменённую" копию во временный файл (для image — пересохраняем через PIL).
     3) Заливаем временный файл в VK.
-    4) Создаём новый локальный файл с new_vk_id_тем_же_отображаемым_именем.
-    5) Удаляем старый файл/мету/превью.
-    6) Возвращаем {old_vk_id, new_vk_id, final_name, meta}.
+    4) Если new_vk_id != old_vk_id:
+       - Создаём новый локальный файл с new_vk_id_тем_же_отображаемым_именем.
+       - Удаляем старый файл/мету/превью.
+    5) Если new_vk_id == old_vk_id:
+       - Оставляем старый файл на месте, возвращаем статус same_id.
+    6) Возвращаем {old_vk_id, new_vk_id, final_name, meta, same_id}.
     """
     storage = cabinet_storage(cabinet_id)
     file_path = storage / fname
@@ -642,14 +645,23 @@ def _rehash_one_file(user_id: str, cabinet_id: str, fname: str) -> dict:
         if not new_vk_id:
             raise HTTPException(500, "VK did not return id")
 
+        # === 3. Проверяем, изменился ли ID ===
         if new_vk_id == old_vk_id:
             log_error(f"_rehash_one_file: VK returned SAME id ({old_vk_id}) for {file_path}")
-            # формально это уже "плохая" ситуация, можно:
-            # - либо всё равно продолжать (просто обновили meta),
-            # - либо бросать ошибку.
-            # Я предлагаю ПРОДОЛЖАТЬ, чтобы не ломать UX.
+            # Оставляем старый файл на месте, возвращаем статус same_id
+            # Не удаляем ничего!
+            return {
+                "old_vk_id": old_vk_id,
+                "new_vk_id": new_vk_id,
+                "final_name": fname,  # старое имя файла
+                "cabinet_id": str(cabinet_id),
+                "url": f"/auto_ads/video/{cabinet_id}/{fname}",
+                "thumb_url": meta.get("thumb_url"),
+                "meta": meta,
+                "same_id": True,  # флаг что ID не изменился
+            }
 
-        # === 3. Создаём новый локальный файл под new_vk_id_ТотЖеНейм ===
+        # === 4. ID изменился - создаём новый локальный файл под new_vk_id_ТотЖеНейм ===
 
         final_name = f"{new_vk_id}_{display_name}"
         final_path = storage / final_name
@@ -660,14 +672,7 @@ def _rehash_one_file(user_id: str, cabinet_id: str, fname: str) -> dict:
             log_error(f"_rehash_one_file: copy tmp -> final error {tmp_path} -> {final_path}: {repr(e)}")
             raise HTTPException(500, "Internal copy error")
 
-        # === 4. Удаляем старый файл и старые превью/мету ===
-        _safe_unlink(file_path)
-        _safe_unlink(meta_path)
-        # превью могут быть в двух вариантах
-        _safe_unlink(storage / (fname + ".jpg"))
-        _safe_unlink(storage / f"{base_no_ext}.jpg")
-
-        # === 5. Генерируем новое превью для видео ===
+        # === 5. Генерируем новое превью для видео (ДО удаления старого файла) ===
         thumb_url = None
         if is_video:
             try:
@@ -710,6 +715,13 @@ def _rehash_one_file(user_id: str, cabinet_id: str, fname: str) -> dict:
             "type": "video" if is_video else "image",
         }
         atomic_write_json(new_meta_path, new_meta)
+
+        # === 7. Удаляем старый файл и старые превью/мету ТОЛЬКО ПОСЛЕ успешного создания нового ===
+        _safe_unlink(file_path)
+        _safe_unlink(meta_path)
+        # превью могут быть в двух вариантах
+        _safe_unlink(storage / (fname + ".jpg"))
+        _safe_unlink(storage / f"{base_no_ext}.jpg")
         
         file_url = f"/auto_ads/video/{cabinet_id}/{final_name}"
         
@@ -721,6 +733,7 @@ def _rehash_one_file(user_id: str, cabinet_id: str, fname: str) -> dict:
             "url": file_url,
             "thumb_url": thumb_url,
             "meta": new_meta,
+            "same_id": False,  # ID успешно изменён
         }
 
     finally:
