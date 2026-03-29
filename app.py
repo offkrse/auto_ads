@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.3"
+VersionApp = "1.31"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1157,7 +1157,7 @@ async def auth_check(request: Request):
         raise HTTPException(401, "Invalid session")
 
 
-app.include_router(auth_router)
+# auth_router будет включён в конце файла вместе с остальными роутерами
 
 # ----------------------------------- API --------------------------------------------
 secure_api = APIRouter(prefix="/api", dependencies=[Depends(require_tg_user)])
@@ -5077,10 +5077,13 @@ def get_ai_stats_launch_time(user_id: str = Query(...), acc_name: str = Query(No
 # -------------------------------------
 #   FRONTEND BUILD
 # -------------------------------------
+# ВАЖНО: Все API роутеры должны быть включены ДО mount статики!
+app.include_router(auth_router)  # auth без защиты - первым
 app.include_router(secure_api)
 app.include_router(secure_auto)
 
-@secure_api.get("/status")
+@app.get("/auto_ads/api/status")
+@app.get("/api/status")
 def status():
     return {"status": "running"}
     
