@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.31"
+VersionApp = "1.32"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -5075,20 +5075,29 @@ def get_ai_stats_launch_time(user_id: str = Query(...), acc_name: str = Query(No
 
 
 # -------------------------------------
-#   FRONTEND BUILD
+#   INCLUDE ROUTERS
 # -------------------------------------
 # ВАЖНО: Все API роутеры должны быть включены ДО mount статики!
-app.include_router(auth_router)  # auth без защиты - первым
+# auth_router - без защиты, для веб-авторизации
+app.include_router(auth_router)
 app.include_router(secure_api)
 app.include_router(secure_auto)
 
-@app.get("/auto_ads/api/status")
 @app.get("/api/status")
 def status():
-    return {"status": "running"}
-    
-if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="auto_ads_frontend")
+    return {"status": "running", "version": VersionApp}
+
+# -------------------------------------
+#   FRONTEND STATIC FILES
+# -------------------------------------
+# ВНИМАНИЕ: Если приложение монтируется как sub-app (например в leads_postback),
+# статику лучше раздавать через nginx или родительское приложение.
+# mount на "/" в sub-app может перехватывать API запросы.
+
+# Монтируем статику только если это standalone запуск
+if __name__ == "__main__" or os.environ.get("AUTO_ADS_STANDALONE") == "1":
+    if FRONTEND_DIR.exists():
+        app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="auto_ads_frontend")
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8899, reload=False)
