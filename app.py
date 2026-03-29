@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.32"
+VersionApp = "1.33"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1065,7 +1065,7 @@ def audiences_path(user_id: str, cabinet_id: str) -> Path:
     return USERS_DIR / user_id / "audiences" / cabinet_id / "audiences.json"
 
 # ----------------------------------- AUTH (без защиты) --------------------------------------------
-auth_router = APIRouter(prefix="/auto_ads/api/auth")
+auth_router = APIRouter(prefix="/api/auth")
 
 @auth_router.post("/login")
 async def auth_login(payload: dict):
@@ -1160,8 +1160,9 @@ async def auth_check(request: Request):
 # auth_router будет включён в конце файла вместе с остальными роутерами
 
 # ----------------------------------- API --------------------------------------------
+# Когда app монтируется на /auto_ads, prefix /api становится /auto_ads/api
 secure_api = APIRouter(prefix="/api", dependencies=[Depends(require_tg_user)])
-secure_auto = APIRouter(prefix="/auto_ads/api", dependencies=[Depends(require_tg_user)])
+secure_auto = APIRouter(prefix="/api", dependencies=[Depends(require_tg_user)])  # тоже /api, т.к. монтируется на /auto_ads
 # -------------------------------------
 #   HISTORY
 # -------------------------------------
