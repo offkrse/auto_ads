@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.29"
+VersionApp = "1.3"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -38,6 +38,8 @@ LOGO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR = Path("/opt/auto_ads/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 GLOBAL_QUEUE_FILE = DATA_DIR / "global_queue.json"
+WEB_CREDENTIALS_FILE = DATA_DIR / "web_credentials.json"
+WEB_SESSIONS_FILE = DATA_DIR / "web_sessions.json"
 
 STORAGE_DIR = Path("/mnt/data/auto_ads_storage/video")
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -210,6 +212,38 @@ def check_telegram_init_data(init_data: str) -> dict:
     # Можно ещё проверить свежесть auth_date (например ±1 день)
     return data  # тут, например, есть user, auth_date и пр.
 
+
+def check_session_token(session_token: str) -> dict:
+    """
+    Проверяет session token для веб-авторизации.
+    Возвращает dict с user_id если сессия валидна, иначе бросает HTTPException(401).
+    """
+    if not session_token:
+        raise HTTPException(401, "Missing session token")
+    
+    if not WEB_SESSIONS_FILE.exists():
+        raise HTTPException(401, "Invalid session")
+    
+    try:
+        sessions = json.loads(WEB_SESSIONS_FILE.read_text(encoding="utf-8"))
+    except:
+        raise HTTPException(401, "Invalid session")
+    
+    session_data = sessions.get(session_token)
+    if not session_data:
+        raise HTTPException(401, "Invalid session")
+    
+    # Проверяем срок действия (30 дней)
+    created_at = session_data.get("created_at", 0)
+    if time.time() - created_at > 30 * 24 * 3600:
+        # Удаляем просроченную сессию
+        del sessions[session_token]
+        WEB_SESSIONS_FILE.write_text(json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise HTTPException(401, "Session expired")
+    
+    return {"user_id": session_data.get("user_id")}
+
+
 def require_tg_user(
     init_data: str = Query(None, alias="init_data"),
     request: Request = None
@@ -218,6 +252,13 @@ def require_tg_user(
     if init_data is None and request is not None:
         # Starlette приводит имена к lower-case
         init_data = request.headers.get("x-tg-init-data") or request.headers.get("x-telegram-init")
+    
+    # Проверяем веб-сессию если нет Telegram init data
+    if not init_data and request is not None:
+        session_token = request.headers.get("x-session-token")
+        if session_token:
+            return check_session_token(session_token)
+    
     data = check_telegram_init_data(init_data)
     return data
 
@@ -1022,6 +1063,101 @@ def creatives_path(user_id: str, cabinet_id: str) -> Path:
 
 def audiences_path(user_id: str, cabinet_id: str) -> Path:
     return USERS_DIR / user_id / "audiences" / cabinet_id / "audiences.json"
+
+# ----------------------------------- AUTH (без защиты) --------------------------------------------
+auth_router = APIRouter(prefix="/auto_ads/api/auth")
+
+@auth_router.post("/login")
+async def auth_login(payload: dict):
+    """
+    Авторизация через логин/пароль для веб-версии.
+    """
+    login = payload.get("login", "").strip()
+    password = payload.get("password", "").strip()
+    
+    if not login or not password:
+        raise HTTPException(400, "Login and password required")
+    
+    # Проверяем credentials
+    if not WEB_CREDENTIALS_FILE.exists():
+        raise HTTPException(401, "Invalid credentials")
+    
+    try:
+        credentials = json.loads(WEB_CREDENTIALS_FILE.read_text(encoding="utf-8"))
+    except:
+        raise HTTPException(500, "Credentials file error")
+    
+    user_data = credentials.get(login)
+    if not user_data:
+        raise HTTPException(401, "Invalid login or password")
+    
+    if user_data.get("password") != password:
+        raise HTTPException(401, "Invalid login or password")
+    
+    user_id = user_data.get("tg_user_id")
+    if not user_id:
+        raise HTTPException(500, "User configuration error")
+    
+    # Создаём session token
+    session_token = str(uuid.uuid4())
+    
+    # Сохраняем сессию
+    sessions = {}
+    if WEB_SESSIONS_FILE.exists():
+        try:
+            sessions = json.loads(WEB_SESSIONS_FILE.read_text(encoding="utf-8"))
+        except:
+            sessions = {}
+    
+    sessions[session_token] = {
+        "user_id": user_id,
+        "login": login,
+        "created_at": time.time()
+    }
+    
+    WEB_SESSIONS_FILE.write_text(json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8")
+    
+    return {"user_id": user_id, "session_token": session_token}
+
+
+@auth_router.post("/logout")
+async def auth_logout(request: Request):
+    """
+    Выход из веб-сессии.
+    """
+    session_token = request.headers.get("x-session-token")
+    if not session_token:
+        return {"ok": True}
+    
+    if WEB_SESSIONS_FILE.exists():
+        try:
+            sessions = json.loads(WEB_SESSIONS_FILE.read_text(encoding="utf-8"))
+            if session_token in sessions:
+                del sessions[session_token]
+                WEB_SESSIONS_FILE.write_text(json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8")
+        except:
+            pass
+    
+    return {"ok": True}
+
+
+@auth_router.get("/check")
+async def auth_check(request: Request):
+    """
+    Проверка валидности текущей сессии.
+    """
+    session_token = request.headers.get("x-session-token")
+    if not session_token:
+        raise HTTPException(401, "No session")
+    
+    try:
+        data = check_session_token(session_token)
+        return {"valid": True, "user_id": data.get("user_id")}
+    except HTTPException:
+        raise HTTPException(401, "Invalid session")
+
+
+app.include_router(auth_router)
 
 # ----------------------------------- API --------------------------------------------
 secure_api = APIRouter(prefix="/api", dependencies=[Depends(require_tg_user)])
