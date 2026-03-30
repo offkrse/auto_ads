@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.33"
+VersionApp = "1.34"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1930,8 +1930,8 @@ def get_creatives(user_id: str, cabinet_id: str):
         log_error(f"creatives/get[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
+# Когда app монтируется на /auto_ads, путь /video станет /auto_ads/video
 @app.get("/video/{cabinet_id}/{filename}")
-@app.get("/auto_ads/video/{cabinet_id}/{filename}")
 def serve_file(cabinet_id: str, filename: str):
     path = cabinet_storage(cabinet_id) / filename
     if not path.exists():
@@ -2687,7 +2687,7 @@ async def pixels_save(payload: dict):
 # -------------------------------------
 #   LOGO SETS
 # -------------------------------------
-@app.get("/auto_ads/logo/{cabinet_id}/{filename}")
+# Когда app монтируется на /auto_ads, путь /logo станет /auto_ads/logo
 @app.get("/logo/{cabinet_id}/{filename}")
 def serve_logo(cabinet_id: str, filename: str):
     path = logo_storage(cabinet_id) / filename
