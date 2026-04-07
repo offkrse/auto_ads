@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.34"
+VersionApp = "1.35"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1183,6 +1183,7 @@ async def save_preset(payload: dict):
     user_id = payload.get("userId")
     cabinet_id = payload.get("cabinetId")
     preset_id = payload.get("presetId")
+    is_draft = payload.get("isDraft", False)  # Черновик не добавляется в очередь
 
     if not user_id or not cabinet_id or not preset:
         raise HTTPException(400, "userId, cabinetId and preset required")
@@ -1191,65 +1192,73 @@ async def save_preset(payload: dict):
     data = ensure_user_structure(user_id)
 
     # создаём новый id
+    is_new = not preset_id
     if not preset_id:
         preset_id = f"preset_{uuid.uuid4().hex[:8]}"
 
     # файл пресета
     fpath = preset_path(user_id, cabinet_id, preset_id)
+    
+    # Сохраняем created_at при первом создании, updated_at при каждом сохранении
+    now_iso = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    
+    # Если файл уже существует - читаем старый created_at
+    existing_created_at = None
+    if fpath.exists():
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                old_data = json.load(f)
+                existing_created_at = old_data.get("_meta", {}).get("created_at")
+        except:
+            pass
+    
+    # Добавляем метаданные в preset
+    preset["_meta"] = {
+        "created_at": existing_created_at or now_iso,
+        "updated_at": now_iso
+    }
+    
     with open(fpath, "w", encoding="utf-8") as f:
         json.dump(preset, f, ensure_ascii=False, indent=2)
 
-    # ====== НОВОЕ: добавляем запись в глобальную очередь ======
-    # Соберём список "tokens" (НЕ секреты, а имена переменных из .env).
-    # Если cabinet_id == "all" — берём все кабинеты кроме "all" с заполненным token.
-    if str(cabinet_id) == "all":
-        token_names = [
-            c.get("token") for c in data.get("cabinets", [])
-            if str(c.get("id")) != "all" and c.get("token")
-        ]
-    else:
-        token_names = [
-            c.get("token") for c in data.get("cabinets", [])
-            if str(c.get("id")) == str(cabinet_id) and c.get("token")
-        ]
+    # ====== Добавляем запись в глобальную очередь (только если не черновик) ======
+    if not is_draft:
+        if str(cabinet_id) == "all":
+            token_names = [
+                c.get("token") for c in data.get("cabinets", [])
+                if str(c.get("id")) != "all" and c.get("token")
+            ]
+        else:
+            token_names = [
+                c.get("token") for c in data.get("cabinets", [])
+                if str(c.get("id")) == str(cabinet_id) and c.get("token")
+            ]
 
-    # Кол-во дублей
-    count_repeats = 1
-    try:
-        count_repeats = int(preset.get("company", {}).get("duplicates", 1) or 1)
-    except Exception:
+        # Кол-во дублей
         count_repeats = 1
-    
-    company = preset.get("company", {}) or {}
-    trigger_time = ""
-    if str(company.get("trigger", "time")) == "time":
-        trigger_time = str(company.get("time") or "")
-    
-    # список "token"-имён кабинетов
-    if str(cabinet_id) == "all":
-        token_names = [
-            c.get("token") for c in data.get("cabinets", [])
-            if str(c.get("id")) != "all" and c.get("token")
-        ]
-    else:
-        token_names = [
-            c.get("token") for c in data.get("cabinets", [])
-            if str(c.get("id")) == str(cabinet_id) and c.get("token")
-        ]
-    
-    queue_item = {
-        "user_id": str(user_id),
-        "cabinet_id": str(cabinet_id),
-        "preset_id": str(preset_id),   # ← ВАЖНО: теперь пишем preset_id
-        "tokens": token_names,
-        "date_time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "count_repeats": count_repeats,
-        "trigger_time": trigger_time,
-        "fast_preset": fast_preset_flag,
-        "status": "active"
-    }
-    
-    upsert_global_queue(queue_item)
+        try:
+            count_repeats = int(preset.get("company", {}).get("duplicates", 1) or 1)
+        except Exception:
+            count_repeats = 1
+        
+        company = preset.get("company", {}) or {}
+        trigger_time = ""
+        if str(company.get("trigger", "time")) == "time":
+            trigger_time = str(company.get("time") or "")
+        
+        queue_item = {
+            "user_id": str(user_id),
+            "cabinet_id": str(cabinet_id),
+            "preset_id": str(preset_id),
+            "tokens": token_names,
+            "date_time": now_iso,
+            "count_repeats": count_repeats,
+            "trigger_time": trigger_time,
+            "fast_preset": fast_preset_flag,
+            "status": "active"
+        }
+        
+        upsert_global_queue(queue_item)
 
     return {"status": "ok", "preset_id": preset_id}
 
@@ -1280,13 +1289,22 @@ def list_presets(user_id: str, cabinet_id: str):
                 if "ads" not in data or not isinstance(data["ads"], list):
                     data["ads"] = []
 
+                # Читаем даты из метаданных, fallback на mtime
+                meta = data.get("_meta", {})
                 mtime = file.stat().st_mtime
-                created_at = datetime.utcfromtimestamp(mtime).isoformat(timespec="seconds") + "Z"
+                mtime_iso = datetime.utcfromtimestamp(mtime).isoformat(timespec="seconds") + "Z"
+                
+                created_at = meta.get("created_at") or mtime_iso
+                updated_at = meta.get("updated_at") or mtime_iso
+                
+                # Убираем _meta из data перед отправкой (не нужно фронту внутри data)
+                data_clean = {k: v for k, v in data.items() if k != "_meta"}
 
                 presets.append({
                     "preset_id": file.stem,
                     "created_at": created_at,
-                    "data": data
+                    "updated_at": updated_at,
+                    "data": data_clean
                 })
             except Exception as e:
                 log_error(f"preset/list skip {file}: {repr(e)}")
@@ -3342,6 +3360,86 @@ def vk_users_lists_search(
         "mode": mode,
         "scan_pages": pages_scanned,
     }
+
+
+# -------------------------------------
+#   VK SHARING KEYS (share users_lists)
+# -------------------------------------
+@secure_auto.post("/vk/sharing_keys")
+@secure_api.post("/vk/sharing_keys")
+def create_sharing_key(payload: dict):
+    """
+    Создание ключа для шаринга users_lists.
+    Принимает:
+    {
+        "userId": "...",
+        "cabinetId": "...",
+        "sources": [
+            {"object_type": "users_list", "object_id": 123456},
+            ...
+        ],
+        "users": [],
+        "send_email": false
+    }
+    Возвращает:
+    {
+        "sharing_key": "...",
+        "sharing_url": "https://ads.vk.com/activate_sharing_key?key=..."
+    }
+    """
+    user_id = payload.get("userId")
+    cabinet_id = payload.get("cabinetId")
+    sources = payload.get("sources") or []
+    users = payload.get("users") or []
+    send_email = payload.get("send_email", False)
+
+    if not user_id or not cabinet_id:
+        raise HTTPException(400, "Missing userId/cabinetId")
+    
+    if not sources:
+        raise HTTPException(400, "No sources provided")
+
+    data = ensure_user_structure(user_id)
+    cab = next((c for c in data["cabinets"] if str(c["id"]) == str(cabinet_id)), None)
+    if not cab or not cab.get("token"):
+        raise HTTPException(400, "Invalid cabinet or missing token")
+
+    token = os.getenv(cab["token"])
+    if not token:
+        raise HTTPException(500, f"Token {cab['token']} not found in .env")
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    
+    # VK API endpoint
+    vk_url = "https://ads.vk.com/api/v2/sharing_keys.json"
+    
+    body = {
+        "sources": sources,
+        "users": users,
+        "send_email": send_email
+    }
+    
+    try:
+        resp = requests.post(vk_url, headers=headers, json=body, timeout=30)
+        resp_data = resp.json()
+        
+        if resp.status_code >= 400 or "error" in resp_data:
+            error_msg = resp_data.get("error", {}).get("message", "VK API error")
+            log_error(f"sharing_keys error: {resp.status_code} - {resp_data}")
+            raise HTTPException(resp.status_code, error_msg)
+        
+        sharing_key = resp_data.get("sharing_key", "")
+        sharing_url = resp_data.get("sharing_url") or f"https://ads.vk.com/activate_sharing_key?key={sharing_key}"
+        
+        return {
+            "sharing_key": sharing_key,
+            "sharing_url": sharing_url
+        }
+        
+    except requests.RequestException as e:
+        log_error(f"sharing_keys request error: {repr(e)}")
+        raise HTTPException(500, f"Request error: {str(e)}")
+
 
 # -------------------------------------
 #   SETTINGS (theme, language, any future)
