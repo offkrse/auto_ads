@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.36"
+VersionApp = "1.37"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1184,7 +1184,6 @@ async def save_preset(payload: dict):
     cabinet_id = payload.get("cabinetId")
     preset_id = payload.get("presetId")
     is_draft = payload.get("isDraft", False)  # Черновик не добавляется в очередь
-    one_time = payload.get("oneTime", False)  # Одноразовый пресет
 
     if not user_id or not cabinet_id or not preset:
         raise HTTPException(400, "userId, cabinetId and preset required")
@@ -1196,10 +1195,6 @@ async def save_preset(payload: dict):
     is_new = not preset_id
     if not preset_id:
         preset_id = f"preset_{uuid.uuid4().hex[:8]}"
-
-    # Помечаем пресет как одноразовый
-    if one_time:
-        preset["one_time"] = True
 
     # файл пресета
     fpath = preset_path(user_id, cabinet_id, preset_id)
@@ -1225,23 +1220,6 @@ async def save_preset(payload: dict):
     
     with open(fpath, "w", encoding="utf-8") as f:
         json.dump(preset, f, ensure_ascii=False, indent=2)
-
-    # ====== Одноразовый пресет: сразу пишем в one_shot_presets для cyclop ======
-    if one_time and not is_draft:
-        try:
-            one_shot_dir = Path("/opt/auto_ads/data/one_shot_presets")
-            one_shot_dir.mkdir(parents=True, exist_ok=True)
-            shot_preset = dict(preset)
-            shot_preset["_user_id"] = str(user_id)
-            shot_preset["_cabinet_id"] = str(cabinet_id)
-            shot_path = one_shot_dir / f"{preset_id}.json"
-            with open(shot_path, "w", encoding="utf-8") as f:
-                json.dump(shot_preset, f, ensure_ascii=False, indent=2)
-            log_info(f"one_shot preset written: {shot_path}")
-        except Exception as e:
-            log_error(f"Failed to write one_shot preset: {repr(e)}")
-        # Одноразовые НЕ добавляем в глобальную очередь
-        return {"status": "ok", "preset_id": preset_id}
 
     # ====== Добавляем запись в глобальную очередь (только если не черновик) ======
     if not is_draft:
@@ -1285,16 +1263,6 @@ async def save_preset(payload: dict):
     return {"status": "ok", "preset_id": preset_id}
 
 
-@secure_auto.post("/preset/run_once")
-@secure_api.post("/preset/run_once")
-async def run_once_preset(payload: dict):
-    """
-    Одноразовый пресет уже записан в one_shot_presets при сохранении.
-    Этот endpoint — заглушка для совместимости с фронтендом.
-    """
-    return {"status": "ok"}
-
-
 @secure_api.get("/preset/list")
 @secure_auto.get("/preset/list")
 def list_presets(user_id: str, cabinet_id: str):
@@ -1336,7 +1304,6 @@ def list_presets(user_id: str, cabinet_id: str):
                     "preset_id": file.stem,
                     "created_at": created_at,
                     "updated_at": updated_at,
-                    "one_time": bool(data_clean.get("one_time", False)),
                     "data": data_clean
                 })
             except Exception as e:
@@ -1944,6 +1911,228 @@ async def save_creatives(payload: dict):
     except Exception as e:
         log_error(f"creatives/save[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+
+@secure_api.post("/creatives/import_item")
+@secure_auto.post("/creatives/import_item")
+async def import_creative_item(payload: dict):
+    """
+    Импортирует один элемент креатива из другого кабинета в текущий.
+    Дедупликация по хешу файла: если файл уже есть — не копируем, но регистрируем в VK целевого кабинета.
+    Загружает медиафайл в VK целевого кабинета и добавляет в sets.json.
+    """
+    user_id = str(payload.get("userId", ""))
+    source_cabinet_id = str(payload.get("sourceCabinetId", ""))
+    target_cabinet_id = str(payload.get("targetCabinetId", ""))
+    item = payload.get("item", {})
+    target_set_id = payload.get("targetSetId")
+
+    if not user_id or not source_cabinet_id or not target_cabinet_id or not item:
+        raise HTTPException(400, "userId, sourceCabinetId, targetCabinetId, item required")
+
+    try:
+        data = ensure_user_structure(user_id)
+
+        # Получаем токен целевого кабинета
+        cab = next((c for c in data["cabinets"] if str(c.get("id")) == str(target_cabinet_id)), None)
+        if not cab or not cab.get("token"):
+            raise HTTPException(400, "Target cabinet not found or missing token")
+        real_token = os.getenv(cab["token"])
+        if not real_token:
+            raise HTTPException(500, f"Token {cab['token']} not found in environment")
+
+        item_id = str(item.get("id", ""))
+        item_type = item.get("type", "video")
+        item_name = item.get("name", item_id)
+
+        # Ищем физический файл в хранилище исходного кабинета
+        src_storage = cabinet_storage(source_cabinet_id)
+        src_file: Path | None = None
+        for f_path in src_storage.iterdir():
+            if f_path.is_file() and f_path.name.startswith(f"{item_id}_"):
+                if not f_path.name.endswith(".json") and not f_path.name.endswith(".jpg"):
+                    src_file = f_path
+                    break
+
+        # Если файл не найден по vk_id — пробуем найти по vkByCabinet
+        if src_file is None:
+            vk_by_cab = item.get("vkByCabinet", {})
+            src_vk_id = str(vk_by_cab.get(source_cabinet_id, ""))
+            if src_vk_id:
+                for f_path in src_storage.iterdir():
+                    if f_path.is_file() and f_path.name.startswith(f"{src_vk_id}_"):
+                        if not f_path.name.endswith(".json") and not f_path.name.endswith(".jpg"):
+                            src_file = f_path
+                            break
+
+        if src_file is None:
+            log_error(f"import_item: source file not found for item_id={item_id} in cabinet={source_cabinet_id}")
+            return JSONResponse(status_code=404, content={"error": "Source file not found", "skipped": True})
+
+        # Вычисляем хеш файла для дедупликации
+        import hashlib
+        with open(src_file, "rb") as fh:
+            file_hash = hashlib.sha256(fh.read()).hexdigest()
+
+        # Проверяем дедупликацию в целевом кабинете по hash-файлу
+        tgt_storage = cabinet_storage(target_cabinet_id)
+        hash_index_path = tgt_storage / "import_hash_index.json"
+        hash_index: dict = {}
+        if hash_index_path.exists():
+            try:
+                with open(hash_index_path, "r", encoding="utf-8") as fh:
+                    hash_index = json.load(fh)
+            except Exception:
+                hash_index = {}
+
+        if file_hash in hash_index:
+            # Файл уже есть — возвращаем существующий vk_id
+            existing = hash_index[file_hash]
+            log_error(f"import_item: duplicate detected for {item_name}, existing vk_id={existing.get('vk_id')}")
+            # Всё равно добавляем в sets.json если нужно
+            _add_item_to_sets(user_id, target_cabinet_id, existing, target_set_id)
+            return {"status": "ok", "skipped": True, "vk_id": existing.get("vk_id"), "reason": "duplicate"}
+
+        # Загружаем в VK целевого кабинета
+        is_image = item_type == "image"
+        vk_url = (
+            "https://ads.vk.com/api/v2/content/static.json"
+            if is_image else
+            "https://ads.vk.com/api/v2/content/video.json"
+        )
+        headers_vk = {"Authorization": f"Bearer {real_token}"}
+
+        # Определяем размеры
+        width = item.get("width", 720)
+        height = item.get("height", 1280)
+        if is_image:
+            try:
+                img = Image.open(src_file)
+                width, height = img.size
+            except Exception:
+                pass
+
+        content_type = "image/jpeg" if is_image else "video/mp4"
+        with open(src_file, "rb") as fh:
+            files = {
+                "file": (src_file.name, fh, content_type),
+                "data": (None, json.dumps({"width": width, "height": height}), "application/json"),
+            }
+            resp = requests.post(vk_url, headers=headers_vk, files=files, timeout=120)
+
+        if resp.status_code != 200:
+            log_error(f"import_item VK upload failed: {resp.status_code} {resp.text[:200]}")
+            return JSONResponse(status_code=502, content={"error": f"VK upload failed: {resp.status_code}"})
+
+        resp_json = resp.json()
+        vk_id = resp_json.get("id")
+        if not vk_id:
+            raise HTTPException(500, "VK did not return id")
+
+        # Копируем файл в хранилище целевого кабинета (жёсткая ссылка или копия)
+        final_name = f"{vk_id}_{item_name}"
+        final_path = tgt_storage / final_name
+        try:
+            os.link(src_file, final_path)  # жёсткая ссылка — не занимает доп. место
+        except (OSError, AttributeError):
+            shutil.copy2(src_file, final_path)  # fallback: копия
+
+        # Генерируем превью для видео
+        thumb_url = None
+        if not is_image:
+            try:
+                thumb_name = f"{final_name}.jpg"
+                thumb_path = tgt_storage / thumb_name
+                proc = subprocess.run(
+                    ["ffmpeg", "-y", "-ss", "1", "-i", str(final_path), "-vframes", "1", "-vf", "scale=360:-1", str(thumb_path)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                if proc.returncode == 0 and thumb_path.exists():
+                    thumb_url = f"/auto_ads/video/{target_cabinet_id}/{thumb_name}"
+            except Exception:
+                pass
+
+        # Записываем мета-файл
+        meta = {
+            "vk_response": resp_json,
+            "cabinet_id": str(target_cabinet_id),
+            "vk_id": vk_id,
+            "display_name": item_name,
+            "stored_file": f"/auto_ads/video/{target_cabinet_id}/{final_name}",
+            "thumb_url": thumb_url,
+            "content_type": content_type,
+            "width": width,
+            "height": height,
+            "imported_from": source_cabinet_id,
+            "uploaded_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "type": item_type,
+            "source_hash": file_hash,
+        }
+        atomic_write_json(tgt_storage / f"{os.path.splitext(final_name)[0]}.json", meta)
+
+        # Обновляем hash-index для будущей дедупликации
+        hash_index[file_hash] = {"vk_id": vk_id, "name": item_name, "type": item_type,
+                                  "url": f"/auto_ads/video/{target_cabinet_id}/{final_name}",
+                                  "thumbUrl": thumb_url}
+        atomic_write_json(hash_index_path, hash_index)
+
+        new_item = {
+            "id": item_id,  # сохраняем исходный id для совместимости
+            "name": item_name,
+            "type": item_type,
+            "url": f"/auto_ads/video/{target_cabinet_id}/{final_name}",
+            "thumbUrl": thumb_url,
+            "vkByCabinet": {**item.get("vkByCabinet", {}), str(target_cabinet_id): str(vk_id)},
+            "urls": {**item.get("urls", {}), str(target_cabinet_id): f"/auto_ads/video/{target_cabinet_id}/{final_name}"},
+        }
+
+        _add_item_to_sets(user_id, target_cabinet_id, new_item, target_set_id)
+        return {"status": "ok", "imported": True, "vk_id": vk_id, "item": new_item}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"import_item error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+
+def _add_item_to_sets(user_id: str, cabinet_id: str, new_item: dict, target_set_id: str | None):
+    """Добавляет элемент в sets.json целевого кабинета."""
+    try:
+        fsets = creatives_path(user_id, cabinet_id)
+        lock = fsets.with_suffix(fsets.suffix + ".lock")
+        with file_lock(lock, timeout=10):
+            sets_data = []
+            if fsets.exists():
+                try:
+                    sets_data = json.loads(fsets.read_text(encoding="utf-8"))
+                    if not isinstance(sets_data, list):
+                        sets_data = []
+                except Exception:
+                    sets_data = []
+
+            item_id = str(new_item.get("id", ""))
+
+            if target_set_id:
+                # Добавляем в конкретный набор
+                target_set = next((s for s in sets_data if s.get("id") == target_set_id), None)
+                if target_set is None:
+                    target_set = {"id": target_set_id, "name": "Импортированные", "items": []}
+                    sets_data.append(target_set)
+                # Проверяем дубль по id
+                if not any(str(it.get("id")) == item_id for it in target_set.get("items", [])):
+                    target_set.setdefault("items", []).append(new_item)
+            else:
+                # Добавляем/обновляем в первом наборе или создаём "Импортированные"
+                if not sets_data:
+                    sets_data = [{"id": f"imported_{cabinet_id}", "name": "Импортированные", "items": []}]
+                target_set = sets_data[0]
+                if not any(str(it.get("id")) == item_id for it in target_set.get("items", [])):
+                    target_set.setdefault("items", []).append(new_item)
+
+            atomic_write_json(fsets, sets_data)
+    except Exception as e:
+        log_error(f"_add_item_to_sets error: {repr(e)}")
 
 
 @secure_api.get("/creatives/get")
@@ -2805,16 +2994,30 @@ async def upload_logo(
         final_path = storage / final_name
         shutil.copy(tmp_path, final_path)
 
-        # сохраняем мету под блокировкой
+        logo_entry = {"id": vk_id, "url": f"/auto_ads/logo/{cabinet_id}/{final_name}"}
+
+        # сохраняем мету под блокировкой (для обратной совместимости)
         meta_path = logo_meta_path(user_id, cabinet_id)
         lock = meta_path.with_suffix(".lock")
         with file_lock(lock, timeout=5):
-            atomic_write_json(meta_path, {
-                "id": vk_id,
-                "url": f"/auto_ads/logo/{cabinet_id}/{final_name}"
-            })
+            atomic_write_json(meta_path, logo_entry)
 
-        return {"status": "ok", "logo": {"id": vk_id, "url": f"/auto_ads/logo/{cabinet_id}/{final_name}"}}
+        # Также обновляем logo_list.json — добавляем если нет дубля
+        list_path = USERS_DIR / str(user_id) / "creatives" / str(cabinet_id) / "logo_list.json"
+        list_lock = list_path.with_suffix(".lock")
+        with file_lock(list_lock, timeout=5):
+            logos = []
+            if list_path.exists():
+                try:
+                    with open(list_path, "r", encoding="utf-8") as fh:
+                        logos = json.load(fh)
+                except Exception:
+                    logos = []
+            if not any(str(l.get("id")) == str(vk_id) for l in logos):
+                logos.append(logo_entry)
+            atomic_write_json(list_path, logos)
+
+        return {"status": "ok", "logo": logo_entry}
     except Exception as e:
         log_error(f"logo/upload[{user_id}/{cabinet_id}] error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
@@ -2837,6 +3040,49 @@ def get_logo(user_id: str, cabinet_id: str):
             return {"logo": json.load(fh)}
     except Exception as e:
         log_error(f"logo/get[{user_id}/{cabinet_id}] error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+
+@secure_auto.get("/logo/list")
+@secure_api.get("/logo/list")
+def list_logos(user_id: str, cabinet_id: str):
+    """Возвращает все логотипы кабинета из logo_list.json (+ fallback на logo.json)."""
+    try:
+        ensure_user_structure(user_id)
+        list_path = USERS_DIR / str(user_id) / "creatives" / str(cabinet_id) / "logo_list.json"
+        if list_path.exists():
+            with open(list_path, "r", encoding="utf-8") as fh:
+                logos = json.load(fh)
+            if isinstance(logos, list):
+                return {"logos": logos}
+        # fallback: один логотип из logo.json
+        meta_path = logo_meta_path(user_id, cabinet_id)
+        if meta_path.exists():
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                logo = json.load(fh)
+            return {"logos": [logo] if isinstance(logo, dict) else []}
+        return {"logos": []}
+    except Exception as e:
+        log_error(f"logo/list error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+
+@secure_auto.delete("/logo/delete")
+@secure_api.delete("/logo/delete")
+def delete_logo(user_id: str, cabinet_id: str, logo_id: str):
+    """Удаляет логотип из списка logo_list.json (файл на диске не удаляем — он в VK)."""
+    try:
+        ensure_user_structure(user_id)
+        list_path = USERS_DIR / str(user_id) / "creatives" / str(cabinet_id) / "logo_list.json"
+        logos = []
+        if list_path.exists():
+            with open(list_path, "r", encoding="utf-8") as fh:
+                logos = json.load(fh)
+        logos = [l for l in logos if str(l.get("id")) != str(logo_id)]
+        atomic_write_json(list_path, logos)
+        return {"status": "ok", "count": len(logos)}
+    except Exception as e:
+        log_error(f"logo/delete error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 # -------------------------------------
