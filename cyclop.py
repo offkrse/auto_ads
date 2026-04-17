@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.81"
+VersionCyclop = "1.82"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -2549,6 +2549,76 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
 
 
 # ============================ FAST ПЛАН ============================
+
+# ============================ oneContOneCompany: каждый контейнер → своя компания ============================
+
+def _create_ad_plan_fast_one_cont_per_company(
+        preset: Dict[str, Any], tokens: List[str], repeats: int,
+        user_id: str, cabinet_id: str,
+        preset_id: str, preset_name: str, trigger_time: str,
+        date_start_override: Optional[str] = None,
+        skip_moderation_check: bool = False) -> List[Dict[str, Any]]:
+    """
+    Вариант FAST с oneContOneCompany=True.
+    Для каждого контейнера из каждой группы создаётся ОТДЕЛЬНАЯ компания (отдельный POST).
+    Внутри компании — одна группа с одним контейнером и все креативы.
+    """
+    groups = (preset.get("groups") or [])
+    all_results: List[Dict[str, Any]] = []
+
+    # Собираем список (group, container) пар
+    pairs: List[tuple] = []
+    for g in groups:
+        containers = g.get("containers") or []
+        if not containers:
+            # нет контейнеров — один виртуальный из самой группы
+            containers = [{
+                "id": "virt",
+                "name": g.get("groupName") or "Контейнер",
+                "audienceIds": g.get("audienceIds") or [],
+                "audienceNames": g.get("audienceNames") or [],
+                "abstractAudiences": g.get("abstractAudiences") or [],
+            }]
+        for cont in containers:
+            pairs.append((g, cont))
+
+    log.info("oneContOneCompany: %d container(s) → %d separate campaign(s)", len(pairs), len(pairs))
+
+    for pair_idx, (g, cont) in enumerate(pairs, start=1):
+        # Строим «клон» пресета с одной группой и одним контейнером
+        # Аудитории контейнера подставляем напрямую в группу (containers=[cont])
+        clone_group = dict(g)
+        clone_group["containers"] = [cont]
+        # Имя группы/компании берём из контейнера если есть
+        cont_name = (cont.get("name") or "").strip()
+        if cont_name:
+            clone_group["groupName"] = cont_name
+
+        clone_preset = dict(preset)
+        clone_preset["groups"] = [clone_group]
+        clone_preset["oneContOneCompany"] = False  # не рекурсировать
+
+        sub_preset_id = f"{preset_id}_c{pair_idx}"
+        log.info("oneContOneCompany: posting campaign %d/%d (container='%s')",
+                 pair_idx, len(pairs), cont.get("name") or pair_idx)
+
+        try:
+            sub_results = create_ad_plan_fast(
+                clone_preset, tokens, repeats, user_id, cabinet_id,
+                preset_id=sub_preset_id,
+                preset_name=f"{preset_name} [{cont.get('name') or pair_idx}]",
+                trigger_time=trigger_time,
+                date_start_override=date_start_override,
+                skip_moderation_check=skip_moderation_check,
+            )
+            all_results.extend(sub_results)
+        except Exception as e:
+            log.error("oneContOneCompany: campaign %d/%d failed: %s", pair_idx, len(pairs), e)
+            # продолжаем остальные контейнеры
+
+    return all_results
+
+
 def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
                         user_id: str, cabinet_id: str,
                         preset_id: str, preset_name: str, trigger_time: str,
@@ -2558,11 +2628,22 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
     FAST: на каждый контейнер → отдельная группа; в каждой группе создаём баннер
     под КАЖДЫЙ креатив из ads[*].videoIds и ads[*].imageIds.
     Если контейнеров нет — используем аудитории самой группы.
+    Если oneContOneCompany=True — каждый контейнер → отдельная компания (отдельный POST).
     
     Args:
         date_start_override: Если задан, используется как date_start для групп.
         skip_moderation_check: Если True, не проверять модерацию в sets.json.
     """
+    # Если включён режим "один контейнер — одна компания",
+    # разбиваем на отдельные вызовы для каждого контейнера
+    one_cont_one_company = bool(preset.get("oneContOneCompany", False))
+    if one_cont_one_company:
+        return _create_ad_plan_fast_one_cont_per_company(
+            preset, tokens, repeats, user_id, cabinet_id,
+            preset_id, preset_name, trigger_time,
+            date_start_override=date_start_override,
+            skip_moderation_check=skip_moderation_check,
+        )
     company = preset["company"]
     url = company.get("url")
     company_adv = (company.get("advertiserInfo") or "").strip()
