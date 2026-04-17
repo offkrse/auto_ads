@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.37"
+VersionApp = "1.38"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3723,6 +3723,117 @@ def create_sharing_key(payload: dict):
 # -------------------------------------
 #   SETTINGS (theme, language, any future)
 # -------------------------------------
+@secure_api.post("/vk/resolve_token")
+@secure_auto.post("/vk/resolve_token")
+async def vk_resolve_token(payload: dict):
+    """
+    Проверяет VK Ads токен и возвращает client_name и id кабинета.
+    GET /api/v3/user.json?fields=additional_info,id
+    """
+    token = str(payload.get("token", "")).strip()
+    if not token:
+        raise HTTPException(400, "token required")
+    try:
+        url = "https://ads.vk.com/api/v3/user.json?fields=additional_info,id"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
+            "Accept": "application/json",
+        }
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 401:
+            return JSONResponse(status_code=401, content={"error": "Неверный токен или нет доступа"})
+        if resp.status_code != 200:
+            return JSONResponse(status_code=502, content={"error": f"VK API вернул {resp.status_code}"})
+        j = resp.json()
+        # additional_info содержит client_name
+        additional = j.get("additional_info") or {}
+        client_name = additional.get("client_name") or j.get("name") or "Кабинет"
+        cabinet_id = str(j.get("id") or "")
+        if not cabinet_id:
+            return JSONResponse(status_code=502, content={"error": "VK не вернул id"})
+        return {"client_name": client_name, "id": cabinet_id}
+    except Exception as e:
+        log_error(f"vk/resolve_token error: {repr(e)}")
+        return JSONResponse(status_code=500, content={"error": "Ошибка соединения с VK"})
+
+
+@secure_api.post("/cabinet/add")
+@secure_auto.post("/cabinet/add")
+async def add_cabinet(payload: dict):
+    """
+    Добавляет новый кабинет в профиль пользователя.
+    Сохраняет токен в /opt/auto_ads/.env под именем VK_TOKEN_{cabinet_id}.
+    Обновляет JSON профиля пользователя.
+    """
+    user_id = str(payload.get("userId", "")).strip()
+    token = str(payload.get("token", "")).strip()
+    client_name = str(payload.get("clientName", "")).strip()
+    client_id = str(payload.get("clientId", "")).strip()
+
+    if not user_id or not token or not client_id:
+        raise HTTPException(400, "userId, token, clientId required")
+
+    token_key = f"VK_TOKEN_{client_id}"
+
+    # 1) Сохраняем токен в .env файл
+    env_path = Path("/opt/auto_ads/.env")
+    try:
+        env_lines = []
+        if env_path.exists():
+            env_lines = env_path.read_text(encoding="utf-8").splitlines()
+        # Удаляем старую запись с тем же ключом если есть
+        env_lines = [l for l in env_lines if not l.startswith(f"{token_key}=")]
+        env_lines.append(f"{token_key}={token}")
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+        # Подгружаем в текущее окружение
+        os.environ[token_key] = token
+    except Exception as e:
+        log_error(f"cabinet/add: failed to write .env: {repr(e)}")
+        raise HTTPException(500, f"Не удалось сохранить токен: {repr(e)}")
+
+    # 2) Добавляем кабинет в JSON профиля пользователя
+    user_dir = USERS_DIR / user_id
+    info_file = user_dir / f"{user_id}.json"
+    lock = info_file.with_suffix(info_file.suffix + ".lock")
+    try:
+        with file_lock(lock, timeout=5):
+            data = {}
+            if info_file.exists():
+                try:
+                    data = json.loads(info_file.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+
+            cabinets = data.get("cabinets", [])
+            if not isinstance(cabinets, list):
+                cabinets = []
+
+            # Проверяем — кабинет уже есть?
+            existing = next((c for c in cabinets if str(c.get("id")) == client_id), None)
+            if existing:
+                # Обновляем токен и имя
+                existing["token"] = token_key
+                existing["name"] = client_name or existing.get("name", client_id)
+            else:
+                cabinets.append({
+                    "id": client_id,
+                    "name": client_name or client_id,
+                    "token": token_key,
+                })
+
+            data["cabinets"] = cabinets
+            atomic_write_json(info_file, data)
+    except FileLockTimeout:
+        raise HTTPException(503, "Storage busy, retry")
+    except Exception as e:
+        log_error(f"cabinet/add: failed to update user file: {repr(e)}")
+        raise HTTPException(500, f"Не удалось обновить профиль: {repr(e)}")
+
+    return {"status": "ok", "cabinet_id": client_id, "token_key": token_key}
+
+
 @secure_api.post("/settings/save")
 async def save_settings(payload: dict):
     user_id = payload.get("userId")
