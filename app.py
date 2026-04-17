@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.35"
+VersionApp = "1.36"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1184,6 +1184,7 @@ async def save_preset(payload: dict):
     cabinet_id = payload.get("cabinetId")
     preset_id = payload.get("presetId")
     is_draft = payload.get("isDraft", False)  # Черновик не добавляется в очередь
+    one_time = payload.get("oneTime", False)  # Одноразовый пресет
 
     if not user_id or not cabinet_id or not preset:
         raise HTTPException(400, "userId, cabinetId and preset required")
@@ -1195,6 +1196,10 @@ async def save_preset(payload: dict):
     is_new = not preset_id
     if not preset_id:
         preset_id = f"preset_{uuid.uuid4().hex[:8]}"
+
+    # Помечаем пресет как одноразовый
+    if one_time:
+        preset["one_time"] = True
 
     # файл пресета
     fpath = preset_path(user_id, cabinet_id, preset_id)
@@ -1220,6 +1225,23 @@ async def save_preset(payload: dict):
     
     with open(fpath, "w", encoding="utf-8") as f:
         json.dump(preset, f, ensure_ascii=False, indent=2)
+
+    # ====== Одноразовый пресет: сразу пишем в one_shot_presets для cyclop ======
+    if one_time and not is_draft:
+        try:
+            one_shot_dir = Path("/opt/auto_ads/data/one_shot_presets")
+            one_shot_dir.mkdir(parents=True, exist_ok=True)
+            shot_preset = dict(preset)
+            shot_preset["_user_id"] = str(user_id)
+            shot_preset["_cabinet_id"] = str(cabinet_id)
+            shot_path = one_shot_dir / f"{preset_id}.json"
+            with open(shot_path, "w", encoding="utf-8") as f:
+                json.dump(shot_preset, f, ensure_ascii=False, indent=2)
+            log_info(f"one_shot preset written: {shot_path}")
+        except Exception as e:
+            log_error(f"Failed to write one_shot preset: {repr(e)}")
+        # Одноразовые НЕ добавляем в глобальную очередь
+        return {"status": "ok", "preset_id": preset_id}
 
     # ====== Добавляем запись в глобальную очередь (только если не черновик) ======
     if not is_draft:
@@ -1263,6 +1285,16 @@ async def save_preset(payload: dict):
     return {"status": "ok", "preset_id": preset_id}
 
 
+@secure_auto.post("/preset/run_once")
+@secure_api.post("/preset/run_once")
+async def run_once_preset(payload: dict):
+    """
+    Одноразовый пресет уже записан в one_shot_presets при сохранении.
+    Этот endpoint — заглушка для совместимости с фронтендом.
+    """
+    return {"status": "ok"}
+
+
 @secure_api.get("/preset/list")
 @secure_auto.get("/preset/list")
 def list_presets(user_id: str, cabinet_id: str):
@@ -1304,6 +1336,7 @@ def list_presets(user_id: str, cabinet_id: str):
                     "preset_id": file.stem,
                     "created_at": created_at,
                     "updated_at": updated_at,
+                    "one_time": bool(data_clean.get("one_time", False)),
                     "data": data_clean
                 })
             except Exception as e:
