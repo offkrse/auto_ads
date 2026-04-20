@@ -23,7 +23,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.38"
+VersionApp = "1.39"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1917,15 +1917,20 @@ async def save_creatives(payload: dict):
 @secure_auto.post("/creatives/import_item")
 async def import_creative_item(payload: dict):
     """
-    Импортирует один элемент креатива из другого кабинета в текущий.
-    Дедупликация по хешу файла: если файл уже есть — не копируем, но регистрируем в VK целевого кабинета.
-    Загружает медиафайл в VK целевого кабинета и добавляет в sets.json.
+    Импортирует один элемент из другого кабинета:
+    - Находит физический файл в хранилище источника
+    - Дедупликация: если SHA-256 файла уже есть в target — файл на диске не копируется
+      (создаётся жёсткая ссылка или symlink чтобы занимать 0 доп. места),
+      но всё равно загружается в VK целевого кабинета (новый vk_id)
+    - Структура элемента в sets.json идентична обычной загрузке (/upload)
     """
-    user_id = str(payload.get("userId", ""))
-    source_cabinet_id = str(payload.get("sourceCabinetId", ""))
-    target_cabinet_id = str(payload.get("targetCabinetId", ""))
+    import hashlib
+
+    user_id = str(payload.get("userId", "")).strip()
+    source_cabinet_id = str(payload.get("sourceCabinetId", "")).strip()
+    target_cabinet_id = str(payload.get("targetCabinetId", "")).strip()
     item = payload.get("item", {})
-    target_set_id = payload.get("targetSetId")
+    target_set_id = payload.get("targetSetId")  # может быть None
 
     if not user_id or not source_cabinet_id or not target_cabinet_id or not item:
         raise HTTPException(400, "userId, sourceCabinetId, targetCabinetId, item required")
@@ -1933,68 +1938,68 @@ async def import_creative_item(payload: dict):
     try:
         data = ensure_user_structure(user_id)
 
-        # Получаем токен целевого кабинета
-        cab = next((c for c in data["cabinets"] if str(c.get("id")) == str(target_cabinet_id)), None)
-        if not cab or not cab.get("token"):
+        # ── Токен целевого кабинета ──────────────────────────────────────────
+        tgt_cab = next((c for c in data["cabinets"] if str(c.get("id")) == target_cabinet_id), None)
+        if not tgt_cab or not tgt_cab.get("token"):
             raise HTTPException(400, "Target cabinet not found or missing token")
-        real_token = os.getenv(cab["token"])
+        real_token = os.getenv(tgt_cab["token"])
         if not real_token:
-            raise HTTPException(500, f"Token {cab['token']} not found in environment")
+            raise HTTPException(500, f"Token {tgt_cab['token']} not found in environment")
 
-        item_id = str(item.get("id", ""))
         item_type = item.get("type", "video")
-        item_name = item.get("name", item_id)
+        item_name = item.get("name", "file")
+        is_image = item_type == "image"
 
-        # Ищем физический файл в хранилище исходного кабинета
+        # ── Ищем физический файл в источнике ────────────────────────────────
+        # Приоритет: vkByCabinet[sourceCabinetId], затем item.id
         src_storage = cabinet_storage(source_cabinet_id)
+        src_vk_id = str((item.get("vkByCabinet") or {}).get(source_cabinet_id, "")).strip()
+        item_id_raw = str(item.get("id", "")).strip()
+
         src_file: Path | None = None
-        for f_path in src_storage.iterdir():
-            if f_path.is_file() and f_path.name.startswith(f"{item_id}_"):
-                if not f_path.name.endswith(".json") and not f_path.name.endswith(".jpg"):
-                    src_file = f_path
+
+        def _find_media_file(storage: Path, prefix: str) -> Path | None:
+            """Ищет медиафайл (не .json/.jpg) начинающийся с prefix_"""
+            if not prefix:
+                return None
+            for fp in storage.iterdir():
+                if not fp.is_file():
+                    continue
+                if fp.suffix.lower() in (".json", ".jpg", ".lock", ".bad", ".tmp"):
+                    continue
+                if fp.name.startswith(f"{prefix}_"):
+                    return fp
+            return None
+
+        for candidate_id in dict.fromkeys([src_vk_id, item_id_raw]):  # без дублей, сохраняя порядок
+            if candidate_id:
+                src_file = _find_media_file(src_storage, candidate_id)
+                if src_file:
                     break
 
-        # Если файл не найден по vk_id — пробуем найти по vkByCabinet
         if src_file is None:
-            vk_by_cab = item.get("vkByCabinet", {})
-            src_vk_id = str(vk_by_cab.get(source_cabinet_id, ""))
-            if src_vk_id:
-                for f_path in src_storage.iterdir():
-                    if f_path.is_file() and f_path.name.startswith(f"{src_vk_id}_"):
-                        if not f_path.name.endswith(".json") and not f_path.name.endswith(".jpg"):
-                            src_file = f_path
-                            break
+            log_error(f"import_item: source file not found for item={item_id_raw} vk={src_vk_id} cabinet={source_cabinet_id}")
+            return JSONResponse(status_code=404, content={"error": "Source file not found on server", "skipped": True})
 
-        if src_file is None:
-            log_error(f"import_item: source file not found for item_id={item_id} in cabinet={source_cabinet_id}")
-            return JSONResponse(status_code=404, content={"error": "Source file not found", "skipped": True})
-
-        # Вычисляем хеш файла для дедупликации
-        import hashlib
+        # ── SHA-256 хеш для дедупликации ────────────────────────────────────
         with open(src_file, "rb") as fh:
             file_hash = hashlib.sha256(fh.read()).hexdigest()
 
-        # Проверяем дедупликацию в целевом кабинете по hash-файлу
         tgt_storage = cabinet_storage(target_cabinet_id)
         hash_index_path = tgt_storage / "import_hash_index.json"
+
+        # Загружаем/обновляем индекс хешей
         hash_index: dict = {}
         if hash_index_path.exists():
             try:
                 with open(hash_index_path, "r", encoding="utf-8") as fh:
                     hash_index = json.load(fh)
+                if not isinstance(hash_index, dict):
+                    hash_index = {}
             except Exception:
                 hash_index = {}
 
-        if file_hash in hash_index:
-            # Файл уже есть — возвращаем существующий vk_id
-            existing = hash_index[file_hash]
-            log_error(f"import_item: duplicate detected for {item_name}, existing vk_id={existing.get('vk_id')}")
-            # Всё равно добавляем в sets.json если нужно
-            _add_item_to_sets(user_id, target_cabinet_id, existing, target_set_id)
-            return {"status": "ok", "skipped": True, "vk_id": existing.get("vk_id"), "reason": "duplicate"}
-
-        # Загружаем в VK целевого кабинета
-        is_image = item_type == "image"
+        # ── Загружаем в VK целевого кабинета (всегда — нужен новый vk_id) ───
         vk_url = (
             "https://ads.vk.com/api/v2/content/static.json"
             if is_image else
@@ -2002,97 +2007,151 @@ async def import_creative_item(payload: dict):
         )
         headers_vk = {"Authorization": f"Bearer {real_token}"}
 
-        # Определяем размеры
-        width = item.get("width", 720)
-        height = item.get("height", 1280)
+        # Размеры
+        width, height = 720, 1280
         if is_image:
             try:
                 img = Image.open(src_file)
                 width, height = img.size
             except Exception:
                 pass
+        else:
+            # Берём из метаданных источника если есть
+            src_meta_stem = src_file.stem
+            src_meta_path = src_storage / f"{src_meta_stem}.json"
+            if src_meta_path.exists():
+                try:
+                    src_meta = json.loads(src_meta_path.read_text(encoding="utf-8"))
+                    width = src_meta.get("width", width)
+                    height = src_meta.get("height", height)
+                except Exception:
+                    pass
 
-        content_type = "image/jpeg" if is_image else "video/mp4"
+        content_type_vk = "image/jpeg" if is_image else "video/mp4"
+        log_error(f"import_item: uploading {src_file.name} ({file_hash[:8]}) to cabinet {target_cabinet_id}")
+
         with open(src_file, "rb") as fh:
-            files = {
-                "file": (src_file.name, fh, content_type),
+            files_vk = {
+                "file": (src_file.name, fh, content_type_vk),
                 "data": (None, json.dumps({"width": width, "height": height}), "application/json"),
             }
-            resp = requests.post(vk_url, headers=headers_vk, files=files, timeout=120)
+            resp_vk = requests.post(vk_url, headers=headers_vk, files=files_vk, timeout=180)
 
-        if resp.status_code != 200:
-            log_error(f"import_item VK upload failed: {resp.status_code} {resp.text[:200]}")
-            return JSONResponse(status_code=502, content={"error": f"VK upload failed: {resp.status_code}"})
+        if resp_vk.status_code != 200:
+            log_error(f"import_item: VK upload failed {resp_vk.status_code}: {resp_vk.text[:300]}")
+            return JSONResponse(status_code=502, content={"error": f"VK upload failed: {resp_vk.status_code} {resp_vk.text[:200]}"})
 
-        resp_json = resp.json()
-        vk_id = resp_json.get("id")
-        if not vk_id:
-            raise HTTPException(500, "VK did not return id")
+        resp_json = resp_vk.json()
+        new_vk_id = resp_json.get("id")
+        if not new_vk_id:
+            raise HTTPException(500, "VK did not return id after upload")
 
-        # Копируем файл в хранилище целевого кабинета (жёсткая ссылка или копия)
-        final_name = f"{vk_id}_{item_name}"
+        new_vk_id_str = str(new_vk_id)
+
+        # ── Сохраняем файл на диск (без дублирования) ───────────────────────
+        display_name = next_display_name(tgt_storage, item_name)
+        final_name = f"{new_vk_id_str}_{display_name}"
         final_path = tgt_storage / final_name
-        try:
-            os.link(src_file, final_path)  # жёсткая ссылка — не занимает доп. место
-        except (OSError, AttributeError):
-            shutil.copy2(src_file, final_path)  # fallback: копия
 
-        # Генерируем превью для видео
+        if file_hash in hash_index:
+            # Файл уже есть физически — делаем жёсткую ссылку (0 доп. места)
+            existing_url = hash_index[file_hash].get("stored_path", "")
+            existing_path = Path(existing_url) if existing_url else None
+            linked = False
+            if existing_path and existing_path.exists():
+                try:
+                    os.link(str(existing_path), str(final_path))
+                    linked = True
+                    log_error(f"import_item: hard-linked {existing_path.name} → {final_name} (no disk duplication)")
+                except OSError:
+                    pass
+            if not linked:
+                # Fallback: copy (cross-device или hardlink недоступен)
+                shutil.copy2(str(src_file), str(final_path))
+        else:
+            # Первый импорт этого файла — просто создаём жёсткую ссылку на источник
+            try:
+                os.link(str(src_file), str(final_path))
+                log_error(f"import_item: hard-linked source {src_file.name} → {final_name}")
+            except OSError:
+                shutil.copy2(str(src_file), str(final_path))
+
+        # ── Генерируем превью для видео ──────────────────────────────────────
         thumb_url = None
         if not is_image:
             try:
                 thumb_name = f"{final_name}.jpg"
                 thumb_path = tgt_storage / thumb_name
                 proc = subprocess.run(
-                    ["ffmpeg", "-y", "-ss", "1", "-i", str(final_path), "-vframes", "1", "-vf", "scale=360:-1", str(thumb_path)],
+                    ["ffmpeg", "-y", "-ss", "1", "-i", str(final_path),
+                     "-vframes", "1", "-vf", "scale=360:-1", str(thumb_path)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 )
                 if proc.returncode == 0 and thumb_path.exists():
                     thumb_url = f"/auto_ads/video/{target_cabinet_id}/{thumb_name}"
-            except Exception:
-                pass
+                else:
+                    log_error(f"import_item: ffmpeg failed: {proc.stderr[:200]}")
+            except Exception as e:
+                log_error(f"import_item: thumb error: {repr(e)}")
 
-        # Записываем мета-файл
+        # ── Мета-файл ────────────────────────────────────────────────────────
         meta = {
             "vk_response": resp_json,
-            "cabinet_id": str(target_cabinet_id),
-            "vk_id": vk_id,
-            "display_name": item_name,
+            "cabinet_id": target_cabinet_id,
+            "vk_id": new_vk_id_str,
+            "display_name": display_name,
             "stored_file": f"/auto_ads/video/{target_cabinet_id}/{final_name}",
             "thumb_url": thumb_url,
-            "content_type": content_type,
+            "content_type": content_type_vk,
             "width": width,
             "height": height,
             "imported_from": source_cabinet_id,
+            "source_hash": file_hash,
             "uploaded_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "type": item_type,
-            "source_hash": file_hash,
         }
         atomic_write_json(tgt_storage / f"{os.path.splitext(final_name)[0]}.json", meta)
 
-        # Обновляем hash-index для будущей дедупликации
-        hash_index[file_hash] = {"vk_id": vk_id, "name": item_name, "type": item_type,
-                                  "url": f"/auto_ads/video/{target_cabinet_id}/{final_name}",
-                                  "thumbUrl": thumb_url}
+        # ── Обновляем hash-index ─────────────────────────────────────────────
+        hash_index[file_hash] = {
+            "vk_id": new_vk_id_str,
+            "name": display_name,
+            "type": item_type,
+            "stored_path": str(final_path),
+            "url": f"/auto_ads/video/{target_cabinet_id}/{final_name}",
+            "thumb_url": thumb_url,
+        }
         atomic_write_json(hash_index_path, hash_index)
 
-        new_item = {
-            "id": item_id,  # сохраняем исходный id для совместимости
-            "name": item_name,
-            "type": item_type,
+        # ── Собираем элемент для sets.json (структура = /upload) ─────────────
+        new_item_for_sets = {
+            "id": new_vk_id_str,
             "url": f"/auto_ads/video/{target_cabinet_id}/{final_name}",
-            "thumbUrl": thumb_url,
-            "vkByCabinet": {**item.get("vkByCabinet", {}), str(target_cabinet_id): str(vk_id)},
-            "urls": {**item.get("urls", {}), str(target_cabinet_id): f"/auto_ads/video/{target_cabinet_id}/{final_name}"},
+            "name": display_name,
+            "type": item_type,
+            "uploaded": True,
+            "vkByCabinet": {
+                **{k: v for k, v in (item.get("vkByCabinet") or {}).items()},
+                target_cabinet_id: new_vk_id_str,
+            },
+            "urls": {
+                **{k: v for k, v in (item.get("urls") or {}).items()},
+                target_cabinet_id: f"/auto_ads/video/{target_cabinet_id}/{final_name}",
+            },
         }
+        if thumb_url:
+            new_item_for_sets["thumbUrl"] = thumb_url
 
-        _add_item_to_sets(user_id, target_cabinet_id, new_item, target_set_id)
-        return {"status": "ok", "imported": True, "vk_id": vk_id, "item": new_item}
+        # ── Добавляем в sets.json ────────────────────────────────────────────
+        _add_item_to_sets(user_id, target_cabinet_id, new_item_for_sets, target_set_id)
+
+        log_error(f"import_item: OK — new_vk_id={new_vk_id_str}, file={final_name}, hash={file_hash[:8]}")
+        return {"status": "ok", "imported": True, "vk_id": new_vk_id_str, "item": new_item_for_sets}
 
     except HTTPException:
         raise
     except Exception as e:
-        log_error(f"import_item error: {repr(e)}")
+        log_error(f"import_item unhandled error: {repr(e)}")
         return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 
