@@ -6,6 +6,7 @@ from urllib.parse import quote, parse_qsl
 from pathlib import Path
 from io import BytesIO
 from PIL import Image
+from app_ai_claude import build_router as build_ai_claude_router
 import hmac, hashlib
 import requests
 import subprocess
@@ -23,7 +24,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "1.39"
+VersionApp = "2.00"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -5625,6 +5626,13 @@ def get_ai_stats_launch_time(user_id: str = Query(...), acc_name: str = Query(No
 # -------------------------------------
 #   INCLUDE ROUTERS
 # -------------------------------------
+# --- Claude integration router ---
+ai_claude_router = build_ai_claude_router(
+    require_user_dep=require_tg_user,
+    users_dir=USERS_DIR,
+    base_dir=BASE_DIR,
+)
+app.include_router(ai_claude_router)
 # ВАЖНО: Все API роутеры должны быть включены ДО mount статики!
 # auth_router - без защиты, для веб-авторизации
 app.include_router(auth_router)
