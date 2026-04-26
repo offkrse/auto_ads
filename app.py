@@ -6,7 +6,7 @@ from urllib.parse import quote, parse_qsl
 from pathlib import Path
 from io import BytesIO
 from PIL import Image
-from app_ai_claude import build_router as build_ai_claude_router
+from auto_ads.app_ai_claude import build_router as build_ai_claude_router
 import hmac, hashlib
 import requests
 import subprocess
@@ -24,7 +24,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "2.00"
+VersionApp = "2.01"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
