@@ -25,7 +25,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "2.02"
+VersionApp = "2.03"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3779,6 +3779,231 @@ def create_sharing_key(payload: dict):
     except requests.RequestException as e:
         log_error(f"sharing_keys request error: {repr(e)}")
         raise HTTPException(500, f"Request error: {str(e)}")
+
+
+# -------------------------------------
+#   AUDIENCE PARSER (only for admin)
+# -------------------------------------
+
+@secure_api.get("/vk/parser/all_cabinets")
+@secure_auto.get("/vk/parser/all_cabinets")
+def get_all_cabinets_for_parser():
+    """
+    Возвращает список всех кабинетов всех пользователей (для парсера аудиторий).
+    """
+    result = []
+    seen_ids = set()
+    try:
+        for user_dir in USERS_DIR.iterdir():
+            if not user_dir.is_dir():
+                continue
+            uid = user_dir.name
+            info_file = user_dir / f"{uid}.json"
+            if not info_file.exists():
+                continue
+            try:
+                data = json.loads(info_file.read_text(encoding="utf-8"))
+                for cab in data.get("cabinets", []):
+                    cid = str(cab.get("id", ""))
+                    if cid and cid != "all" and cid not in seen_ids:
+                        seen_ids.add(cid)
+                        result.append({
+                            "id": cid,
+                            "name": cab.get("name", cid),
+                            "user_id": uid,
+                        })
+            except Exception:
+                continue
+    except Exception as e:
+        log_error(f"get_all_cabinets_for_parser error: {repr(e)}")
+    return {"cabinets": result}
+
+
+@secure_api.post("/vk/parser/fetch_objects")
+@secure_auto.post("/vk/parser/fetch_objects")
+def parser_fetch_objects(payload: dict):
+    """
+    Получает аудитории или списки из кабинета по внешнему токену.
+    payload: { "token": "...", "object_type": "audiences"|"lists" }
+    """
+    token = str(payload.get("token", "")).strip()
+    object_type = str(payload.get("object_type", "lists")).strip()
+
+    if not token:
+        raise HTTPException(400, "token required")
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    items = []
+    try:
+        if object_type == "audiences":
+            # Аудитории = remarketing segments
+            url = "https://ads.vk.com/api/v2/remarketing/segments.json?limit=200"
+            resp = requests.get(url, headers=headers, timeout=20)
+            if resp.status_code == 401:
+                return JSONResponse(status_code=401, content={"error": "Неверный токен"})
+            data = resp.json()
+            raw = data.get("items") or data.get("segments") or []
+            items = [{"id": str(it.get("id")), "name": it.get("name", "")} for it in raw]
+        else:
+            # Списки = users_lists (remarketing)
+            # Получаем количество
+            r0 = requests.get(
+                "https://ads.vk.com/api/v3/remarketing/users_lists.json?limit=1",
+                headers=headers, timeout=15
+            )
+            if r0.status_code == 401:
+                return JSONResponse(status_code=401, content={"error": "Неверный токен"})
+            count = int(r0.json().get("count", 0))
+            # Грузим последние 200 (самые новые)
+            offset = max(0, count - 200)
+            r1 = requests.get(
+                f"https://ads.vk.com/api/v3/remarketing/users_lists.json?limit=200&offset={offset}",
+                headers=headers, timeout=20
+            )
+            raw = r1.json().get("items") or []
+            items = [{"id": str(it.get("id")), "name": it.get("name", "")} for it in raw]
+    except Exception as e:
+        log_error(f"parser_fetch_objects error: {repr(e)}")
+        raise HTTPException(500, f"Ошибка при запросе к VK: {repr(e)}")
+
+    return {"items": items, "count": len(items)}
+
+
+@secure_api.post("/vk/parser/merge_and_share")
+@secure_auto.post("/vk/parser/merge_and_share")
+def parser_merge_and_share(payload: dict):
+    """
+    Объединяет выбранные аудитории/списки из внешнего кабинета и расшаривает их в целевые кабинеты.
+    payload:
+    {
+        "userId": "...",
+        "source_token": "...",
+        "object_type": "audiences"|"lists",
+        "object_ids": [123, 456, ...],    # id объектов из источника
+        "merge_name": "Название объединённой аудитории",
+        "target_cabinet_ids": ["111", "222", ...]   # кабинеты куда расшарить
+    }
+    """
+    user_id = str(payload.get("userId", "")).strip()
+    source_token = str(payload.get("source_token", "")).strip()
+    object_type = str(payload.get("object_type", "lists")).strip()
+    raw_ids = payload.get("object_ids") or []
+    merge_name = str(payload.get("merge_name", "Парсер аудитория")).strip()
+    target_cabinet_ids = [str(x) for x in (payload.get("target_cabinet_ids") or [])]
+
+    if not source_token:
+        raise HTTPException(400, "source_token required")
+    if not raw_ids:
+        raise HTTPException(400, "object_ids required")
+    if not target_cabinet_ids:
+        raise HTTPException(400, "target_cabinet_ids required")
+    if not merge_name:
+        merge_name = "Парсер аудитория"
+
+    try:
+        object_ids = [int(x) for x in raw_ids]
+    except Exception:
+        raise HTTPException(400, "object_ids must be numeric")
+
+    src_headers = {
+        "Authorization": f"Bearer {source_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    results = []
+
+    # Для каждого целевого кабинета:
+    # 1. Создать sharing_key из источника
+    # 2. Активировать ключ в целевом кабинете
+    for target_cab_id in target_cabinet_ids:
+        step = "lookup_target"
+        try:
+            # Найти токен целевого кабинета у любого пользователя
+            target_token = None
+            for u_dir in USERS_DIR.iterdir():
+                if not u_dir.is_dir():
+                    continue
+                uid = u_dir.name
+                info_file = u_dir / f"{uid}.json"
+                if not info_file.exists():
+                    continue
+                try:
+                    data = json.loads(info_file.read_text(encoding="utf-8"))
+                    cab = next((c for c in data.get("cabinets", []) if str(c.get("id")) == target_cab_id), None)
+                    if cab and cab.get("token"):
+                        tok_env = os.getenv(cab["token"])
+                        if tok_env:
+                            target_token = tok_env
+                            break
+                except Exception:
+                    continue
+
+            if not target_token:
+                results.append({"cabinet_id": target_cab_id, "status": "error", "error": "Токен кабинета не найден"})
+                continue
+
+            target_headers = {
+                "Authorization": f"Bearer {target_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+
+            # 1. Создать sharing key из источника
+            step = "create_sharing_key"
+            vk_type = "users_list" if object_type == "lists" else "remarketing_segment"
+            sources = [{"object_type": vk_type, "object_id": oid} for oid in object_ids]
+            share_resp = requests.post(
+                "https://ads.vk.com/api/v2/sharing_keys.json",
+                headers=src_headers,
+                json={"sources": sources, "users": [], "send_email": False},
+                timeout=30,
+            )
+            if share_resp.status_code != 200:
+                err = share_resp.json() if share_resp.content else {"raw": share_resp.text[:300]}
+                results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": err})
+                continue
+
+            share_data = share_resp.json()
+            sharing_key = share_data.get("sharing_key")
+            if not sharing_key:
+                results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": "Нет sharing_key в ответе VK"})
+                continue
+
+            # 2. Активировать ключ в целевом кабинете
+            step = "activate_sharing_key"
+            act_resp = requests.post(
+                f"https://ads.vk.com/api/v2/sharing_keys/{sharing_key}.json",
+                headers=target_headers,
+                json={},
+                timeout=30,
+            )
+            act_data = act_resp.json() if act_resp.content else {}
+            if act_resp.status_code != 200:
+                results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": act_data})
+                continue
+
+            results.append({
+                "cabinet_id": target_cab_id,
+                "status": "ok",
+                "sharing_key": sharing_key,
+                "activate_response": act_data,
+            })
+
+        except Exception as e:
+            log_error(f"parser_merge_and_share error cab={target_cab_id} step={step}: {repr(e)}")
+            results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": str(e)})
+
+    all_ok = all(r["status"] == "ok" for r in results)
+    return {
+        "status": "ok" if all_ok else ("partial" if any(r["status"] == "ok" for r in results) else "error"),
+        "results": results,
+    }
 
 
 # -------------------------------------
