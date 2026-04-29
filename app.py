@@ -25,7 +25,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "2.03"
+VersionApp = "2.04"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3824,13 +3824,18 @@ def get_all_cabinets_for_parser():
 def parser_fetch_objects(payload: dict):
     """
     Получает аудитории или списки из кабинета по внешнему токену.
-    payload: { "token": "...", "object_type": "audiences"|"lists" }
+    payload: { "token": "...", "object_type": "audiences"|"lists", "name_filters": [...] }
+    Возвращает items и resolved_filters (с раскрытыми шаблонами).
     """
     token = str(payload.get("token", "")).strip()
     object_type = str(payload.get("object_type", "lists")).strip()
+    raw_filters: list = payload.get("name_filters") or []
 
     if not token:
         raise HTTPException(400, "token required")
+
+    # Раскрываем шаблоны в фильтрах (UTC+4)
+    resolved_filters = [resolve_filter_template(f) for f in raw_filters if str(f).strip()]
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -3871,7 +3876,7 @@ def parser_fetch_objects(payload: dict):
         log_error(f"parser_fetch_objects error: {repr(e)}")
         raise HTTPException(500, f"Ошибка при запросе к VK: {repr(e)}")
 
-    return {"items": items, "count": len(items)}
+    return {"items": items, "count": len(items), "resolved_filters": resolved_filters}
 
 
 @secure_api.post("/vk/parser/merge_and_share")
@@ -4004,6 +4009,266 @@ def parser_merge_and_share(payload: dict):
         "status": "ok" if all_ok else ("partial" if any(r["status"] == "ok" for r in results) else "error"),
         "results": results,
     }
+
+
+# -------------------------------------
+#   PARSER JOBS PERSISTENCE & SCHEDULER
+# -------------------------------------
+PARSER_JOBS_FILE = DATA_DIR / "parser_jobs.json"
+
+# ---- шаблонные подстановки в фильтрах ----
+import re as _re
+
+def resolve_filter_template(s: str, now_utc4: "datetime | None" = None) -> str:
+    """
+    Раскрывает шаблоны в строке фильтра.
+    Поддерживаемые шаблоны:
+      {СЕГОДНЯ}              → YYYY-MM-DD  (UTC+4)
+      {СЕГОДНЯ(YYYY-MM-DD)}  → YYYY-MM-DD  (произвольный strftime-формат)
+      {ВЧЕРА}                → вчера UTC+4
+      {ВЧЕРА(fmt)}
+      {ЗАВТРА}               → завтра UTC+4
+      {ЗАВТРА(fmt)}
+    """
+    from datetime import datetime, timezone, timedelta
+    if now_utc4 is None:
+        now_utc4 = datetime.now(timezone.utc) + timedelta(hours=4)
+
+    def _replace(m: "_re.Match") -> str:
+        keyword = m.group(1).upper()   # СЕГОДНЯ / ВЧЕРА / ЗАВТРА
+        fmt     = m.group(2)           # None или строка формата
+        if keyword in ("СЕГОДНЯ", "TODAY"):
+            dt = now_utc4
+        elif keyword in ("ВЧЕРА", "YESTERDAY"):
+            dt = now_utc4 - timedelta(days=1)
+        elif keyword in ("ЗАВТРА", "TOMORROW"):
+            dt = now_utc4 + timedelta(days=1)
+        else:
+            return m.group(0)  # неизвестный — оставить как есть
+        fmt = fmt or "YYYY-MM-DD"
+        # Конвертируем нашу нотацию в strftime
+        strfmt = (fmt
+            .replace("YYYY", "%Y")
+            .replace("YY",   "%y")
+            .replace("MM",   "%m")
+            .replace("DD",   "%d")
+            .replace("HH",   "%H")
+            .replace("mm",   "%M")
+            .replace("SS",   "%S")
+        )
+        return dt.strftime(strfmt)
+
+    # Pattern: {KEYWORD} or {KEYWORD(format)}
+    pattern = _re.compile(
+        r'\{(СЕГОДНЯ|TODAY|ВЧЕРА|YESTERDAY|ЗАВТРА|TOMORROW)(?:\(([^)]*)\))?\}',
+        _re.IGNORECASE
+    )
+    return pattern.sub(_replace, s)
+
+def read_parser_jobs() -> list:
+    if not PARSER_JOBS_FILE.exists():
+        return []
+    try:
+        return json.loads(PARSER_JOBS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+def write_parser_jobs(jobs: list):
+    atomic_write_json(PARSER_JOBS_FILE, jobs)
+
+
+@secure_api.get("/vk/parser/jobs")
+@secure_auto.get("/vk/parser/jobs")
+def get_parser_jobs(user_id: str = Query(...)):
+    jobs = [j for j in read_parser_jobs() if j.get("user_id") == user_id]
+    return {"jobs": jobs}
+
+
+@secure_api.post("/vk/parser/jobs/save")
+@secure_auto.post("/vk/parser/jobs/save")
+def save_parser_job(payload: dict):
+    """
+    Сохраняет задачу парсера (с расписанием).
+    payload содержит поле schedule_time_utc4 (HH:MM в UTC+4),
+    конвертируем в UTC при сохранении.
+    """
+    user_id = str(payload.get("user_id", "")).strip()
+    job_id = str(payload.get("job_id", "")).strip()
+    if not user_id or not job_id:
+        raise HTTPException(400, "user_id and job_id required")
+
+    # Конвертация UTC+4 -> UTC: вычитаем 4 часа
+    schedule_time_utc4 = str(payload.get("schedule_time_utc4", "")).strip()  # "HH:MM"
+    schedule_time_utc = ""
+    if schedule_time_utc4:
+        try:
+            hh, mm = map(int, schedule_time_utc4.split(":"))
+            total_minutes = hh * 60 + mm - 4 * 60
+            total_minutes %= 24 * 60
+            utc_hh = total_minutes // 60
+            utc_mm = total_minutes % 60
+            schedule_time_utc = f"{utc_hh:02d}:{utc_mm:02d}"
+        except Exception:
+            schedule_time_utc = ""
+
+    jobs = read_parser_jobs()
+    existing = next((j for j in jobs if j.get("job_id") == job_id), None)
+
+    job_data = {
+        "job_id": job_id,
+        "user_id": user_id,
+        "source_token": payload.get("source_token", ""),
+        "object_type": payload.get("object_type", "lists"),
+        "name_filters": payload.get("name_filters", []),
+        "object_ids": payload.get("object_ids", []),
+        "merge_name": payload.get("merge_name", ""),
+        "target_cabinet_ids": payload.get("target_cabinet_ids", []),
+        "schedule_time_utc4": schedule_time_utc4,
+        "schedule_time_utc": schedule_time_utc,
+        "enabled": bool(payload.get("enabled", True)),
+        "last_run_date": existing.get("last_run_date", "") if existing else "",
+        "last_run_status": existing.get("last_run_status", "") if existing else "",
+    }
+
+    if existing:
+        jobs = [job_data if j.get("job_id") == job_id else j for j in jobs]
+    else:
+        jobs.append(job_data)
+
+    write_parser_jobs(jobs)
+    return {"status": "ok", "job": job_data}
+
+
+@secure_api.post("/vk/parser/jobs/delete")
+@secure_auto.post("/vk/parser/jobs/delete")
+def delete_parser_job(payload: dict):
+    job_id = str(payload.get("job_id", "")).strip()
+    if not job_id:
+        raise HTTPException(400, "job_id required")
+    jobs = [j for j in read_parser_jobs() if j.get("job_id") != job_id]
+    write_parser_jobs(jobs)
+    return {"status": "ok"}
+
+
+@secure_api.post("/vk/parser/jobs/run_scheduled")
+@secure_auto.post("/vk/parser/jobs/run_scheduled")
+def run_scheduled_parser_jobs():
+    """
+    Вызывается внешним cron-скриптом (например, каждую минуту).
+    Проверяет все задачи с enabled=true, сравнивает schedule_time_utc
+    с текущим временем UTC (с точностью до минуты), и запускает те, которые ещё не запускались сегодня.
+    """
+    from datetime import datetime, timezone
+
+    now_utc = datetime.now(timezone.utc)
+    now_hhmm = now_utc.strftime("%H:%M")
+    today_str = now_utc.strftime("%Y-%m-%d")
+
+    jobs = read_parser_jobs()
+    ran = []
+    errors = []
+
+    for job in jobs:
+        if not job.get("enabled"):
+            continue
+        sched = job.get("schedule_time_utc", "")
+        if not sched or sched != now_hhmm:
+            continue
+        if job.get("last_run_date") == today_str:
+            continue  # уже запускалось сегодня
+
+        job_id = job["job_id"]
+        user_id = job["user_id"]
+        source_token = job.get("source_token", "")
+        object_type = job.get("object_type", "lists")
+        object_ids = [int(x) for x in (job.get("object_ids") or []) if str(x).strip()]
+        merge_name = job.get("merge_name", "Парсер аудитория")
+        target_cabinet_ids = [str(x) for x in (job.get("target_cabinet_ids") or [])]
+
+        if not source_token or not object_ids or not target_cabinet_ids:
+            continue
+
+        src_headers = {
+            "Authorization": f"Bearer {source_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        job_results = []
+        for target_cab_id in target_cabinet_ids:
+            step = "lookup"
+            try:
+                target_token = None
+                for u_dir in USERS_DIR.iterdir():
+                    if not u_dir.is_dir():
+                        continue
+                    uid = u_dir.name
+                    info_file = u_dir / f"{uid}.json"
+                    if not info_file.exists():
+                        continue
+                    try:
+                        data = json.loads(info_file.read_text(encoding="utf-8"))
+                        cab = next((c for c in data.get("cabinets", []) if str(c.get("id")) == target_cab_id), None)
+                        if cab and cab.get("token"):
+                            tok_env = os.getenv(cab["token"])
+                            if tok_env:
+                                target_token = tok_env
+                                break
+                    except Exception:
+                        continue
+
+                if not target_token:
+                    job_results.append({"cabinet_id": target_cab_id, "status": "error", "error": "Токен не найден"})
+                    continue
+
+                target_headers = {
+                    "Authorization": f"Bearer {target_token}",
+                    "Content-Type": "application/json",
+                }
+
+                step = "create_sharing_key"
+                vk_type = "users_list" if object_type == "lists" else "remarketing_segment"
+                sources = [{"object_type": vk_type, "object_id": oid} for oid in object_ids]
+                share_resp = requests.post(
+                    "https://ads.vk.com/api/v2/sharing_keys.json",
+                    headers=src_headers,
+                    json={"sources": sources, "users": [], "send_email": False},
+                    timeout=30,
+                )
+                if share_resp.status_code != 200:
+                    job_results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": share_resp.text[:300]})
+                    continue
+
+                sharing_key = share_resp.json().get("sharing_key")
+                if not sharing_key:
+                    job_results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": "Нет sharing_key"})
+                    continue
+
+                step = "activate"
+                act_resp = requests.post(
+                    f"https://ads.vk.com/api/v2/sharing_keys/{sharing_key}.json",
+                    headers=target_headers,
+                    json={},
+                    timeout=30,
+                )
+                if act_resp.status_code != 200:
+                    job_results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": act_resp.text[:300]})
+                    continue
+
+                job_results.append({"cabinet_id": target_cab_id, "status": "ok"})
+
+            except Exception as e:
+                log_error(f"run_scheduled_parser job={job_id} cab={target_cab_id} step={step}: {repr(e)}")
+                job_results.append({"cabinet_id": target_cab_id, "status": "error", "error": str(e)})
+
+        # Обновляем last_run_date и статус
+        all_ok = all(r["status"] == "ok" for r in job_results)
+        job["last_run_date"] = today_str
+        job["last_run_status"] = "ok" if all_ok else ("partial" if any(r["status"] == "ok" for r in job_results) else "error")
+        ran.append({"job_id": job_id, "results": job_results})
+
+    write_parser_jobs(jobs)
+    return {"status": "ok", "ran": ran, "errors": errors}
 
 
 # -------------------------------------
