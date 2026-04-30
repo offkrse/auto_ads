@@ -8,7 +8,6 @@ from io import BytesIO
 from PIL import Image
 from auto_ads.app_ai_claude import build_router as build_ai_claude_router
 from auto_ads.app_ai_claude_logs import build_router as build_ai_claude_logs_router
-from auto_ads.app_ai_claude_extra import build_router as build_ai_claude_extra_router
 import hmac, hashlib
 import requests
 import subprocess
@@ -26,7 +25,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "2.05"
+VersionApp = "2.06"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3877,7 +3876,7 @@ def parser_fetch_objects(payload: dict):
         log_error(f"parser_fetch_objects error: {repr(e)}")
         raise HTTPException(500, f"Ошибка при запросе к VK: {repr(e)}")
 
-    return {"items": items, "count": len(items), "resolved_filters": resolved_filters}
+    return {"items": items, "count": len(items), "resolved_filters": resolved_filters, "matched_ids": apply_name_filters(raw_filters, items)}
 
 
 @secure_api.post("/vk/parser/merge_and_share")
@@ -4066,6 +4065,35 @@ def resolve_filter_template(s: str, now_utc4: "datetime | None" = None) -> str:
     )
     return pattern.sub(_replace, s)
 
+
+def filter_matches_name(resolved_filter: str, name: str) -> bool:
+    """
+    Проверяет, подходит ли имя под фильтр.
+    Если в фильтре есть *, используется glob-подобное сравнение (fnmatch).
+    Иначе — простой поиск подстроки (case-insensitive).
+    """
+    import fnmatch
+    f = resolved_filter.strip()
+    n = name.strip()
+    if "*" in f:
+        return fnmatch.fnmatch(n.lower(), f.lower())
+    return f.lower() in n.lower()
+
+
+def apply_name_filters(filters: list[str], items: list[dict], now_utc4=None) -> list[str]:
+    """
+    Возвращает список id объектов, подходящих под любой из фильтров.
+    Шаблоны раскрываются перед сравнением.
+    """
+    resolved = [resolve_filter_template(f, now_utc4) for f in filters if str(f).strip()]
+    if not resolved:
+        return [str(it["id"]) for it in items]
+    return [
+        str(it["id"]) for it in items
+        if any(filter_matches_name(rf, it.get("name", "")) for rf in resolved)
+    ]
+
+
 def read_parser_jobs() -> list:
     if not PARSER_JOBS_FILE.exists():
         return []
@@ -4182,11 +4210,11 @@ def run_scheduled_parser_jobs():
         user_id = job["user_id"]
         source_token = job.get("source_token", "")
         object_type = job.get("object_type", "lists")
-        object_ids = [int(x) for x in (job.get("object_ids") or []) if str(x).strip()]
+        name_filters = job.get("name_filters") or []
         merge_name = job.get("merge_name", "Парсер аудитория")
         target_cabinet_ids = [str(x) for x in (job.get("target_cabinet_ids") or [])]
 
-        if not source_token or not object_ids or not target_cabinet_ids:
+        if not source_token or not target_cabinet_ids:
             continue
 
         src_headers = {
@@ -4194,6 +4222,48 @@ def run_scheduled_parser_jobs():
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+
+        # --- Resolve object_ids at runtime (re-fetch + apply filters with templates) ---
+        from datetime import timezone, timedelta as _td
+        now_utc4 = datetime.now(timezone.utc) + _td(hours=4)
+        resolve_name = resolve_filter_template("", now_utc4)  # warm up
+
+        try:
+            if object_type == "audiences":
+                r = requests.get(
+                    "https://ads.vk.com/api/v2/remarketing/segments.json?limit=200",
+                    headers=src_headers, timeout=20
+                )
+                raw_items = (r.json().get("items") or r.json().get("segments") or [])
+            else:
+                r0 = requests.get(
+                    "https://ads.vk.com/api/v3/remarketing/users_lists.json?limit=1",
+                    headers=src_headers, timeout=15
+                )
+                count = int(r0.json().get("count", 0))
+                offset = max(0, count - 200)
+                r1 = requests.get(
+                    f"https://ads.vk.com/api/v3/remarketing/users_lists.json?limit=200&offset={offset}",
+                    headers=src_headers, timeout=20
+                )
+                raw_items = r1.json().get("items") or []
+
+            items_for_filter = [{"id": str(it.get("id")), "name": it.get("name", "")} for it in raw_items]
+            matched_id_strs = apply_name_filters(name_filters, items_for_filter, now_utc4)
+            object_ids = [int(x) for x in matched_id_strs if x]
+        except Exception as e:
+            log_error(f"run_scheduled_parser job={job_id}: fetch/filter error: {repr(e)}")
+            job["last_run_date"] = today_str
+            job["last_run_status"] = "error"
+            ran.append({"job_id": job_id, "results": [], "fetch_error": str(e)})
+            continue
+
+        if not object_ids:
+            log_error(f"run_scheduled_parser job={job_id}: no objects matched filters {name_filters}")
+            job["last_run_date"] = today_str
+            job["last_run_status"] = "error"
+            ran.append({"job_id": job_id, "results": [], "fetch_error": "Нет объектов, подходящих под фильтры"})
+            continue
 
         job_results = []
         for target_cab_id in target_cabinet_ids:
@@ -6133,14 +6203,6 @@ ai_claude_logs_router = build_ai_claude_logs_router(
     base_dir=BASE_DIR,
 )
 app.include_router(ai_claude_logs_router)
-
-ai_claude_extra_router = build_ai_claude_extra_router(
-    require_user_dep=require_tg_user,
-    users_dir=USERS_DIR,
-    base_dir=BASE_DIR,
-)
-app.include_router(ai_claude_extra_router)
-
 # ВАЖНО: Все API роутеры должны быть включены ДО mount статики!
 # auth_router - без защиты, для веб-авторизации
 app.include_router(auth_router)
