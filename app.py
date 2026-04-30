@@ -26,7 +26,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "2.07"
+VersionApp = "2.09"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3977,24 +3977,26 @@ def parser_merge_and_share(payload: dict):
 
     # Создаём один ключ для сегмента (один раз, не в цикле)
     try:
+        share_payload = {
+            "sources": [{"object_type": "segment", "object_id": segment_id}],
+            "users": [],
+            "send_email": False,
+        }
         share_resp = requests.post(
             "https://ads.vk.com/api/v2/sharing_keys.json",
             headers=src_headers,
-            json={
-                "sources": [{"object_type": "remarketing_segment", "object_id": segment_id}],
-                "users": [],
-                "send_email": False,
-            },
+            json=share_payload,
             timeout=30,
         )
         share_data = share_resp.json() if share_resp.content else {}
+        log_error(f"parser sharing_key status={share_resp.status_code} payload={share_payload} response={share_data}")
         if share_resp.status_code != 200:
-            log_error(f"parser sharing_key failed: {share_data}")
             return JSONResponse(status_code=502, content={
                 "status": "error",
                 "step": "create_sharing_key",
                 "segment_id": segment_id,
-                "error": share_data,
+                "vk_status": share_resp.status_code,
+                "vk_response": share_data,
             })
         sharing_key = share_data.get("sharing_key")
         if not sharing_key:
@@ -4002,7 +4004,8 @@ def parser_merge_and_share(payload: dict):
                 "status": "error",
                 "step": "create_sharing_key",
                 "segment_id": segment_id,
-                "error": f"Нет sharing_key в ответе VK: {share_data}",
+                "error": f"Нет sharing_key в ответе VK",
+                "vk_response": share_data,
             })
     except Exception as e:
         log_error(f"parser sharing_key request error: {repr(e)}")
@@ -4050,15 +4053,22 @@ def parser_merge_and_share(payload: dict):
                 timeout=30,
             )
             act_data = act_resp.json() if act_resp.content else {}
+            log_error(f"parser activate_key cab={target_cab_id} status={act_resp.status_code} response={act_data}")
             if act_resp.status_code != 200:
-                results.append({"cabinet_id": target_cab_id, "status": "error",
-                                 "step": step, "error": act_data})
+                results.append({
+                    "cabinet_id": target_cab_id,
+                    "status": "error",
+                    "step": step,
+                    "error": act_data,
+                    "vk_status": act_resp.status_code,
+                    "vk_response": act_data,
+                })
                 continue
 
             results.append({
                 "cabinet_id": target_cab_id,
                 "status": "ok",
-                "activate_response": act_data,
+                "vk_response": act_data,
             })
 
         except Exception as e:
