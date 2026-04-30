@@ -26,7 +26,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "2.06"
+VersionApp = "2.07"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3884,22 +3884,17 @@ def parser_fetch_objects(payload: dict):
 @secure_auto.post("/vk/parser/merge_and_share")
 def parser_merge_and_share(payload: dict):
     """
-    Объединяет выбранные аудитории/списки из внешнего кабинета и расшаривает их в целевые кабинеты.
-    payload:
-    {
-        "userId": "...",
-        "source_token": "...",
-        "object_type": "audiences"|"lists",
-        "object_ids": [123, 456, ...],    # id объектов из источника
-        "merge_name": "Название объединённой аудитории",
-        "target_cabinet_ids": ["111", "222", ...]   # кабинеты куда расшарить
-    }
+    Правильный порядок:
+    1. Создать объединённый сегмент (remarketing/segments) в кабинете-источнике
+       из выбранных списков (object_type=lists) или других сегментов (object_type=audiences)
+    2. Создать sharing_key для нового сегмента
+    3. Активировать ключ в каждом целевом кабинете
     """
-    user_id = str(payload.get("userId", "")).strip()
-    source_token = str(payload.get("source_token", "")).strip()
-    object_type = str(payload.get("object_type", "lists")).strip()
-    raw_ids = payload.get("object_ids") or []
-    merge_name = str(payload.get("merge_name", "Парсер аудитория")).strip()
+    user_id            = str(payload.get("userId", "")).strip()
+    source_token       = str(payload.get("source_token", "")).strip()
+    object_type        = str(payload.get("object_type", "lists")).strip()
+    raw_ids            = payload.get("object_ids") or []
+    merge_name         = str(payload.get("merge_name", "Парсер аудитория")).strip() or "Парсер аудитория"
     target_cabinet_ids = [str(x) for x in (payload.get("target_cabinet_ids") or [])]
 
     if not source_token:
@@ -3908,8 +3903,6 @@ def parser_merge_and_share(payload: dict):
         raise HTTPException(400, "object_ids required")
     if not target_cabinet_ids:
         raise HTTPException(400, "target_cabinet_ids required")
-    if not merge_name:
-        merge_name = "Парсер аудитория"
 
     try:
         object_ids = [int(x) for x in raw_ids]
@@ -3922,15 +3915,103 @@ def parser_merge_and_share(payload: dict):
         "Accept": "application/json",
     }
 
+    # ── ШАГ 1: Создать объединённый сегмент в кабинете-источнике ──────────────
+    if object_type == "lists":
+        # Списки → remarketing_users_list
+        relations = [
+            {"object_type": "remarketing_users_list",
+             "params": {"source_id": oid, "type": "positive"}}
+            for oid in object_ids
+        ]
+    else:
+        # Аудитории/сегменты → remarketing_segment
+        relations = [
+            {"object_type": "remarketing_segment",
+             "params": {"source_id": oid, "type": "positive"}}
+            for oid in object_ids
+        ]
+
+    seg_body = {
+        "name": merge_name,
+        "relations": relations,
+        "pass_condition": 1,  # логическое ИЛИ — достаточно попасть в один из источников
+    }
+
+    try:
+        seg_resp = requests.post(
+            "https://ads.vk.com/api/v2/remarketing/segments.json",
+            headers=src_headers,
+            data=json.dumps(seg_body),
+            timeout=30,
+        )
+        seg_data = seg_resp.json() if seg_resp.content else {}
+        if seg_resp.status_code != 200:
+            log_error(f"parser create_segment failed: {seg_data}")
+            return JSONResponse(status_code=502, content={
+                "status": "error",
+                "step": "create_segment",
+                "error": seg_data,
+            })
+    except Exception as e:
+        log_error(f"parser create_segment request error: {repr(e)}")
+        raise HTTPException(500, f"Ошибка создания сегмента: {str(e)}")
+
+    # Извлекаем id нового сегмента — VK может вернуть его по-разному
+    segment_id = (
+        seg_data.get("id")
+        or (seg_data.get("segment") or {}).get("id")
+        or (seg_data.get("data") or {}).get("id")
+    )
+    if not segment_id:
+        log_error(f"parser create_segment: no segment id in response: {seg_data}")
+        return JSONResponse(status_code=502, content={
+            "status": "error",
+            "step": "create_segment",
+            "error": f"Сегмент создан, но id не найден в ответе VK: {seg_data}",
+        })
+
+    segment_id = int(segment_id)
+
+    # ── ШАГ 2 & 3: Создать sharing_key и активировать в каждом целевом кабинете ──
     results = []
 
-    # Для каждого целевого кабинета:
-    # 1. Создать sharing_key из источника
-    # 2. Активировать ключ в целевом кабинете
+    # Создаём один ключ для сегмента (один раз, не в цикле)
+    try:
+        share_resp = requests.post(
+            "https://ads.vk.com/api/v2/sharing_keys.json",
+            headers=src_headers,
+            json={
+                "sources": [{"object_type": "remarketing_segment", "object_id": segment_id}],
+                "users": [],
+                "send_email": False,
+            },
+            timeout=30,
+        )
+        share_data = share_resp.json() if share_resp.content else {}
+        if share_resp.status_code != 200:
+            log_error(f"parser sharing_key failed: {share_data}")
+            return JSONResponse(status_code=502, content={
+                "status": "error",
+                "step": "create_sharing_key",
+                "segment_id": segment_id,
+                "error": share_data,
+            })
+        sharing_key = share_data.get("sharing_key")
+        if not sharing_key:
+            return JSONResponse(status_code=502, content={
+                "status": "error",
+                "step": "create_sharing_key",
+                "segment_id": segment_id,
+                "error": f"Нет sharing_key в ответе VK: {share_data}",
+            })
+    except Exception as e:
+        log_error(f"parser sharing_key request error: {repr(e)}")
+        raise HTTPException(500, f"Ошибка создания ключа: {str(e)}")
+
+    # Активируем ключ в каждом целевом кабинете
     for target_cab_id in target_cabinet_ids:
         step = "lookup_target"
         try:
-            # Найти токен целевого кабинета у любого пользователя
             target_token = None
             for u_dir in USERS_DIR.iterdir():
                 if not u_dir.is_dir():
@@ -3940,8 +4021,8 @@ def parser_merge_and_share(payload: dict):
                 if not info_file.exists():
                     continue
                 try:
-                    data = json.loads(info_file.read_text(encoding="utf-8"))
-                    cab = next((c for c in data.get("cabinets", []) if str(c.get("id")) == target_cab_id), None)
+                    udata = json.loads(info_file.read_text(encoding="utf-8"))
+                    cab = next((c for c in udata.get("cabinets", []) if str(c.get("id")) == target_cab_id), None)
                     if cab and cab.get("token"):
                         tok_env = os.getenv(cab["token"])
                         if tok_env:
@@ -3951,7 +4032,8 @@ def parser_merge_and_share(payload: dict):
                     continue
 
             if not target_token:
-                results.append({"cabinet_id": target_cab_id, "status": "error", "error": "Токен кабинета не найден"})
+                results.append({"cabinet_id": target_cab_id, "status": "error",
+                                 "error": "Токен кабинета не найден"})
                 continue
 
             target_headers = {
@@ -3960,28 +4042,6 @@ def parser_merge_and_share(payload: dict):
                 "Accept": "application/json",
             }
 
-            # 1. Создать sharing key из источника
-            step = "create_sharing_key"
-            vk_type = "users_list" if object_type == "lists" else "remarketing_segment"
-            sources = [{"object_type": vk_type, "object_id": oid} for oid in object_ids]
-            share_resp = requests.post(
-                "https://ads.vk.com/api/v2/sharing_keys.json",
-                headers=src_headers,
-                json={"sources": sources, "users": [], "send_email": False},
-                timeout=30,
-            )
-            if share_resp.status_code != 200:
-                err = share_resp.json() if share_resp.content else {"raw": share_resp.text[:300]}
-                results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": err})
-                continue
-
-            share_data = share_resp.json()
-            sharing_key = share_data.get("sharing_key")
-            if not sharing_key:
-                results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": "Нет sharing_key в ответе VK"})
-                continue
-
-            # 2. Активировать ключ в целевом кабинете
             step = "activate_sharing_key"
             act_resp = requests.post(
                 f"https://ads.vk.com/api/v2/sharing_keys/{sharing_key}.json",
@@ -3991,23 +4051,26 @@ def parser_merge_and_share(payload: dict):
             )
             act_data = act_resp.json() if act_resp.content else {}
             if act_resp.status_code != 200:
-                results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": act_data})
+                results.append({"cabinet_id": target_cab_id, "status": "error",
+                                 "step": step, "error": act_data})
                 continue
 
             results.append({
                 "cabinet_id": target_cab_id,
                 "status": "ok",
-                "sharing_key": sharing_key,
                 "activate_response": act_data,
             })
 
         except Exception as e:
             log_error(f"parser_merge_and_share error cab={target_cab_id} step={step}: {repr(e)}")
-            results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": str(e)})
+            results.append({"cabinet_id": target_cab_id, "status": "error",
+                             "step": step, "error": str(e)})
 
     all_ok = all(r["status"] == "ok" for r in results)
     return {
         "status": "ok" if all_ok else ("partial" if any(r["status"] == "ok" for r in results) else "error"),
+        "segment_id": segment_id,
+        "sharing_key": sharing_key,
         "results": results,
     }
 
@@ -4266,6 +4329,87 @@ def run_scheduled_parser_jobs():
             ran.append({"job_id": job_id, "results": [], "fetch_error": "Нет объектов, подходящих под фильтры"})
             continue
 
+        # ── ШАГ 1: Создать объединённый сегмент в кабинете-источнике ──────────
+        if object_type == "lists":
+            relations = [
+                {"object_type": "remarketing_users_list",
+                 "params": {"source_id": oid, "type": "positive"}}
+                for oid in object_ids
+            ]
+        else:
+            relations = [
+                {"object_type": "remarketing_segment",
+                 "params": {"source_id": oid, "type": "positive"}}
+                for oid in object_ids
+            ]
+
+        seg_name = merge_name or "Парсер аудитория"
+        try:
+            seg_resp = requests.post(
+                "https://ads.vk.com/api/v2/remarketing/segments.json",
+                headers=src_headers,
+                data=json.dumps({"name": seg_name, "relations": relations, "pass_condition": 1}),
+                timeout=30,
+            )
+            seg_data = seg_resp.json() if seg_resp.content else {}
+            if seg_resp.status_code != 200:
+                log_error(f"run_scheduled_parser job={job_id}: create_segment failed: {seg_data}")
+                job["last_run_date"] = today_str
+                job["last_run_status"] = "error"
+                ran.append({"job_id": job_id, "results": [], "fetch_error": f"Ошибка создания сегмента: {seg_data}"})
+                continue
+            segment_id = (
+                seg_data.get("id")
+                or (seg_data.get("segment") or {}).get("id")
+                or (seg_data.get("data") or {}).get("id")
+            )
+            if not segment_id:
+                log_error(f"run_scheduled_parser job={job_id}: no segment_id in response: {seg_data}")
+                job["last_run_date"] = today_str
+                job["last_run_status"] = "error"
+                ran.append({"job_id": job_id, "results": [], "fetch_error": f"Не удалось получить id сегмента: {seg_data}"})
+                continue
+            segment_id = int(segment_id)
+        except Exception as e:
+            log_error(f"run_scheduled_parser job={job_id}: create_segment exception: {repr(e)}")
+            job["last_run_date"] = today_str
+            job["last_run_status"] = "error"
+            ran.append({"job_id": job_id, "results": [], "fetch_error": str(e)})
+            continue
+
+        # ── ШАГ 2: Создать sharing_key для нового сегмента (один раз) ──────────
+        try:
+            share_resp = requests.post(
+                "https://ads.vk.com/api/v2/sharing_keys.json",
+                headers=src_headers,
+                json={
+                    "sources": [{"object_type": "remarketing_segment", "object_id": segment_id}],
+                    "users": [],
+                    "send_email": False,
+                },
+                timeout=30,
+            )
+            share_data = share_resp.json() if share_resp.content else {}
+            if share_resp.status_code != 200:
+                log_error(f"run_scheduled_parser job={job_id}: sharing_key failed: {share_data}")
+                job["last_run_date"] = today_str
+                job["last_run_status"] = "error"
+                ran.append({"job_id": job_id, "results": [], "fetch_error": f"Ошибка создания ключа: {share_data}"})
+                continue
+            sharing_key = share_data.get("sharing_key")
+            if not sharing_key:
+                job["last_run_date"] = today_str
+                job["last_run_status"] = "error"
+                ran.append({"job_id": job_id, "results": [], "fetch_error": "Нет sharing_key в ответе VK"})
+                continue
+        except Exception as e:
+            log_error(f"run_scheduled_parser job={job_id}: sharing_key exception: {repr(e)}")
+            job["last_run_date"] = today_str
+            job["last_run_status"] = "error"
+            ran.append({"job_id": job_id, "results": [], "fetch_error": str(e)})
+            continue
+
+        # ── ШАГ 3: Активировать ключ в каждом целевом кабинете ─────────────────
         job_results = []
         for target_cab_id in target_cabinet_ids:
             step = "lookup"
@@ -4279,8 +4423,8 @@ def run_scheduled_parser_jobs():
                     if not info_file.exists():
                         continue
                     try:
-                        data = json.loads(info_file.read_text(encoding="utf-8"))
-                        cab = next((c for c in data.get("cabinets", []) if str(c.get("id")) == target_cab_id), None)
+                        udata = json.loads(info_file.read_text(encoding="utf-8"))
+                        cab = next((c for c in udata.get("cabinets", []) if str(c.get("id")) == target_cab_id), None)
                         if cab and cab.get("token"):
                             tok_env = os.getenv(cab["token"])
                             if tok_env:
@@ -4298,24 +4442,6 @@ def run_scheduled_parser_jobs():
                     "Content-Type": "application/json",
                 }
 
-                step = "create_sharing_key"
-                vk_type = "users_list" if object_type == "lists" else "remarketing_segment"
-                sources = [{"object_type": vk_type, "object_id": oid} for oid in object_ids]
-                share_resp = requests.post(
-                    "https://ads.vk.com/api/v2/sharing_keys.json",
-                    headers=src_headers,
-                    json={"sources": sources, "users": [], "send_email": False},
-                    timeout=30,
-                )
-                if share_resp.status_code != 200:
-                    job_results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": share_resp.text[:300]})
-                    continue
-
-                sharing_key = share_resp.json().get("sharing_key")
-                if not sharing_key:
-                    job_results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": "Нет sharing_key"})
-                    continue
-
                 step = "activate"
                 act_resp = requests.post(
                     f"https://ads.vk.com/api/v2/sharing_keys/{sharing_key}.json",
@@ -4324,7 +4450,8 @@ def run_scheduled_parser_jobs():
                     timeout=30,
                 )
                 if act_resp.status_code != 200:
-                    job_results.append({"cabinet_id": target_cab_id, "status": "error", "step": step, "error": act_resp.text[:300]})
+                    job_results.append({"cabinet_id": target_cab_id, "status": "error",
+                                        "step": step, "error": act_resp.text[:300]})
                     continue
 
                 job_results.append({"cabinet_id": target_cab_id, "status": "ok"})
@@ -6204,7 +6331,6 @@ ai_claude_logs_router = build_ai_claude_logs_router(
     base_dir=BASE_DIR,
 )
 app.include_router(ai_claude_logs_router)
-
 ai_claude_extra_router = build_ai_claude_extra_router(
     require_user_dep=require_tg_user,
     users_dir=USERS_DIR,
