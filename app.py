@@ -8,6 +8,7 @@ from io import BytesIO
 from PIL import Image
 from auto_ads.app_ai_claude import build_router as build_ai_claude_router
 from auto_ads.app_ai_claude_logs import build_router as build_ai_claude_logs_router
+from auto_ads.app_ai_claude_extra import build_router as build_ai_claude_extra_router
 import hmac, hashlib
 import requests
 import subprocess
@@ -6203,6 +6204,13 @@ ai_claude_logs_router = build_ai_claude_logs_router(
     base_dir=BASE_DIR,
 )
 app.include_router(ai_claude_logs_router)
+
+ai_claude_extra_router = build_ai_claude_extra_router(
+    require_user_dep=require_tg_user,
+    users_dir=USERS_DIR,
+    base_dir=BASE_DIR,
+)
+app.include_router(ai_claude_extra_router)
 # ВАЖНО: Все API роутеры должны быть включены ДО mount статики!
 # auth_router - без защиты, для веб-авторизации
 app.include_router(auth_router)
