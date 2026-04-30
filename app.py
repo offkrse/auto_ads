@@ -26,7 +26,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "2.091"
+VersionApp = "2.092"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -4288,15 +4288,27 @@ def _run_scheduled_parser_jobs_impl():
     jobs = read_parser_jobs()
     ran = []
     errors = []
+    skipped = []  # подробно — почему пропущено
 
     for job in jobs:
+        job_id = job.get("job_id", "?")
+
         if not job.get("enabled"):
+            skipped.append({"job_id": job_id, "reason": "disabled"})
             continue
+
         sched = job.get("schedule_time_utc", "")
-        if not sched or sched != now_hhmm:
+        if not sched:
+            skipped.append({"job_id": job_id, "reason": "no schedule_time_utc"})
             continue
+
+        if sched != now_hhmm:
+            skipped.append({"job_id": job_id, "reason": f"time mismatch: job={sched} now={now_hhmm}"})
+            continue
+
         if job.get("last_run_date") == today_str:
-            continue  # уже запускалось сегодня
+            skipped.append({"job_id": job_id, "reason": f"already ran today ({today_str})"})
+            continue
 
         job_id = job["job_id"]
         user_id = job["user_id"]
@@ -4495,7 +4507,15 @@ def _run_scheduled_parser_jobs_impl():
         ran.append({"job_id": job_id, "results": job_results})
 
     write_parser_jobs(jobs)
-    return {"status": "ok", "ran": ran, "errors": errors}
+    return {
+        "status": "ok",
+        "now_utc": now_hhmm,
+        "today": today_str,
+        "total_jobs": len(jobs),
+        "ran": ran,
+        "skipped": skipped,
+        "errors": errors,
+    }
 
 
 # -------------------------------------
