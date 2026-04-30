@@ -26,7 +26,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "2.09"
+VersionApp = "2.091"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -4256,6 +4256,24 @@ def delete_parser_job(payload: dict):
 @secure_api.post("/vk/parser/jobs/run_scheduled")
 @secure_auto.post("/vk/parser/jobs/run_scheduled")
 def run_scheduled_parser_jobs():
+    return _run_scheduled_parser_jobs_impl()
+
+
+PARSER_CRON_SECRET = os.getenv("PARSER_CRON_SECRET", "")
+
+@app.post("/internal/parser/run_scheduled")
+def run_scheduled_parser_jobs_cron(request: Request):
+    """
+    Публичный эндпоинт для cron — защищён секретом из .env PARSER_CRON_SECRET.
+    curl -s -X POST https://domain/auto_ads/internal/parser/run_scheduled?secret=XXX
+    """
+    secret = request.query_params.get("secret", "")
+    if not PARSER_CRON_SECRET or secret != PARSER_CRON_SECRET:
+        raise HTTPException(403, "Forbidden")
+    return _run_scheduled_parser_jobs_impl()
+
+
+def _run_scheduled_parser_jobs_impl():
     """
     Вызывается внешним cron-скриптом (например, каждую минуту).
     Проверяет все задачи с enabled=true, сравнивает schedule_time_utc
