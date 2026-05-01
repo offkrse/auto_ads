@@ -26,7 +26,7 @@ import pandas as pd
 
 app = FastAPI()
 
-VersionApp = "2.092"
+VersionApp = "2.1"
 BASE_DIR = Path("/opt/auto_ads")
 USERS_DIR = BASE_DIR / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3880,6 +3880,42 @@ def parser_fetch_objects(payload: dict):
     return {"items": items, "count": len(items), "resolved_filters": resolved_filters, "matched_ids": apply_name_filters(raw_filters, items)}
 
 
+def create_sharing_key_with_fallback(src_headers: dict, segment_id: int) -> tuple[str | None, list]:
+    """
+    Перебирает все разрешённые VK object_type для сегментов пока не получит sharing_key.
+    Возвращает (sharing_key | None, список попыток с результатами).
+    """
+    # Типы в порядке приоритета — от наиболее вероятного для remarketing-сегментов
+    candidate_types = [
+        "custom_audience",
+        "segment",
+        "lookalike_audience",
+    ]
+    attempts = []
+    for obj_type in candidate_types:
+        try:
+            resp = requests.post(
+                "https://ads.vk.com/api/v2/sharing_keys.json",
+                headers=src_headers,
+                json={
+                    "sources": [{"object_type": obj_type, "object_id": segment_id}],
+                    "users": [],
+                    "send_email": False,
+                },
+                timeout=30,
+            )
+            data = resp.json() if resp.content else {}
+            log_error(f"sharing_key_fallback object_type={obj_type} segment_id={segment_id} status={resp.status_code} response={data}")
+            attempt = {"object_type": obj_type, "status": resp.status_code, "response": data}
+            attempts.append(attempt)
+            if resp.status_code == 200 and data.get("sharing_key"):
+                return data["sharing_key"], attempts
+        except Exception as e:
+            log_error(f"sharing_key_fallback object_type={obj_type} exception: {repr(e)}")
+            attempts.append({"object_type": obj_type, "error": str(e)})
+    return None, attempts
+
+
 @secure_api.post("/vk/parser/merge_and_share")
 @secure_auto.post("/vk/parser/merge_and_share")
 def parser_merge_and_share(payload: dict):
@@ -3895,6 +3931,7 @@ def parser_merge_and_share(payload: dict):
     object_type        = str(payload.get("object_type", "lists")).strip()
     raw_ids            = payload.get("object_ids") or []
     merge_name         = str(payload.get("merge_name", "Парсер аудитория")).strip() or "Парсер аудитория"
+    merge_name         = resolve_filter_template(merge_name)
     target_cabinet_ids = [str(x) for x in (payload.get("target_cabinet_ids") or [])]
 
     if not source_token:
@@ -3975,37 +4012,16 @@ def parser_merge_and_share(payload: dict):
     # ── ШАГ 2 & 3: Создать sharing_key и активировать в каждом целевом кабинете ──
     results = []
 
-    # Создаём один ключ для сегмента (один раз, не в цикле)
+    # Создаём один ключ для сегмента с перебором типов
     try:
-        share_payload = {
-            "sources": [{"object_type": "segment", "object_id": segment_id}],
-            "users": [],
-            "send_email": False,
-        }
-        share_resp = requests.post(
-            "https://ads.vk.com/api/v2/sharing_keys.json",
-            headers=src_headers,
-            json=share_payload,
-            timeout=30,
-        )
-        share_data = share_resp.json() if share_resp.content else {}
-        log_error(f"parser sharing_key status={share_resp.status_code} payload={share_payload} response={share_data}")
-        if share_resp.status_code != 200:
-            return JSONResponse(status_code=502, content={
-                "status": "error",
-                "step": "create_sharing_key",
-                "segment_id": segment_id,
-                "vk_status": share_resp.status_code,
-                "vk_response": share_data,
-            })
-        sharing_key = share_data.get("sharing_key")
+        sharing_key, attempts = create_sharing_key_with_fallback(src_headers, segment_id)
         if not sharing_key:
             return JSONResponse(status_code=502, content={
                 "status": "error",
                 "step": "create_sharing_key",
                 "segment_id": segment_id,
-                "error": f"Нет sharing_key в ответе VK",
-                "vk_response": share_data,
+                "error": "Не удалось создать sharing_key ни с одним object_type",
+                "attempts": attempts,
             })
     except Exception as e:
         log_error(f"parser sharing_key request error: {repr(e)}")
@@ -4098,27 +4114,47 @@ def resolve_filter_template(s: str, now_utc4: "datetime | None" = None) -> str:
     Раскрывает шаблоны в строке фильтра.
     Поддерживаемые шаблоны:
       {СЕГОДНЯ}              → YYYY-MM-DD  (UTC+4)
-      {СЕГОДНЯ(YYYY-MM-DD)}  → YYYY-MM-DD  (произвольный strftime-формат)
+      {СЕГОДНЯ(YYYY-MM-DD)}  → произвольный strftime-формат
       {ВЧЕРА}                → вчера UTC+4
       {ВЧЕРА(fmt)}
       {ЗАВТРА}               → завтра UTC+4
       {ЗАВТРА(fmt)}
+      {ДЕНЬ}                 → порядковый номер дня (23.05.2025 = день 1)
+      {ДЕНЬ(-1)}             → вчерашний номер дня
+      {ДЕНЬ(+1)}             → завтрашний номер дня
     """
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone, timedelta, date as _date
     if now_utc4 is None:
         now_utc4 = datetime.now(timezone.utc) + timedelta(hours=4)
 
+    # Точка отсчёта: 23.05.2025 = день 1
+    _DAY_ORIGIN = _date(2025, 5, 23)
+
+    def _day_number(dt) -> int:
+        d = dt.date() if hasattr(dt, 'date') else dt
+        return (d - _DAY_ORIGIN).days + 1
+
     def _replace(m: "_re.Match") -> str:
-        keyword = m.group(1).upper()   # СЕГОДНЯ / ВЧЕРА / ЗАВТРА
-        fmt     = m.group(2)           # None или строка формата
+        keyword = m.group(1).upper()
+        fmt     = m.group(2)           # None или строка формата / смещение
         if keyword in ("СЕГОДНЯ", "TODAY"):
             dt = now_utc4
         elif keyword in ("ВЧЕРА", "YESTERDAY"):
             dt = now_utc4 - timedelta(days=1)
         elif keyword in ("ЗАВТРА", "TOMORROW"):
             dt = now_utc4 + timedelta(days=1)
+        elif keyword in ("ДЕНЬ", "DAY"):
+            # fmt может быть "+1", "-1", "-2" и т.д. или None
+            offset = 0
+            if fmt:
+                try:
+                    offset = int(fmt)
+                except ValueError:
+                    pass
+            target = now_utc4 + timedelta(days=offset)
+            return str(_day_number(target))
         else:
-            return m.group(0)  # неизвестный — оставить как есть
+            return m.group(0)
         fmt = fmt or "YYYY-MM-DD"
         # Конвертируем нашу нотацию в strftime
         strfmt = (fmt
@@ -4132,9 +4168,9 @@ def resolve_filter_template(s: str, now_utc4: "datetime | None" = None) -> str:
         )
         return dt.strftime(strfmt)
 
-    # Pattern: {KEYWORD} or {KEYWORD(format)}
+    # Pattern: {KEYWORD} or {KEYWORD(format/offset)}
     pattern = _re.compile(
-        r'\{(СЕГОДНЯ|TODAY|ВЧЕРА|YESTERDAY|ЗАВТРА|TOMORROW)(?:\(([^)]*)\))?\}',
+        r'\{(СЕГОДНЯ|TODAY|ВЧЕРА|YESTERDAY|ЗАВТРА|TOMORROW|ДЕНЬ|DAY)(?:\(([^)]*)\))?\}',
         _re.IGNORECASE
     )
     return pattern.sub(_replace, s)
@@ -4261,11 +4297,11 @@ def run_scheduled_parser_jobs():
 
 PARSER_CRON_SECRET = os.getenv("PARSER_CRON_SECRET", "")
 
-@app.post("/internal/parser/run_scheduled")
+@app.post("/api/internal/parser/run_scheduled")
 def run_scheduled_parser_jobs_cron(request: Request):
     """
     Публичный эндпоинт для cron — защищён секретом из .env PARSER_CRON_SECRET.
-    curl -s -X POST https://domain/auto_ads/internal/parser/run_scheduled?secret=XXX
+    curl -s -X POST https://domain/auto_ads/api/internal/parser/run_scheduled?secret=XXX
     """
     secret = request.query_params.get("secret", "")
     if not PARSER_CRON_SECRET or secret != PARSER_CRON_SECRET:
@@ -4383,7 +4419,7 @@ def _run_scheduled_parser_jobs_impl():
                 for oid in object_ids
             ]
 
-        seg_name = merge_name or "Парсер аудитория"
+        seg_name = resolve_filter_template(merge_name or "Парсер аудитория", now_utc4)
         try:
             seg_resp = requests.post(
                 "https://ads.vk.com/api/v2/remarketing/segments.json",
@@ -4419,28 +4455,12 @@ def _run_scheduled_parser_jobs_impl():
 
         # ── ШАГ 2: Создать sharing_key для нового сегмента (один раз) ──────────
         try:
-            share_resp = requests.post(
-                "https://ads.vk.com/api/v2/sharing_keys.json",
-                headers=src_headers,
-                json={
-                    "sources": [{"object_type": "remarketing_segment", "object_id": segment_id}],
-                    "users": [],
-                    "send_email": False,
-                },
-                timeout=30,
-            )
-            share_data = share_resp.json() if share_resp.content else {}
-            if share_resp.status_code != 200:
-                log_error(f"run_scheduled_parser job={job_id}: sharing_key failed: {share_data}")
-                job["last_run_date"] = today_str
-                job["last_run_status"] = "error"
-                ran.append({"job_id": job_id, "results": [], "fetch_error": f"Ошибка создания ключа: {share_data}"})
-                continue
-            sharing_key = share_data.get("sharing_key")
+            sharing_key, attempts = create_sharing_key_with_fallback(src_headers, segment_id)
             if not sharing_key:
+                log_error(f"run_scheduled_parser job={job_id}: all sharing_key attempts failed: {attempts}")
                 job["last_run_date"] = today_str
                 job["last_run_status"] = "error"
-                ran.append({"job_id": job_id, "results": [], "fetch_error": "Нет sharing_key в ответе VK"})
+                ran.append({"job_id": job_id, "results": [], "fetch_error": f"Не удалось создать sharing_key: {attempts}"})
                 continue
         except Exception as e:
             log_error(f"run_scheduled_parser job={job_id}: sharing_key exception: {repr(e)}")
