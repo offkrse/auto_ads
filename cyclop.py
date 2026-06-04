@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.82"
+VersionCyclop = "1.83"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -4192,17 +4192,19 @@ def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str], advertise
 def process_ai_queue() -> None:
     """
     Обрабатывает JSON файлы из /opt/auto_ads/data/ai_queue/
-    
-    Файлы имеют формат: {cabinet_name}_{user_id}_{timestamp}.json
-    Пример: MAIN_1_20260224_214103.json
-    
+
+    Поддерживаются два формата расположения файлов:
+      Плоский (legacy):    ai_queue/{cabinet_name}_{timestamp}.json
+      По папкам (новый):   ai_queue/{user_id}/{cabinet_id}/{filename}.json
+
     time_start указано в UTC+3, cyclop работает на UTC+4,
     поэтому конвертируем время прибавляя 1 час.
     """
     if not AI_QUEUE_DIR.exists():
         return
-    
-    json_files = list(AI_QUEUE_DIR.glob("*.json"))
+
+    # Плоские файлы (обратная совместимость) + файлы в подпапках {user_id}/{cabinet_id}/
+    json_files = list(AI_QUEUE_DIR.glob("*.json")) + list(AI_QUEUE_DIR.glob("*/*/*.json"))
     if not json_files:
         return
     
@@ -4248,54 +4250,56 @@ def process_ai_queue() -> None:
             
             log.info("[AI_QUEUE MATCH] %s | file=%s | trigger=%s -> %s | processing...",
                      cabinet_name, json_file.name, time_start_utc3, trigger_time)
+
+            # done-папка: для подпапочных файлов сохраняем структуру {user_id}/{cabinet_id}/
+            rel = json_file.relative_to(AI_QUEUE_DIR)
+            done_subdir = AI_QUEUE_DONE_DIR / rel.parent if rel.parent != Path(".") else AI_QUEUE_DONE_DIR
+            done_subdir.mkdir(parents=True, exist_ok=True)
             
             # Получаем токены для кабинета
             tokens = get_tokens_for_cabinet(user_id, cabinet_id)
             if not tokens:
                 log.error("AI Queue: no tokens for user=%s cabinet=%s", user_id, cabinet_id)
-                # Перемещаем файл в done с ошибкой
-                error_file = AI_QUEUE_DONE_DIR / f"ERROR_NO_TOKEN_{json_file.name}"
+                error_file = done_subdir / f"ERROR_NO_TOKEN_{json_file.name}"
                 json_file.rename(error_file)
                 continue
-            
+
             # Получаем advertiserInfo из info_banners_ai файла
             advertiser_info = get_ai_advertiser_info(user_id, cabinet_id)
-            
+
             # Строим payload
             payload = build_ai_queue_payload(ai_data, tokens, advertiser_info, cabinet_id)
             if not payload:
                 log.error("AI Queue: failed to build payload for %s", json_file.name)
-                error_file = AI_QUEUE_DONE_DIR / f"ERROR_PAYLOAD_{json_file.name}"
+                error_file = done_subdir / f"ERROR_PAYLOAD_{json_file.name}"
                 json_file.rename(error_file)
                 continue
-            
+
             # Отправляем в VK API
             endpoint = f"{API_BASE}/api/v2/ad_plans.json"
-            
+
             if DEBUG_DRY_RUN:
                 log.warning("[DRY RUN] AI Queue: would POST to %s", endpoint)
                 log.info("Payload: %s", json.dumps(payload, ensure_ascii=False, indent=2)[:2000])
-                # Перемещаем в done
-                done_file = AI_QUEUE_DONE_DIR / f"DRYRUN_{json_file.name}"
+                done_file = done_subdir / f"DRYRUN_{json_file.name}"
                 json_file.rename(done_file)
                 continue
-            
+
             if DEBUG_SAVE_PAYLOAD:
-                debug_file = AI_QUEUE_DONE_DIR / f"DEBUG_PAYLOAD_{json_file.name}"
+                debug_file = done_subdir / f"DEBUG_PAYLOAD_{json_file.name}"
                 with open(debug_file, "w", encoding="utf-8") as f:
                     json.dump(payload, f, ensure_ascii=False, indent=2)
-            
+
             try:
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 response = with_retries("POST", endpoint, tokens, data=body, timeout=VK_HTTP_TIMEOUT_POST)
-                
+
                 company_id = response.get("id", 0)
                 campaigns = response.get("campaigns", [])
-                
+
                 log.info("AI Queue SUCCESS: file=%s | company_id=%s | groups=%d",
                          json_file.name, company_id, len(campaigns))
-                
-                # Записываем результат успеха
+
                 company_name = first_banner.get("name_company", "AI Кампания")
                 write_result_success(
                     user_id, cabinet_id,
@@ -4304,14 +4308,13 @@ def process_ai_queue() -> None:
                     trigger_time=trigger_time,
                     id_company=[company_id] if company_id else []
                 )
-                
-                # Перемещаем файл в done
-                done_file = AI_QUEUE_DONE_DIR / f"SUCCESS_{json_file.name}"
+
+                done_file = done_subdir / f"SUCCESS_{json_file.name}"
                 json_file.rename(done_file)
-                
+
             except Exception as e:
                 log.exception("AI Queue API error for %s: %s", json_file.name, e)
-                
+
                 company_name = first_banner.get("name_company", "AI Кампания")
                 write_result_error(
                     user_id, cabinet_id,
@@ -4321,14 +4324,12 @@ def process_ai_queue() -> None:
                     human="Ошибка создания AI кампании",
                     tech=repr(e)
                 )
-                
-                # Перемещаем файл в done с ошибкой
-                error_file = AI_QUEUE_DONE_DIR / f"ERROR_API_{json_file.name}"
+
+                error_file = done_subdir / f"ERROR_API_{json_file.name}"
                 json_file.rename(error_file)
-                
+
         except Exception as e:
             log.exception("AI Queue file processing error %s: %s", json_file.name, e)
-            # Перемещаем с ошибкой
             try:
                 error_file = AI_QUEUE_DONE_DIR / f"ERROR_PARSE_{json_file.name}"
                 json_file.rename(error_file)
