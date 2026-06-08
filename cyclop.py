@@ -21,7 +21,7 @@ from filelock import FileLock
 from dotenv import dotenv_values
 
 # ============================ Пути/конфигурация ============================
-VersionCyclop = "1.83"
+VersionCyclop = "1.84"
 
 GLOBAL_QUEUE_PATH = Path("/opt/auto_ads/data/global_queue.json")
 USERS_ROOT = Path("/opt/auto_ads/users")
@@ -1749,7 +1749,7 @@ def make_banner_for_creative(url_id: int,
     long_text = (ad.get("longDescription") or "").strip()
                                  
     if not advertiser_info:
-        raise ValueError("Отсутствует advertiserInfo (about_company_115).")
+        log.info("Banner #%d: advertiserInfo отсутствует — about_company_115 не будет добавлен", idx)
     if not icon_id:
         raise ValueError("Отсутствует logoId (icon_256x256.id).")
 
@@ -1778,31 +1778,34 @@ def make_banner_for_creative(url_id: int,
     
     if objective == "leadads":
         textblocks = {
-            "about_company_115": {"text": advertiser_info, "title": ""},
             "cta_leadads": {"text": (cta_text or "sendRequest"), "title": ""},
             "text_90": {"text": short, "title": ""},
             "text_220": {"text": long_text, "title": ""},
             "title_40_vkads": {"text": title, "title": ""},
         }
+        if advertiser_info:
+            textblocks["about_company_115"] = {"text": advertiser_info, "title": ""}
         # Добавляем title_30_additional если есть текст на кнопке
         if button_text:
             textblocks["title_30_additional"] = {"text": button_text, "title": ""}
             log.info("Banner #%d: added title_30_additional='%s'", idx, button_text)
     elif objective == "site_conversions":
         textblocks = {
-            "about_company_115": {"text": advertiser_info, "title": ""},
             "cta_sites_full": {"text": (cta_text or "visitSite"), "title": ""},
             "text_90": {"text": short, "title": ""},
             "text_long": {"text": long_text, "title": ""},
             "title_40_vkads": {"text": title, "title": ""},
         }
+        if advertiser_info:
+            textblocks["about_company_115"] = {"text": advertiser_info, "title": ""}
     else:
         textblocks = {
-            "about_company_115": {"text": advertiser_info, "title": ""},
             "cta_community_vk": {"text": (cta_text or "visitSite"), "title": ""},
             "text_2000": {"text": short, "title": ""},
             "title_40_vkads": {"text": title, "title": ""},
         }
+        if advertiser_info:
+            textblocks["about_company_115"] = {"text": advertiser_info, "title": ""}
                                  
     return {
         "name": banner_name,
@@ -2341,10 +2344,7 @@ def create_ad_plan(preset: Dict[str, Any], tokens: List[str], repeats: int,
         adv_info = (ad.get("advertiserInfo") or company_adv or "").strip()
         icon_id = ad.get("logoId") or company_logo
         if not adv_info:
-            write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                               f"В объявлении #{gi + 1} отсутствует 'advertiserInfo' и не задан в company",
-                               f"Missing ads[{gi}].advertiserInfo and company.advertiserInfo")
-            raise RuntimeError("missing advertiserInfo")
+            log.info("ads[%d]: advertiserInfo отсутствует — about_company_115 не будет добавлен", gi)
         if not icon_id:
             write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
                                f"В объявлении #{gi + 1} отсутствует 'logoId' и не задан в company",
@@ -2812,11 +2812,13 @@ def create_ad_plan_fast(preset: Dict[str, Any], tokens: List[str], repeats: int,
             for ai, ad in enumerate(ads):
                 adv_info = (ad.get("advertiserInfo") or company_adv or "").strip()
                 icon_id = ad.get("logoId") or company_logo
-                if not adv_info or not icon_id:
+                if not adv_info:
+                    log.info("FAST: ads[%d] нет advertiserInfo — about_company_115 не будет добавлен", ai)
+                if not icon_id:
                     write_result_error(user_id, cabinet_id, preset_id, preset_name, trigger_time,
-                                       f"FAST: у ads[{ai}] нет advertiserInfo/logoId",
-                                       f"fast missing fields in ads[{ai}]")
-                    raise RuntimeError("fast missing fields")
+                                       f"FAST: у ads[{ai}] нет logoId",
+                                       f"fast missing logoId in ads[{ai}]")
+                    raise RuntimeError("fast missing logoId")
 
                 ad_tpl = (ad.get("adName") or f"Объявление {ai + 1}").strip()
                 btn = (ad.get("button") or "visitSite").strip()
@@ -3686,22 +3688,24 @@ def build_add_group_payload(preset: Dict[str, Any], new_media_id: str, segments:
         # Textblocks
         if objective == "leadads":
             textblocks = {
-                "about_company_115": {"text": adv_info, "title": ""},
                 "cta_leadads": {"text": cta, "title": ""},
                 "text_90": {"text": short_desc, "title": ""},
                 "text_220": {"text": long_desc, "title": ""},
                 "title_40_vkads": {"text": title, "title": ""},
             }
+            if adv_info:
+                textblocks["about_company_115"] = {"text": adv_info, "title": ""}
             if button_text:
                 textblocks["title_30_additional"] = {"text": button_text, "title": ""}
         else:
             textblocks = {
-                "about_company_115": {"text": adv_info, "title": ""},
                 "cta_sites_full": {"text": cta, "title": ""},
                 "text_90": {"text": short_desc, "title": ""},
                 "text_long": {"text": long_desc, "title": ""},
                 "title_40_vkads": {"text": title, "title": ""},
             }
+            if adv_info:
+                textblocks["about_company_115"] = {"text": adv_info, "title": ""}
         
         banner = {
             "name": ad.get("adName", "Объявление"),
@@ -4096,21 +4100,23 @@ def build_ai_queue_payload(ai_data: Dict[str, Any], tokens: List[str], advertise
             
             if objective_group == "leadads":
                 textblocks = {
-                    "about_company_115": {"text": advertiser_info, "title": ""},
                     "cta_leadads": {"text": cta, "title": ""},
                     "text_90": {"text": text_short, "title": ""},
                     "text_220": {"text": text_long, "title": ""},
                     "title_40_vkads": {"text": title, "title": ""},
                 }
+                if advertiser_info:
+                    textblocks["about_company_115"] = {"text": advertiser_info, "title": ""}
                 if text_additional:
                     textblocks["title_30_additional"] = {"text": text_additional, "title": ""}
             else:
                 textblocks = {
-                    "about_company_115": {"text": advertiser_info, "title": ""},
                     "cta_community_vk": {"text": cta, "title": ""},
                     "text_2000": {"text": text_short, "title": ""},
                     "title_40_vkads": {"text": title, "title": ""},
                 }
+                if advertiser_info:
+                    textblocks["about_company_115"] = {"text": advertiser_info, "title": ""}
             
             # URL для баннера
             b_url_id = banner.get("banner_url_id", "")
